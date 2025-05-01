@@ -1086,13 +1086,77 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    // Parse also the OAI "reasoning_effort": "none" specific value
-    if (body.contains("reasoning_effort")) {
-        auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));
-        if (reasoning_effort == "none") {
-            inputs.enable_thinking = false;
-        } // other reasoning_effort values are model-specific and not yet handled
+    int reasoning_budget = json_value(body, "reasoning_budget_tokens",
+                            json_value(body, "thinking_budget_tokens", -1));
+    if (reasoning_budget == -1) {
+        reasoning_budget = opt.reasoning_budget;
     }
+    const auto parse_effort = [&](const auto& effort) -> std::optional<int> {
+        if (effort == "none")
+            return 0;
+        float percent = 0.f;
+        if (effort == "auto" || effort == "default") percent = 0.f;
+        else if (effort == "xhigh") percent = 0.95f;
+        else if (effort == "high") percent = 0.80f;
+        else if (effort == "medium") percent = 0.50f;
+        else if (effort == "low") percent = 0.20f;
+        else if (effort == "minimal") percent = 0.10f;
+        else { LOG_WRN("ignore unknown reasoning.effort [%s]", effort.c_str()); }
+        if (percent > 0) {
+            auto max_output_tokens = body.value("max_tokens", 65536); // TODO use n_ctx ??
+            return static_cast<int>(max_output_tokens * percent);
+        }
+        return {};
+    };
+    // OpenRouter compatible API
+    if (reasoning_budget == -1 && body.contains("reasoning")) {
+        const auto& reasoning = body["reasoning"];
+
+        if (reasoning.is_boolean()) {
+            bool enabled = reasoning.get<bool>();
+            inputs.enable_thinking = enabled;
+        } else if (reasoning.is_object()) {
+            bool enabled = reasoning.value("enabled", true);
+            if (enabled) {
+                auto reasoning_max_tokens = reasoning.value("max_tokens", -1);
+                if (reasoning_max_tokens >= 0) {
+                    reasoning_budget = reasoning_max_tokens;
+                } else {
+                    const auto parsed = parse_effort(reasoning.value("effort", "auto"));
+                    if (parsed) {
+                        enabled = *parsed > 0;
+                        reasoning_budget = *parsed;
+                    }
+                }
+            }
+            inputs.enable_thinking = enabled;
+        }
+    }
+    if (reasoning_budget == -1 && body.contains("enable_thinking")) {
+        const auto& reasoning = body["enable_thinking"];
+        if (reasoning.is_boolean()) {
+            bool enabled = reasoning.get<bool>();
+            inputs.enable_thinking = enabled;
+        }
+    }
+    if (reasoning_budget == -1 && inputs.enable_thinking && body.contains("thinking_budget")) {
+        reasoning_budget = json_value(body, "thinking_budget", -1);
+    }
+    if (reasoning_budget == -1 && inputs.enable_thinking && body.contains("reasoning_effort")) {
+        const auto parsed = parse_effort(body.value("reasoning_effort", "auto"));
+        if (parsed) {
+            inputs.enable_thinking = *parsed > 0;
+            reasoning_budget = *parsed;
+        }
+    }
+    {
+        json dumpinfo = body;
+        dumpinfo.erase("messages");
+        dumpinfo.erase("model");
+        dumpinfo.erase("tools");
+        printf("==>request: %s\n", dumpinfo.dump().c_str());
+    }
+    
 
     inputs.force_pure_content = opt.force_pure_content;
 
@@ -1125,12 +1189,6 @@ json oaicompat_chat_params_parse(
 
     // Reasoning budget: pass parameters through to sampling layer
     {
-        int reasoning_budget = json_value(body, "reasoning_budget_tokens",
-                               json_value(body, "thinking_budget_tokens", -1));
-        if (reasoning_budget == -1) {
-            reasoning_budget = opt.reasoning_budget;
-        }
-
         if (!chat_params.thinking_end_tags.empty()) {
             llama_params["reasoning_budget_tokens"] = reasoning_budget;
             llama_params["reasoning_budget_start_tag"] = chat_params.thinking_start_tag;

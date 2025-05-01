@@ -7199,6 +7199,9 @@ static void ggml_vk_instance_init() {
             new_driver.pNext = &new_id;
             devices[i].getProperties2(&new_props);
 
+            if (std::string_view(new_props.properties.deviceName.data()).find("Direct3D12") != std::string_view::npos)
+                continue; // ignore VulkanOn12
+
             if ((new_props.properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu || new_props.properties.deviceType == vk::PhysicalDeviceType::eIntegratedGpu) && ggml_vk_device_is_supported(devices[i])) {
                 // Check if there are two physical devices corresponding to the same GPU
                 // This handles the case where the same GPU appears with different drivers (e.g., RADV + AMDVLK on Linux),
@@ -9195,12 +9198,12 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
             }
         }
 
-        if (device->driver_id == vk::DriverId::eIntelProprietaryWindows) {
-            // Intel Windows proprietary driver MMVQ performance for !Q2/Q3/Q6 is worse than fp16,
-            // see https://github.com/ggml-org/llama.cpp/issues/17628 and
-            // https://github.com/ggml-org/llama.cpp/pull/23056
-            return false;
-        }
+        // if (device->driver_id == vk::DriverId::eIntelProprietaryWindows) {
+        //     // Intel Windows proprietary driver MMVQ performance for !Q2/Q3/Q6 is worse than fp16,
+        //     // see https://github.com/ggml-org/llama.cpp/issues/17628 and
+        //     // https://github.com/ggml-org/llama.cpp/pull/23056
+        //     return false;
+        // }
 
         if (k < 2048) {
             return false;
@@ -18338,6 +18341,8 @@ static bool ggml_vk_device_is_supported(const vk::PhysicalDevice & vkdev) {
 static bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties& props, const vk::PhysicalDeviceDriverProperties& driver_props, vk_device_architecture arch) {
     switch (props.vendorID) {
     case VK_VENDOR_ID_INTEL:
+        if (const auto forcecm = getenv("coopmat"); forcecm && std::string_view("true") == forcecm)
+            return true;
         // Only allowing Xe2/Xe3 GPU and integrated Xe GPUs at the moment since older hardware (ex. Arc A770) has performance regressions.
         return (arch == vk_device_architecture::INTEL_XE2) ||
             (arch == vk_device_architecture::INTEL_XE1 && props.deviceType == vk::PhysicalDeviceType::eIntegratedGpu && driver_props.driverID == vk::DriverId::eIntelProprietaryWindows);

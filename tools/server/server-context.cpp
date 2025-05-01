@@ -557,7 +557,7 @@ struct server_slot {
 
         const int64_t t_now = ggml_time_us();
 
-        if (t_now - t_print_last < 3*1000*1000) {
+        if (t_now - t_print_last < 5*1000*1000) {
             return;
         }
 
@@ -1448,7 +1448,7 @@ private:
             try {
                 chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
 
-                SRV_TRC("%s: chat template, example_format: '%s'\n", __func__,
+                SRV_DBG("%s: chat template, example_format: '%s'\n", __func__,
                     common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
 
                 // thinking is enabled if:
@@ -2874,7 +2874,7 @@ private:
                 n_keep = std::min(slot.n_ctx - 4, n_keep);
 
                 const int n_left    = slot.prompt.n_tokens() - n_keep;
-                int       n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
+                int       n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 16);
 
                 // ref: https://github.com/ggml-org/llama.cpp/pull/24786
                 n_discard = std::clamp(n_discard, 0, std::max(0, n_left - 1));
