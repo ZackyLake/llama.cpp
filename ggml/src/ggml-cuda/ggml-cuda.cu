@@ -183,6 +183,14 @@ static int ggml_cuda_op_offload_min_batch() {
     return min_batch;
 }
 
+#if CUDART_VERSION >= 13000
+#   define _cmadv cudaMemAdvise
+#   define _cmpfa cudaMemPrefetchAsync
+#else
+#   define _cmadv cudaMemAdvise_v2
+#   define _cmpfa cudaMemPrefetchAsync_v2
+#endif
+
 static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
     ggml_cuda_set_device(device);
     cudaError_t err;
@@ -1973,11 +1981,134 @@ static bool ggml_cuda_match_shared_expert(const ggml_cgraph * graph, int routed_
     return true;
 }
 
+
+template <int nh>
+static __device__ __forceinline__ void hadamard_butterfly(float * ys, int tid, float & scale) {
+    constexpr float ksqrt2 = 0.707106781f;
+    #pragma unroll
+    for (int h = 2; h < nh; h <<= 1) {
+        __syncthreads();
+        const int ii = tid/h, jj = tid%h;
+        const int j  = 2*h*ii + jj;
+        const float u = ys[j], v = ys[j+h];
+        ys[j+0] = u + v;
+        ys[j+h] = u - v;
+        scale *= ksqrt2;
+    }
+}
+
+template <int nh>
+static __global__ void hadamard_f32(const char * src, char * dst, int ne0,
+        size_t nb01, size_t nb02, size_t nb03, size_t nb1, size_t nb2, size_t nb3) {
+
+    constexpr float ksqrt2 = 0.707106781f;
+    const int nc  = ne0/nh;
+    const int ii1 = blockIdx.x;
+    const int i1  = ii1 / nc;
+    const int ic  = ii1 % nc;
+    const int i2  = blockIdx.y;
+    const int i3  = blockIdx.z;
+    const int tid = threadIdx.x;
+
+    const float * x = (const float *)((const char *)src + i1*nb01 + i2*nb02 + i3*nb03) + ic*nh;
+          float * y = (      float *)((const char *)dst + i1*nb1  + i2*nb2  + i3*nb3)  + ic*nh;
+
+    __shared__ float ys[nh];
+    ys[2*tid+0] = x[2*tid+0] + x[2*tid+1];
+    ys[2*tid+1] = x[2*tid+0] - x[2*tid+1];
+    float scale = ksqrt2;
+
+    hadamard_butterfly<nh>(ys, tid, scale);
+
+    __syncthreads();
+    y[2*tid+0] = ys[2*tid+0] * scale;
+    y[2*tid+1] = ys[2*tid+1] * scale;
+}
+
+template <int nh>
+static __global__ void hadamard_f16(const char * src, char * dst, int ne0,
+        size_t nb01, size_t nb02, size_t nb03, size_t nb1, size_t nb2, size_t nb3) {
+
+    constexpr float ksqrt2 = 0.707106781f;
+    const int nc  = ne0/nh;
+    const int ii1 = blockIdx.x;
+    const int i1  = ii1 / nc;
+    const int ic  = ii1 % nc;
+    const int i2  = blockIdx.y;
+    const int i3  = blockIdx.z;
+    const int tid = threadIdx.x;
+
+    const half * x = (const half *)((const char *)src + i1*nb01 + i2*nb02 + i3*nb03) + ic*nh;
+    float      * y = (      float *)((const char *)dst + i1*nb1  + i2*nb2  + i3*nb3)  + ic*nh;
+
+    __shared__ float ys[nh];
+    const float a = __half2float(x[2*tid + 0]);
+    const float b = __half2float(x[2*tid + 1]);
+    ys[2*tid + 0] = a + b;
+    ys[2*tid + 1] = a - b;
+    float scale = ksqrt2;
+
+    hadamard_butterfly<nh>(ys, tid, scale);
+
+    __syncthreads();
+    y[2*tid + 0] = ys[2*tid + 0] * scale;
+    y[2*tid + 1] = ys[2*tid + 1] * scale;
+}
+
+#define LAUNCH_HADAMARD_F16(NH) hadamard_f16<NH><<<num_blocks, NH/2, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3)
+
+#define DISPATCH_HADAMARD_F16_NH \
+    switch (nh) { \
+        case  64: LAUNCH_HADAMARD_F16( 64); break; \
+        case 128: LAUNCH_HADAMARD_F16(128); break; \
+        case 256: LAUNCH_HADAMARD_F16(256); break; \
+        case 512: LAUNCH_HADAMARD_F16(512); break; \
+        default: return false; \
+    }
+
+static bool hadamard_shuffle_cuda(ggml_type src_type, int nh, const char * x, char * y, int ne0, int ne1, int ne2, int ne3,
+        size_t nb01, size_t nb02, size_t nb03, size_t nb1, size_t nb2, size_t nb3, cudaStream_t stream) {
+    int nc = ne0/nh;
+    int nrows = nc*ne1;
+    dim3 num_blocks = dim3(nrows, ne2, ne3);
+    if (src_type == GGML_TYPE_F32) {
+        switch (nh) {
+            case  64: hadamard_f32< 64><<<num_blocks,  32, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+            case 128: hadamard_f32<128><<<num_blocks,  64, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+            case 256: hadamard_f32<256><<<num_blocks, 128, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+            case 512: hadamard_f32<512><<<num_blocks, 256, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+            default: return false;
+        }
+    } else if (src_type == GGML_TYPE_F16) {
+        DISPATCH_HADAMARD_F16_NH;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_TENSOR_BINARY_OP_LOCALS
+    if (ggml_cuda_op_mul_mat_use_fwht(dst)) {
+        if (dst->type == GGML_TYPE_F32 && src1->ne[2] * src1->ne[3] <= 8) {
+            GGML_ASSERT(ggml_are_same_shape(src1, dst));
+            GGML_ASSERT(src0->ne[0] == src0->ne[1] && src0->ne[0] == src1->ne[0]);
+            GGML_ASSERT(src1->nb[0] == sizeof(float) && dst->nb[0] == sizeof(float));
+            int nh = src1->ne[0];
+            GGML_ASSERT(nh > 1 && (nh & (nh - 1)) == 0);
+            GGML_ASSERT(dst->ne[0] % nh == 0);
+            
+            if (hadamard_shuffle_cuda(src1->type, nh, (const char *) src1->data, (char *) dst->data,
+                    src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+                    src1->nb[1], src1->nb[2], src1->nb[3], dst->nb[1], dst->nb[2], dst->nb[3], ctx.stream())) {
+                return;
+            }
+        }
 
-    if (ggml_cuda_op_mul_mat_use_fwht(dst) && ggml_cuda_op_fwht(ctx, src1, dst)) {
-        return;
+        if (ggml_cuda_op_fwht(ctx, src1, dst)) {
+            return;
+        }
     }
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
