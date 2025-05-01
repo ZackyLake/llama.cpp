@@ -210,6 +210,14 @@ class DeepseekV41Model(DeepseekV4Model):
         with open(index, "r", encoding="utf-8") as f:
             return self.dir_model / json.load(f)["weight_map"][name]
 
+    def _locate(self, name: str, dtype: str, nbytes: int) -> tuple[Path, int]:
+        path = self._tensor_part(name)
+        with gguf.utility.SafetensorsLocal(path) as tensors:
+            t = tensors[name]
+        if t.dtype != dtype or t.data_range.size != nbytes:
+            raise ValueError(f"{name}: expected {dtype} with {nbytes} bytes, got {t.dtype} with {t.data_range.size}")
+        return path, t.data_range.offset
+
     def _write_mxfp4_experts(self, bid: int, proj: str, key: gguf.MODEL_TENSOR, n_expert: int | None = None) -> None:
         n_expert = self.hparams["n_routed_experts"] if n_expert is None else n_expert
         names = [f"layers.{bid}.ffn.experts.{e}.{proj}" for e in range(n_expert)]
@@ -233,22 +241,21 @@ class DeepseekV41Model(DeepseekV4Model):
             if rows != self.hparams["engram_num_embeddings"][len(parts)]:
                 raise ValueError(f"{wn}: {rows} rows, config says {self.hparams['engram_num_embeddings'][len(parts)]}")
             dim = d
-            parts.append((wn, sn, rows, self._tensor_part(wn), self._tensor_part(sn)))
+            parts.append((wn, sn, rows, *self._locate(wn, "F8_E4M3", rows * d), *self._locate(sn, "F8_E8M0", rows * d // 32)))
         assert dim is not None
         name = self.format_tensor_name(gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD)
         n_rows = sum(p[2] for p in parts)
 
         def chunks() -> Iterable[np.ndarray]:
-            from safetensors import safe_open
-            for wn, sn, rows, wpart, spart in parts:
-                with safe_open(wpart, framework="pt") as fw, safe_open(spart, framework="pt") as fs:
-                    ws, ss = fw.get_slice(wn), fs.get_slice(sn)
-                    for r0 in range(0, rows, 1 << 18):
-                        q = ws[r0:r0 + (1 << 18)].view(torch.uint8).reshape(-1, 32)
-                        e = ss[r0:r0 + (1 << 18)].view(torch.uint8).reshape(-1, 1)
-                        _e8m0_check(e.numpy(), sn)
-                        v = (q.view(torch.float8_e4m3fn).float() * torch.exp2(e.float() - 127)).reshape(-1, dim)
-                        yield (v if self._f32 else v.bfloat16()).view(torch.uint8).numpy()
+            # np.fromfile reads only the requested range, safe_open would mmap the whole (~100 GB) shard
+            for wn, sn, rows, wpath, woff, spath, soff in parts:
+                for r0 in range(0, rows, 1 << 18):
+                    n = min(1 << 18, rows - r0)
+                    q = torch.from_numpy(np.fromfile(wpath, np.uint8, n * dim, offset=woff + r0 * dim)).reshape(-1, 32)
+                    e = torch.from_numpy(np.fromfile(spath, np.uint8, n * dim // 32, offset=soff + r0 * dim // 32)).reshape(-1, 1)
+                    _e8m0_check(e.numpy(), sn)
+                    v = (q.view(torch.float8_e4m3fn).float() * torch.exp2(e.float() - 127)).reshape(-1, dim)
+                    yield (v if self._f32 else v.bfloat16()).view(torch.uint8).numpy()
         qt = gguf.GGMLQuantizationType.F32 if self._f32 else gguf.GGMLQuantizationType.BF16
         data = cast(np.ndarray, _StreamedBytes((n_rows, dim * (4 if self._f32 else 2)), chunks))
         self.gguf_writer.add_tensor(name, data, raw_dtype=qt)

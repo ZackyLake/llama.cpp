@@ -135,6 +135,10 @@ static void usage(const char * executable) {
     printf("                                      disable k-quant mixtures and quantize all tensors to the same type\n");
     printf("  --imatrix file_name\n");
     printf("                                      use data in file_name as importance matrix for quant optimizations\n");
+    printf("  --ref file_name\n");
+    printf("                                      reuse matching tensors from this model when their type matches the target type\n");
+    printf("  --chat-template file_name\n");
+    printf("                                      use the contents of this file as tokenizer.chat_template\n");
     printf("  --include-weights tensor_name\n");
     printf("                                      use importance matrix for this/these tensor(s)\n");
     printf("  --exclude-weights tensor_name\n");
@@ -158,6 +162,7 @@ static void usage(const char * executable) {
     printf("                                      generate quantized model in the same shards as input\n");
     printf("  --override-kv KEY=TYPE:VALUE\n");
     printf("                                      override model metadata by key in the quantized model; may be specified multiple times.\n");
+    printf("                                      for tokenizer.chat_template, VALUE is treated as a template file path\n");
     printf("                                      WARNING: this is an advanced option, use with care.\n");
     printf("  --dry-run\n");
     printf("                                      calculate and show the final quantization size without performing quantization\n");
@@ -613,6 +618,8 @@ int llama_quantize(int argc, char ** argv) {
 
     int arg_idx = 1;
     std::string imatrix_file;
+    std::string ref_file;
+    std::string chat_template_file;
     std::vector<std::string> included_weights;
     std::vector<std::string> excluded_weights;
     std::vector<llama_model_kv_override> kv_overrides;
@@ -684,6 +691,18 @@ int llama_quantize(int argc, char ** argv) {
             params.allow_requantize = true;
         } else if (strcmp(argv[arg_idx], "--pure") == 0) {
             params.pure = true;
+        } else if (strcmp(argv[arg_idx], "--ref") == 0) {
+            if (arg_idx < argc-1) {
+                ref_file = argv[++arg_idx];
+            } else {
+                usage(argv[0]);
+            }
+        } else if (strcmp(argv[arg_idx], "--chat-template") == 0) {
+            if (arg_idx < argc-1) {
+                chat_template_file = argv[++arg_idx];
+            } else {
+                usage(argv[0]);
+            }
         } else if (strcmp(argv[arg_idx], "--imatrix") == 0) {
             if (arg_idx < argc-1) {
                 imatrix_file = argv[++arg_idx];
@@ -797,6 +816,18 @@ int llama_quantize(int argc, char ** argv) {
         for (const auto & name : stats_schema) { sschema.push_back(name.c_str()); }
         sschema.push_back(nullptr);  // array terminator
         params.stats_schema = sschema.data();
+    }
+    if (!chat_template_file.empty()) {
+        if (chat_template_file.size() > 120) {
+            fprintf(stderr, "%s: chat template path too long: %s\n", __func__, chat_template_file.c_str());
+            return 1;
+        }
+        llama_model_kv_override kvo;
+        std::strcpy(kvo.key, "tokenizer.chat_template");
+        kvo.tag = LLAMA_KV_OVERRIDE_TYPE_STR;
+        std::strncpy(kvo.val_str, chat_template_file.c_str(), sizeof(kvo.val_str) - 1);
+        kvo.val_str[sizeof(kvo.val_str) - 1] = '\0';
+        kv_overrides.emplace_back(std::move(kvo));
     }
     if (!kv_overrides.empty()) {
         kv_overrides.emplace_back();
@@ -947,7 +978,8 @@ int llama_quantize(int argc, char ** argv) {
     {
         const int64_t t_start_us = llama_time_us();
 
-        if (llama_model_quantize(fname_inp.c_str(), fname_out.c_str(), &params)) {
+        if (llama_model_quantize_ref(fname_inp.c_str(), fname_out.c_str(),
+            ref_file.empty() ? nullptr : ref_file.c_str(), &params)) {
             fprintf(stderr, "%s: failed to quantize model from '%s'\n", __func__, fname_inp.c_str());
             const int signo = interrupt_signal.load();
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
