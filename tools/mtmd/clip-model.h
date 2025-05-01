@@ -192,6 +192,8 @@ struct clip_hparams {
         image_min_pixels = (custom_image_min_tokens > 0 ? custom_image_min_tokens : n_tokens_min) * patch_area;
         image_max_pixels = (custom_image_max_tokens > 0 ? custom_image_max_tokens : n_tokens_max) * patch_area;
         warmup_image_size = static_cast<int>(std::sqrt(image_max_pixels));
+        const int patch_len = patch_size * (n_merge == 0 ? 1 : n_merge);
+        warmup_image_size = warmup_image_size / patch_len * patch_len;
     }
 
     // used by longest_edge preprocessor (no model-specific value for min/max tokens)

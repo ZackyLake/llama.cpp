@@ -179,13 +179,13 @@ static void ggml_compute_forward_dup_flt(
 
                         memcpy(dst_ptr, src0_ptr, sizeof(dst_t));
 
-                        if (++i10 == ne00) {
+                        if (++i10 == ne0) {
                             i10 = 0;
-                            if (++i11 == ne01) {
+                            if (++i11 == ne1) {
                                 i11 = 0;
-                                if (++i12 == ne02) {
+                                if (++i12 == ne2) {
                                     i12 = 0;
-                                    if (++i13 == ne03) {
+                                    if (++i13 == ne3) {
                                         i13 = 0;
                                     }
                                 }
@@ -970,7 +970,7 @@ static void ggml_compute_forward_add1_q_f32(
         const int i1 = (ir - i3*ne2*ne1 - i2*ne1);
 
         void  * src0_row = (void *) ((char *) src0->data + (i1*nb01 + i2*nb02 + i3*nb03));
-        void  * dst_row  = (void *) ((char *)  dst->data + (i1*nb1  + i2*nb2  + i3*nb0 ));
+        void  * dst_row  = (void *) ((char *)  dst->data + (i1*nb1  + i2*nb2  + i3*nb3 ));
 
         assert(ne0 % 32 == 0);
 
