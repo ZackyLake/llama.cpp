@@ -454,12 +454,18 @@ llama_context::llama_context(
             throw std::runtime_error("failed to initialize CPU backend");
         }
         backends.emplace_back(backend_cpu);
+        auto * cpu_reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu));
 
         // create a list of the set_n_threads functions in the backends
         for (auto & backend : backends) {
             ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
             ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
             if (reg) {
+                using assign_cpu_reg_fn = void (*)(ggml_backend_t, ggml_backend_reg_t);
+                auto * assign_fn = (assign_cpu_reg_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_assign_cpu_reg");
+                if (assign_fn) {
+                    assign_fn(backend.get(), cpu_reg);
+                }
                 auto ggml_backend_set_n_threads_fn = (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
                 if (ggml_backend_set_n_threads_fn) {
                     set_n_threads_fns.emplace_back(backend.get(), ggml_backend_set_n_threads_fn);
@@ -787,6 +793,7 @@ void llama_context::sched_reserve() {
 
     // reserve pp (prompt processing) graph first so that buffers are only allocated once
     {
+        ggml_backend_sched_sumamry_name(sched.get(), "PP");
         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
                 model.hparams.no_alloc, model.hparams.no_alloc ? backend_buf_exp_size.data() : nullptr);
         if (!gf) {
@@ -807,6 +814,7 @@ void llama_context::sched_reserve() {
         n_input_tensors_pp = this->n_input_tensors;
 
         graph_has_logits = get_gf_res_reserve()->get_logits() != nullptr;
+        ggml_backend_sched_sumamry_name(sched.get(), nullptr);
     }
 
     // reserve with tg (token generation) graph to get the number of splits and nodes
@@ -815,6 +823,7 @@ void llama_context::sched_reserve() {
         n_splits_tg = n_splits_pp;
         n_nodes_tg  = n_nodes_pp;
     } else {
+        ggml_backend_sched_sumamry_name(sched.get(), "TG");
         auto * gf = graph_reserve(n_seqs, n_seqs, n_seqs, mctx.get(), model.hparams.no_alloc);
         if (!gf) {
             throw std::runtime_error("failed to allocate compute tg buffers");
@@ -824,6 +833,7 @@ void llama_context::sched_reserve() {
         n_nodes_tg         = ggml_graph_n_nodes(gf);
         n_inputs_tg        = get_gf_res_reserve()->inputs.size();
         n_input_tensors_tg = this->n_input_tensors;
+        ggml_backend_sched_sumamry_name(sched.get(), nullptr);
     }
 
     // reserve again with pp graph to avoid ggml-alloc reallocations during inference
@@ -2739,7 +2749,7 @@ void llama_context::sched_graph_realloc(ggml_backend_sched_t sched, ggml_cgraph 
         lctx->n_reallocs_same++;
     }
 
-    LLAMA_LOG_INFO("%s: graph reallocation: nodes = %d (changed = %d), splits = %d, n_same = %d, n_diff = %d\n",
+    LLAMA_LOG_DEBUG("%s: graph reallocation: nodes = %d (changed = %d), splits = %d, n_same = %d, n_diff = %d\n",
             __func__, ggml_graph_n_nodes(gf), graph_size_changed, ggml_backend_sched_get_n_splits(sched),
             lctx->n_reallocs_same, lctx->n_reallocs_diff);
 }
