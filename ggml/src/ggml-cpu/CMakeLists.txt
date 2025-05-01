@@ -260,7 +260,7 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
                 # Do it manually.
                 list(APPEND ARCH_DEFINITIONS GGML_AVX512)
                 if (GGML_AVX512_VBMI)
-                    list(APPEND ARCH_DEFINITIONS __AVX512VBMI__)
+                    list(APPEND ARCH_DEFINITIONS __AVX512VBMI__ GGML_AVX512_VBMI)
                     if (CMAKE_C_COMPILER_ID STREQUAL "Clang")
                         list(APPEND ARCH_FLAGS -mavx512vbmi)
                     endif()
@@ -666,6 +666,15 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
             ggml-cpu/kleidiai/kleidiai.h
             ggml-cpu/kleidiai/kernels.h
             )
+    endif()
+
+    if (MSVC)
+        target_link_options(${GGML_CPU_NAME} PRIVATE /debug)
+    endif()
+
+    if (GGML_CPU_ALL_VARIANTS AND tag_name)
+        ggml_get_variant_extra_flags("${tag_name}" CPU_EXTRA_FLAGS)
+        list(APPEND ARCH_FLAGS ${CPU_EXTRA_FLAGS})
     endif()
 
     message(STATUS "Adding CPU backend variant ${GGML_CPU_NAME}: ${ARCH_FLAGS} ${ARCH_DEFINITIONS}")

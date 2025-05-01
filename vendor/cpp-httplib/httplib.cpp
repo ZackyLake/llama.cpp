@@ -1,4 +1,12 @@
 #include "httplib.h"
+#ifdef _WIN32
+#   include <ProcessThreadsApi.h>
+#elif defined(__linux__) || defined(__ANDROID__)
+#   include <errno.h>
+#   include <pthread.h>
+#   include <sched.h>
+#   include <sys/resource.h>
+#endif
 namespace httplib {
 
 /*
@@ -7073,7 +7081,7 @@ ThreadPool::ThreadPool(size_t n, size_t max_n, size_t mqr,
                               time_t idle_timeout_sec)
     : base_thread_count_(n), max_queued_requests_(mqr),
       idle_timeout_sec_(idle_timeout_sec), idle_thread_count_(0),
-      shutdown_(false) {
+      cpumask_(0), shutdown_(false) {
 #ifndef CPPHTTPLIB_NO_EXCEPTIONS
   if (max_n != 0 && max_n < n) {
     std::string msg = "max_threads must be >= base_threads";
@@ -7082,6 +7090,12 @@ ThreadPool::ThreadPool(size_t n, size_t max_n, size_t mqr,
 #endif
   max_thread_count_ = max_n == 0 ? n : max_n;
   threads_.reserve(base_thread_count_);
+
+  if (const char *thr = getenv("httpthr"); thr)
+  {
+    cpumask_ = std::stoull(thr, nullptr, 16);
+  }
+
 #ifndef CPPHTTPLIB_NO_EXCEPTIONS
   try {
 #endif
@@ -7175,6 +7189,55 @@ void ThreadPool::cleanup_finished_threads() {
 }
 
 void ThreadPool::worker(bool is_dynamic) {
+#ifdef _WIN32
+  auto current_thread = ::GetCurrentThread();
+  ::SetThreadPriority(current_thread, THREAD_PRIORITY_BELOW_NORMAL);
+
+  THREAD_POWER_THROTTLING_STATE power_throttling{};
+  power_throttling.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+  power_throttling.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+  power_throttling.StateMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+  ::SetThreadInformation(current_thread, ThreadPowerThrottling, &power_throttling, sizeof(power_throttling));
+  if (cpumask_ != 0) {
+    GROUP_AFFINITY mask{};
+    mask.Group = 0;
+    mask.Mask = static_cast<KAFFINITY>(cpumask_);
+    BOOL ret = ::SetThreadGroupAffinity(current_thread, &mask, NULL);
+    if (ret == 0)
+    {
+      char tmp[2048] = { 0 };
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+          GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), tmp, 2000, NULL);
+      fprintf(stderr, "warning: SetThreadGroupAffinity() failed: %s\n", tmp);
+    }
+  }
+#elif defined(__linux__) || defined(__ANDROID__)
+  auto current_thread = pthread_self();
+  struct sched_param sched_param = {};
+  const int sched_err = pthread_setschedparam(current_thread, SCHED_BATCH, &sched_param);
+  if (sched_err != 0) {
+    fprintf(stderr, "warning: pthread_setschedparam() failed: %s\n", strerror(sched_err));
+  }
+
+  if (setpriority(PRIO_PROCESS, 0, 5) != 0) {
+    fprintf(stderr, "warning: setpriority() failed: %s\n", strerror(errno));
+  }
+  if (cpumask_ != 0) {
+    cpu_set_t sets;
+    CPU_ZERO(&sets);
+    for (uint32_t tid = 0; tid < 64; tid++) {
+      if (cpumask_ & (uint64_t(1) << tid)) {
+        CPU_SET(tid, &sets);
+      }
+    }
+    const auto rv = pthread_setaffinity_np(current_thread, sizeof(sets), &sets);
+    if (rv) 
+    {
+      fprintf(stderr, "warning: pthread_setaffinity_np() failed: %s\n", strerror(rv));
+    }
+  }
+#endif
+
   for (;;) {
     std::function<void()> fn;
     {

@@ -22,12 +22,288 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include <map>
+#include <string>
+#include <string_view>
 
-#ifdef __APPLE__
-#include <sys/types.h>
-#include <sys/sysctl.h>
+#if defined(_WIN32)
+#   include "windows.h"
+#elif defined(__APPLE__)
+#   include <pthread.h>
+#   include <sys/resource.h>
+#   include <sys/types.h>
+#   include <sys/sysctl.h>
+#elif defined(__linux__)
+#   include <pthread.h>
+#   include <sched.h>
+#   include <sys/resource.h>
+#   include <unistd.h>
 #endif
 
+
+#if defined(_WIN32)
+
+static constexpr uint32_t GGML_THREAD_GROUP_SIZE  = 64;
+static constexpr uint32_t GGML_THREAD_GROUP_COUNT = GGML_MAX_N_THREADS / GGML_THREAD_GROUP_SIZE;
+
+bool ggml_thread_get_affinity(bool * mask) {
+    GGML_ASSERT(mask);
+
+    GROUP_AFFINITY affinity = {};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &affinity)) {
+        fprintf(stderr, "warn: failed to get thread affinity: (%lu)\n", (unsigned long) GetLastError());
+        return false;
+    }
+
+    const uint32_t group = affinity.Group;
+    if (group >= GGML_THREAD_GROUP_COUNT) {
+        fprintf(stderr, "warn: thread affinity group %u is not supported\n", group);
+        return false;
+    }
+
+    memset(mask, 0, GGML_MAX_N_THREADS * sizeof(mask[0]));
+
+    const uint64_t bitmask = (uint64_t) affinity.Mask;
+    const uint32_t group_start = group * GGML_THREAD_GROUP_SIZE;
+    for (uint32_t i = 0; i < GGML_THREAD_GROUP_SIZE; i++) {
+        mask[group_start + i] = (bitmask & (1ULL << i)) != 0;
+    }
+
+    return true;
+}
+
+bool ggml_thread_apply_affinity(const bool * mask) {
+    HANDLE    h = GetCurrentThread();
+    int32_t first_cpu = -1;
+
+    for (int32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
+        if (mask[i]) {
+            first_cpu = i;
+            break;
+        }
+    }
+
+    if (first_cpu < 0) {
+        fprintf(stderr, "warn: cannot set thread affinity with an empty mask\n");
+        return false;
+    }
+
+    const uint32_t group = first_cpu / GGML_THREAD_GROUP_SIZE;
+    const uint32_t group_start = group * GGML_THREAD_GROUP_SIZE;
+    uint64_t bitmask = 0ULL;
+    for (uint32_t i = 0; i < GGML_THREAD_GROUP_SIZE && group_start + i < GGML_MAX_N_THREADS; i++) {
+        bitmask |= (uint64_t) mask[group_start + i] << i;
+    }
+
+    GROUP_AFFINITY affinity = {};
+    affinity.Mask = (KAFFINITY) bitmask;
+    affinity.Group = (WORD) group;
+
+    //printf("thread [%u] group [%u] aff mask: [%llx]\n", GetThreadId(h), group, (unsigned long long) bitmask);
+
+    if (!SetThreadGroupAffinity(h, &affinity, NULL)) {
+        fprintf(stderr, "warn: failed to set thread affinity [%llx] for group %u: (%lu)\n", (unsigned long long) bitmask, group, (unsigned long) GetLastError());
+        return false;
+    }
+
+    return true;
+}
+
+bool ggml_thread_apply_priority(int32_t prio) {
+    // Note that on Windows the Process Priority Class must be updated in order to set Thread priority.
+    // This is up to the applications.
+    DWORD p = THREAD_PRIORITY_NORMAL;
+    switch (prio) {
+        case GGML_SCHED_PRIO_LOW:      p = THREAD_PRIORITY_BELOW_NORMAL;  break;
+        case GGML_SCHED_PRIO_NORMAL:   p = THREAD_PRIORITY_NORMAL;        break;
+        case GGML_SCHED_PRIO_MEDIUM:   p = THREAD_PRIORITY_ABOVE_NORMAL;  break;
+        case GGML_SCHED_PRIO_HIGH:     p = THREAD_PRIORITY_HIGHEST;       break;
+        case GGML_SCHED_PRIO_REALTIME: p = THREAD_PRIORITY_TIME_CRITICAL; break;
+    }
+
+    if (prio != GGML_SCHED_PRIO_LOW) {
+        // Tell Windows that this thread should not be throttled (needs its own CPU core).
+        // Newer Windows 11 versions aggressively park (offline) CPU cores and often place
+        // all our threads onto the first 4 cores which results in terrible performance with
+        // n_threads > 4
+        #if _WIN32_WINNT >= 0x0602
+        THREAD_POWER_THROTTLING_STATE t;
+        ZeroMemory(&t, sizeof(t));
+        t.Version     = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+        t.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+        t.StateMask   = 0;
+
+        if (!SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &t, sizeof(t))) {
+            GGML_LOG_DEBUG("failed to disable thread power throttling %d : (%d)\n", prio, (int) GetLastError());
+            return false;
+        }
+        #endif
+    }
+
+    if (prio == GGML_SCHED_PRIO_NORMAL) {
+        // Keep inherited policy/priority
+        return true;
+    }
+
+    if (!SetThreadPriority(GetCurrentThread(), p)) {
+        fprintf(stderr, "warn: failed to set thread priority %d : (%d)\n", prio, (int) GetLastError());
+        return false;
+    }
+
+    return true;
+}
+
+#elif defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/resource.h>
+
+bool ggml_thread_get_affinity(bool * mask) {
+    UNUSED(mask);
+    return false;
+}
+
+bool ggml_thread_apply_affinity(const bool * mask) {
+    // Not supported on Apple platforms
+    UNUSED(mask);
+    return true;
+}
+
+bool ggml_thread_apply_priority(int32_t prio) {
+    struct sched_param p;
+    int32_t policy = SCHED_OTHER;
+    switch (prio) {
+        // TODO: there seems to be no way to set lower prio on Apple platforms
+        case GGML_SCHED_PRIO_LOW:      policy = SCHED_OTHER; p.sched_priority = 0;  break;
+        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
+        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
+        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
+        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
+    }
+
+    if (prio == GGML_SCHED_PRIO_NORMAL) {
+        // Keep inherited policy/priority
+        return true;
+    }
+
+    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
+    if (err != 0) {
+        fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
+        return false;
+    }
+
+    return true;
+}
+
+#elif defined(__linux__)
+// TODO: this may not work on BSD, to be verified
+
+bool ggml_thread_apply_affinity(const bool * mask) {
+    cpu_set_t cpuset;
+    int err;
+
+    CPU_ZERO(&cpuset);
+
+    for (uint32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
+        if (mask[i]) {
+            GGML_PRINT_DEBUG("Thread %lx: adding %d to cpuset\n", pthread_self(), i);
+            CPU_SET(i, &cpuset);
+        }
+    }
+
+#ifdef __ANDROID__
+    err = sched_setaffinity(0, sizeof(cpuset), &cpuset);
+    if (err < 0) {
+        err = errno;
+    }
+#else
+    err = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+#endif
+    if (err != 0) {
+        fprintf(stderr, "warn: failed to set affinity mask 0x%llx : %s (%d)\n", (unsigned long long)mask, strerror(err), err);
+        return false;
+    }
+
+    return true;
+}
+
+bool ggml_thread_get_affinity(bool * mask) {
+    GGML_ASSERT(mask);
+
+    cpu_set_t cpuset;
+    int err;
+
+    CPU_ZERO(&cpuset);
+
+#ifdef __ANDROID__
+    err = sched_getaffinity(0, sizeof(cpuset), &cpuset);
+    if (err < 0) {
+        err = errno;
+    }
+#else
+    err = pthread_getaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+#endif
+    if (err != 0) {
+        fprintf(stderr, "warn: failed to get thread affinity: %s (%d)\n", strerror(err), err);
+        return false;
+    }
+
+    for (uint32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
+        mask[i] = CPU_ISSET(i, &cpuset) != 0;
+    }
+
+    return true;
+}
+
+bool ggml_thread_apply_priority(int32_t prio) {
+    struct sched_param p;
+    int32_t policy = SCHED_OTHER;
+    switch (prio) {
+        case GGML_SCHED_PRIO_LOW:      policy = SCHED_BATCH; p.sched_priority = 0;  break;
+        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
+        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
+        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
+        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
+    }
+
+    if (prio == GGML_SCHED_PRIO_NORMAL) {
+        // Keep inherited policy/priority
+        return true;
+    }
+    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
+    if (err != 0) {
+        if (policy != SCHED_FIFO) {
+            fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
+            return false;
+        }
+        int nice = p.sched_priority / -5;
+        err = setpriority(PRIO_PROCESS, gettid(), nice);
+        if (err != 0) {
+            //fprintf(stderr, "warn: failed to set thread nice %d : %s (%d)\n", nice, strerror(errno), errno);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+#else // unsupported platforms
+
+bool ggml_thread_get_affinity(bool * mask) {
+    UNUSED(mask);
+    return false;
+}
+
+bool ggml_thread_apply_affinity(const bool * mask) {
+    UNUSED(mask);
+    return true;
+}
+
+bool ggml_thread_apply_priority(int32_t prio) {
+    UNUSED(prio);
+    return true;
+}
+
+#endif
 
 // backend buffer type
 
@@ -829,6 +1105,7 @@ struct ggml_backend_sched {
     char * context_buffer;
     size_t context_buffer_size;
 
+    const char* summary_name = nullptr;
     bool op_offload;
 
     int debug;
@@ -967,11 +1244,15 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
             if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                 int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
                 // check if a backend with higher prio wants to offload the op
-                if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
-                    for (int b = 0; b < src_backend_id; b++) {
-                        if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
-                            SET_CAUSE(tensor, "1.off");
-                            return b;
+                // offload from CPU and also ACCEL backends with host memory
+                if (sched->op_offload && src_backend_id >= 0 && ggml_backend_buffer_is_host(src->buffer)) {
+                    enum ggml_backend_dev_type src_dev_type = ggml_backend_dev_type(ggml_backend_get_device(sched->backends[src_backend_id]));
+                    if (src_dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || src_dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                        for (int b = 0; b < src_backend_id; b++) {
+                            if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
+                                SET_CAUSE(tensor, "1.off");
+                                return b;
+                            }
                         }
                     }
                 }
@@ -1437,6 +1718,53 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     if (sched->debug) {
         ggml_backend_sched_print_assignments(sched, graph);
+    }
+
+    if (sched->summary_name)
+    {
+        std::map<ggml_backend_t, std::string> backendnames;
+        std::map<std::string_view, std::map<const char*, std::vector<const char*>>> assignments;
+        for (int i = 0; i < graph->n_nodes; i++) 
+        {
+            const auto node = graph->nodes[i];
+            if (ggml_is_view_op(node->op)) continue;
+            ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
+            std::string_view be;
+            if (const auto it = backendnames.find(tensor_backend); it == backendnames.end()) 
+            {
+                std::string_view name = tensor_backend ? ggml_backend_name(tensor_backend) : "";
+                auto& name_ = backendnames[tensor_backend];
+                for (const auto ch : name) 
+                    if (ch > '9' || ch < '0')
+                        name_.push_back(ch);
+                be = name_;
+            }
+            else
+            {
+                be = it->second;
+            }
+            auto& vec = assignments[be][ggml_op_name(node->op)];
+            vec.emplace_back(node->name);
+        }
+        for (const auto& [be, ops] : assignments)
+        {
+            printf("[%s]: [%s] ops(%zu):\n", sched->summary_name, be.data(), ops.size());
+            for (const auto& [op, names] : ops)
+            {
+                printf("--[%16s]", op);
+                if (names.size() > 4)
+                    printf(" (%zu)\n", names.size());
+                else
+                {
+                    printf(" [");
+                    for (const auto name : names) 
+                    {
+                        printf("%s, ", name);
+                    }
+                    printf("]\n");
+                }
+            }
+        }
     }
 
     // swap node_backend_ids and leaf _backend_ids with prevs
@@ -1949,6 +2277,12 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     free(sched->graph.leafs);
     free(sched);
 }
+
+void ggml_backend_sched_sumamry_name(ggml_backend_sched_t sched, const char* name) {
+    GGML_ASSERT(sched);
+    sched->summary_name = name;
+}
+
 
 void ggml_backend_sched_reset(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);

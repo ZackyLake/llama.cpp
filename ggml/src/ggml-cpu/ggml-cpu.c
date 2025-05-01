@@ -436,6 +436,7 @@ typedef SRWLOCK            ggml_mutex_t;
 #define ggml_mutex_unlock(m) ReleaseSRWLockExclusive(m)
 #define ggml_mutex_lock_shared(m)   AcquireSRWLockShared(m)
 #define ggml_mutex_unlock_shared(m) ReleaseSRWLockShared(m)
+#define GGML_MUTEX_INITIALIZER      SRWLOCK_INIT
 
 #define ggml_cond_init(c)    InitializeConditionVariable(c)
 #define ggml_cond_destroy(c)
@@ -456,6 +457,7 @@ typedef pthread_mutex_t    ggml_mutex_t;
 #define ggml_mutex_unlock(m)        pthread_mutex_unlock(m)
 #define ggml_mutex_lock_shared(m)   pthread_mutex_lock(m)
 #define ggml_mutex_unlock_shared(m) pthread_mutex_unlock(m)
+#define GGML_MUTEX_INITIALIZER      PTHREAD_MUTEX_INITIALIZER
 
 #define ggml_lock_init(x)    UNUSED(x)
 #define ggml_lock_destroy(x) UNUSED(x)
@@ -521,7 +523,7 @@ struct ggml_compute_state {
 static inline void ggml_thread_cpu_relax(void) {
     __asm__ volatile("yield" ::: "memory");
 }
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) || (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64)))
 static inline void ggml_thread_cpu_relax(void) {
     _mm_pause();
 }
@@ -2238,7 +2240,75 @@ static void clear_numa_thread_affinity(void) {
 #else
 // TODO: Windows etc.
 // (the linux implementation may also work on BSD, someone should test)
-static void set_numa_thread_affinity(int thread_n) { UNUSED(thread_n);  }
+static void set_numa_thread_affinity(int thread_n) 
+{
+    if (!ggml_is_numa()) {
+        return;
+    }
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    const char *thr = getenv("ggmlthr");
+    unsigned tid = 0;
+    if (thr == NULL)
+    {
+        // smt
+        const unsigned tid2 = thread_n * 2; 
+        const unsigned smt = (tid2 / info.dwNumberOfProcessors) & 0x1;
+        tid = (tid % info.dwNumberOfProcessors) + smt;
+    }
+    else if (strcmp(thr, "nosmt") == 0)
+    {
+        tid = thread_n % info.dwNumberOfProcessors;
+    }
+    else
+    {
+        tid = thread_n % info.dwNumberOfProcessors;
+        char *copy = strdup(thr);
+        unsigned numbers[128];
+        unsigned count = 0;
+        char *token = strtok(copy, ",");
+        while (token && count < 128u) 
+        {
+            numbers[count++] = atoi(token);
+            token = strtok(NULL, ",");
+        }
+        if (count > 0u)
+        {
+            tid = numbers[thread_n % count];
+            // printf("ggmlthr: [%s]([%u]) set [%d]=[%u]\n", thr, count, thread_n, tid);
+        }
+        else
+        {
+            printf("ggmlthr: [%s]\n", thr);
+        }
+    }
+    GROUP_AFFINITY mask =
+    {
+        .Group = 0,
+        .Mask = (KAFFINITY)(1u) << tid
+    };
+    BOOL ret = SetThreadGroupAffinity(GetCurrentThread(), &mask, NULL);
+    if (ret == 0)
+    {
+        char tmp[2048] = { 0 };
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+            GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), tmp, 2000, NULL);
+        fprintf(stderr, "warning: SetThreadGroupAffinity() failed: %s\n", tmp);
+    }
+    THREAD_POWER_THROTTLING_STATE powerThrottling;
+    ZeroMemory(&powerThrottling, sizeof(powerThrottling));
+    powerThrottling.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
+    powerThrottling.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
+    powerThrottling.StateMask = 0;
+    ret = SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &powerThrottling, sizeof(powerThrottling));
+    if (ret == 0)
+    {
+        char tmp[2048] = { 0 };
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+            GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), tmp, 2000, NULL);
+        fprintf(stderr, "warning: SetThreadInformation() failed: %s\n", tmp);
+    }
+}
 static void clear_numa_thread_affinity(void) {}
 #endif
 
@@ -2515,195 +2585,6 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
 }
 
 static thread_ret_t ggml_graph_compute_secondary_thread(void* data);
-
-#if defined(_WIN32)
-#include "windows.h"
-
-// TODO: support > 64 CPUs
-static bool ggml_thread_apply_affinity(bool * mask) {
-    HANDLE    h = GetCurrentThread();
-    uint64_t  bitmask = 0ULL;
-
-    assert(GGML_MAX_N_THREADS >= 64);
-
-    for (int32_t i = 0; i < 8; i++) {
-        int32_t idx = i * 8;
-        uint8_t val = 0;
-        val |= mask[idx + 0] << 0;
-        val |= mask[idx + 1] << 1;
-        val |= mask[idx + 2] << 2;
-        val |= mask[idx + 3] << 3;
-        val |= mask[idx + 4] << 4;
-        val |= mask[idx + 5] << 5;
-        val |= mask[idx + 6] << 6;
-        val |= mask[idx + 7] << 7;
-        bitmask |= (uint64_t)val << idx;
-    }
-
-    for (int32_t i = 64; i < GGML_MAX_N_THREADS; i++) {
-        if (mask[i]) {
-            fprintf(stderr, "warn: setting thread-affinity for > 64 CPUs isn't supported on windows!\n");
-            break;
-        }
-    }
-
-    DWORD_PTR m = (DWORD_PTR)bitmask;
-
-    m = SetThreadAffinityMask(h, m);
-
-    return m != 0;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    // Note that on Windows the Process Priority Class must be updated in order to set Thread priority.
-    // This is up to the applications.
-    DWORD p = THREAD_PRIORITY_NORMAL;
-    switch (prio) {
-        case GGML_SCHED_PRIO_LOW:      p = THREAD_PRIORITY_BELOW_NORMAL;  break;
-        case GGML_SCHED_PRIO_NORMAL:   p = THREAD_PRIORITY_NORMAL;        break;
-        case GGML_SCHED_PRIO_MEDIUM:   p = THREAD_PRIORITY_ABOVE_NORMAL;  break;
-        case GGML_SCHED_PRIO_HIGH:     p = THREAD_PRIORITY_HIGHEST;       break;
-        case GGML_SCHED_PRIO_REALTIME: p = THREAD_PRIORITY_TIME_CRITICAL; break;
-    }
-
-    if (prio != GGML_SCHED_PRIO_LOW) {
-        // Tell Windows that this thread should not be throttled (needs its own CPU core).
-        // Newer Windows 11 versions aggressively park (offline) CPU cores and often place
-        // all our threads onto the first 4 cores which results in terrible performance with
-        // n_threads > 4
-        #if _WIN32_WINNT >= 0x0602
-        THREAD_POWER_THROTTLING_STATE t;
-        ZeroMemory(&t, sizeof(t));
-        t.Version     = THREAD_POWER_THROTTLING_CURRENT_VERSION;
-        t.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
-        t.StateMask   = 0;
-
-        if (!SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &t, sizeof(t))) {
-            GGML_LOG_DEBUG("failed to disable thread power throttling %d : (%d)\n", prio, (int) GetLastError());
-            return false;
-        }
-        #endif
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    if (!SetThreadPriority(GetCurrentThread(), p)) {
-        fprintf(stderr, "warn: failed to set thread priority %d : (%d)\n", prio, (int) GetLastError());
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__APPLE__)
-#include <sys/types.h>
-#include <sys/resource.h>
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    // Not supported on Apple platforms
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    struct sched_param p;
-    int32_t policy = SCHED_OTHER;
-    switch (prio) {
-        // TODO: there seems to be no way to set lower prio on Apple platforms
-        case GGML_SCHED_PRIO_LOW:      policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
-        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
-        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
-    if (err != 0) {
-        fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__linux__)
-// TODO: this may not work on BSD, to be verified
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    cpu_set_t cpuset;
-    int err;
-
-    CPU_ZERO(&cpuset);
-
-    for (uint32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
-        if (mask[i]) {
-            GGML_PRINT_DEBUG("Thread %lx: adding %d to cpuset\n", pthread_self(), i);
-            CPU_SET(i, &cpuset);
-        }
-    }
-
-#ifdef __ANDROID__
-    err = sched_setaffinity(0, sizeof(cpuset), &cpuset);
-    if (err < 0) {
-        err = errno;
-    }
-#else
-    err = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-#endif
-    if (err != 0) {
-        fprintf(stderr, "warn: failed to set affinity mask 0x%llx : %s (%d)\n", (unsigned long long)mask, strerror(err), err);
-        return false;
-    }
-
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    struct sched_param p;
-    int32_t policy = SCHED_OTHER;
-    switch (prio) {
-        case GGML_SCHED_PRIO_LOW:      policy = SCHED_BATCH; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
-        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
-        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
-    if (err != 0) {
-        fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
-        return false;
-    }
-
-    return true;
-}
-
-#else // unsupported platforms
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    UNUSED(prio);
-    return true;
-}
-
-#endif
 
 static bool ggml_thread_cpumask_is_valid(const bool * mask) {
     for (int i = 0; i < GGML_MAX_N_THREADS; i++) {
@@ -3354,6 +3235,16 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
     for (int j = 0; j < tpp->n_threads; j++) {
         ggml_thread_cpumask_next(tpp->cpumask, workers[j].cpumask, tpp->strict_cpu, &cpumask_iter);
     }
+
+    #pragma omp parallel num_threads(tpp->n_threads)
+    {
+        const int ith = omp_get_thread_num();
+
+        ggml_thread_apply_priority(threadpool->prio);
+        if (ggml_thread_cpumask_is_valid(workers[ith].cpumask)) {
+            ggml_thread_apply_affinity(workers[ith].cpumask);
+        }
+    }
 #else // GGML_USE_OPENMP
     ggml_mutex_init(&threadpool->mutex);
     ggml_cond_init(&threadpool->cond);
@@ -3416,6 +3307,11 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         threadpool->ec               = GGML_STATUS_SUCCESS;
     }
 
+    if (n_threads > threadpool->n_threads) {
+        GGML_LOG_WARN("cplan requested more threads (%d) than available (%d)\n", n_threads, threadpool->n_threads);
+        n_threads = threadpool->n_threads;
+    }
+
 #ifdef GGML_USE_OPENMP
     if (n_threads > 1) {
         #pragma omp parallel num_threads(n_threads)
@@ -3427,13 +3323,8 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
                 atomic_store_explicit(&threadpool->n_graph, n_threads, memory_order_relaxed);
             }
 
-            // Apply thread CPU mask and priority
             int ith = omp_get_thread_num();
 
-            ggml_thread_apply_priority(threadpool->prio);
-            if (ggml_thread_cpumask_is_valid(threadpool->workers[ith].cpumask)) {
-                ggml_thread_apply_affinity(threadpool->workers[ith].cpumask);
-            }
             ggml_graph_compute_thread(&threadpool->workers[ith]);
         }
     } else {
@@ -3441,11 +3332,6 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
         ggml_graph_compute_thread(&threadpool->workers[0]);
     }
 #else
-    if (n_threads > threadpool->n_threads) {
-        GGML_LOG_WARN("cplan requested more threads (%d) than available (%d)\n", n_threads, threadpool->n_threads);
-        n_threads = threadpool->n_threads;
-    }
-
     // Kick all threads to start the new graph
     ggml_graph_compute_kickoff(threadpool, n_threads);
 

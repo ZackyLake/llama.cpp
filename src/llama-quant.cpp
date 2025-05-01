@@ -193,6 +193,7 @@ struct quantize_state_impl {
         // compile regex patterns once - they are expensive
         if (params->tt_overrides) {
             for (const auto * p = params->tt_overrides; p->pattern != nullptr; p++) {
+                printf("adding pattern [%s] to [%s]\n", p->pattern, ggml_type_name(p->type));
                 tensor_type_patterns.emplace_back(std::regex(p->pattern), p->type);
             }
         }
