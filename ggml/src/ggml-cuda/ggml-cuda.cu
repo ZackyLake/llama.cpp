@@ -136,10 +136,23 @@ int ggml_cuda_get_device() {
     return id;
 }
 
+#if CUDART_VERSION >= 13000
+#   define _cmadv cudaMemAdvise
+#   define _cmpfa cudaMemPrefetchAsync
+#else
+#   define _cmadv cudaMemAdvise_v2
+#   define _cmpfa cudaMemPrefetchAsync_v2
+#endif
+
+static bool is_unified_memory() noexcept {
+    static const bool ret = getenv("GGML_CUDA_ENABLE_UNIFIED_MEMORY") != nullptr;
+    return ret;
+}
+
 static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
     ggml_cuda_set_device(device);
     cudaError_t err;
-    if (getenv("GGML_CUDA_ENABLE_UNIFIED_MEMORY") != nullptr) {
+    if (is_unified_memory()) {
         err = cudaMallocManaged(ptr, size);
 #if defined(GGML_USE_HIP)
         if (err == hipSuccess) {
@@ -762,14 +775,35 @@ static enum ggml_status ggml_backend_cuda_buffer_init_tensor(ggml_backend_buffer
         return GGML_STATUS_SUCCESS;
     }
 
+    bool isHostTensor = false;
+    if (is_unified_memory()) {
+        const bool is_weight = ggml_backend_buffer_get_usage(buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
+        // only moe expert weights are kept in host memory; everything else (including compute buffers) is preferred on the device
+        isHostTensor = is_weight && strstr(tensor->name, "_exps.weight") != NULL;
+        // printf("advice %s for [%s]\n", isHostTensor ? "host" : "device", tensor->name);
+
+        const size_t alloc_size = ggml_backend_buft_get_alloc_size(buffer->buft, tensor);
+        if (alloc_size > 0) {
+            cudaMemLocation loc = {.type = isHostTensor ? cudaMemLocationTypeHost : cudaMemLocationTypeDevice, .id = ctx->device};
+            CUDA_CHECK(_cmadv((char*)tensor->data, alloc_size, cudaMemAdviseSetPreferredLocation, loc));
+        }
+        if (is_weight) {
+            CUDA_CHECK(_cmadv((char*)tensor->data, alloc_size, cudaMemAdviseSetReadMostly, cudaMemLocation{.type = cudaMemLocationTypeDevice, .id = ctx->device}));
+        }
+    }
+
     if (ggml_is_quantized(tensor->type) && tensor->view_src == nullptr && ggml_backend_buffer_get_usage(buffer) != GGML_BACKEND_BUFFER_USAGE_COMPUTE) {
         // initialize padding to 0 to avoid possible NaN values
         const size_t original_size = ggml_nbytes(tensor);
         const size_t padded_size = ggml_backend_buft_get_alloc_size(buffer->buft, tensor);
 
         if (padded_size > original_size) {
-            ggml_cuda_set_device(ctx->device);
-            CUDA_CHECK(cudaMemset((char *)tensor->data + original_size, 0, padded_size - original_size));
+            if (isHostTensor) {
+                memset((char *)tensor->data + original_size, 0, padded_size - original_size);
+            } else {
+                ggml_cuda_set_device(ctx->device);
+                CUDA_CHECK(cudaMemset((char *)tensor->data + original_size, 0, padded_size - original_size));
+            }
         }
     }
     return GGML_STATUS_SUCCESS;
@@ -785,6 +819,14 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
 
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
+
+    // host-preferred expert weights are loaded directly into host memory; a
+    // cudaMemcpyAsync(H2D) would write to the device side of the managed pages
+    // while their preferred location stays host, causing repeated migration
+    if (is_unified_memory() && strstr(tensor->name, "_exps.weight") != NULL) {
+        memcpy((char *) tensor->data + offset, data, size);
+        return;
+    }
 
     ggml_cuda_set_device(ctx->device);
     CUDA_CHECK(cudaMemcpyAsync((char *) tensor->data + offset, data, size, cudaMemcpyHostToDevice, cudaStreamPerThread));
@@ -802,6 +844,14 @@ static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, co
 static void ggml_backend_cuda_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data,
         size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *) buffer->context;
+
+    // host-preferred expert weights: write directly into host memory (see set_tensor)
+    if (is_unified_memory() && strstr(tensor->name, "_exps.weight") != NULL) {
+        for (size_t i = 0; i < n_copies; ++i) {
+            memcpy((char *) tensor->data + offset + i*stride_tensor, (const char *) data + i*stride_data, size);
+        }
+        return;
+    }
 
     ggml_cuda_set_device(ctx->device);
     CUDA_CHECK(cudaMemcpy2DAsync(
@@ -1900,6 +1950,73 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
     return true;
 }
 
+// Prefetch the expert weight slices used by this MUL_MAT_ID to the device.
+// Only active when unified memory is enabled and the expert weights are
+// preferred to host memory (see ggml_backend_cuda_buffer_init_tensor).
+// cudaMemPrefetchAsync is a hint and is not supported during CUDA graph
+// capture, so it is skipped there.
+static void ggml_cuda_mul_mat_id_prefetch(ggml_backend_cuda_context & ctx, const ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * ids  = dst->src[2];
+
+    // only the model expert weights are host-preferred; skip compute-buffer copies
+    if (src0->buffer == nullptr ||
+        !ggml_backend_buffer_is_cuda(src0->buffer) ||
+        ggml_backend_buffer_get_usage(src0->buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS ||
+        strstr(src0->name, "_exps.weight") == nullptr) {
+        return;
+    }
+
+    cudaStream_t stream = ctx.stream();
+
+    // cudaMemPrefetchAsync is not supported during stream capture
+    cudaStreamCaptureStatus capture_status;
+    CUDA_CHECK(cudaStreamIsCapturing(stream, &capture_status));
+    if (capture_status != cudaStreamCaptureStatusNone) {
+        return;
+    }
+
+    // ids is managed memory; prefetch it to host so reading it below does not
+    // trigger a synchronous page migration. The prefetch is queued on the
+    // stream, so it runs after the kernel that produced ids.
+    CUDA_CHECK(_cmpfa(ids->data, ggml_nbytes(ids), { cudaMemLocationTypeHost, 0 }, 0, stream));
+
+    // sync to ensure the producing kernel and the prefetch have completed
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    const int64_t n_expert_used = ids->ne[0];
+    const int64_t ne12          = ids->ne[1];
+    const int64_t ne02          = src0->ne[2]; // number of experts
+    const size_t  expert_size   = src0->nb[2]; // bytes per expert (stride)
+    const int     device        = ggml_cuda_get_physical_device(ctx.device);
+
+    std::vector<bool> prefetched(ne02, false);
+    std::vector<const void *> prefetch_ptrs;
+    prefetch_ptrs.reserve(ne02);
+    for (int64_t i12 = 0; i12 < ne12; ++i12) {
+        for (int64_t iex = 0; iex < n_expert_used; ++iex) {
+            const int32_t expert = *(const int32_t *)((const char *) ids->data + i12*ids->nb[1] + iex*ids->nb[0]);
+            if (expert >= 0 && expert < ne02 && !prefetched[expert]) {
+                prefetched[expert] = true;
+                prefetch_ptrs.push_back((const char *) src0->data + expert*expert_size);
+            }
+        }
+    }
+    // batch the prefetch into a single driver call to avoid per-expert overhead
+    if (!prefetch_ptrs.empty()) {
+        cudaMemLocation loc = { cudaMemLocationTypeDevice, device };
+#if CUDART_VERSION >= 13000
+        // all experts have the same size, so fill the sizes array once
+        std::vector<size_t> prefetch_sizes(prefetch_ptrs.size(), expert_size);
+        CUDA_CHECK(cudaMemPrefetchBatchAsync(prefetch_ptrs.data(), prefetch_sizes.data(), prefetch_ptrs.size(), loc, 0, stream));
+#else
+        for (const auto& ptr : prefetch_ptrs) {
+            CUDA_CHECK(_cmpfa(ptr, expert_size, loc, 0, stream));
+        }
+#endif
+    }
+}
+
 static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
@@ -1907,6 +2024,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+
+    // prefetch the used expert weights to the device (unified memory only)
+    if (is_unified_memory()) {
+        ggml_cuda_mul_mat_id_prefetch(ctx, dst);
+    }
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -4789,7 +4911,7 @@ static void ggml_backend_cuda_device_get_memory(ggml_backend_dev_t dev, size_t *
     CUDA_CHECK(cudaGetDeviceProperties(&prop, ggml_cuda_get_physical_device(ctx->device)));
 
     // Check if UMA is explicitly enabled via environment variable
-    bool uma_env = getenv("GGML_CUDA_ENABLE_UNIFIED_MEMORY") != nullptr;
+    bool uma_env = is_unified_memory();
     bool is_uma = prop.integrated > 0 || uma_env;
 
     if (is_uma) {

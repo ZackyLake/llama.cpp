@@ -21,6 +21,9 @@
 #include <string.h>
 #include <algorithm>
 #include <vector>
+#include <map>
+#include <string>
+#include <string_view>
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -818,6 +821,7 @@ struct ggml_backend_sched {
     char * context_buffer;
     size_t context_buffer_size;
 
+    const char* summary_name = nullptr;
     bool op_offload;
 
     int debug;
@@ -956,11 +960,15 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
             if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
                 int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
                 // check if a backend with higher prio wants to offload the op
-                if (sched->op_offload && src_backend_id == sched->n_backends - 1 && ggml_backend_buffer_is_host(src->buffer)) {
-                    for (int b = 0; b < src_backend_id; b++) {
-                        if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
-                            SET_CAUSE(tensor, "1.off");
-                            return b;
+                // offload from CPU and also ACCEL backends with host memory
+                if (sched->op_offload && src_backend_id >= 0 && ggml_backend_buffer_is_host(src->buffer)) {
+                    enum ggml_backend_dev_type src_dev_type = ggml_backend_dev_type(ggml_backend_get_device(sched->backends[src_backend_id]));
+                    if (src_dev_type == GGML_BACKEND_DEVICE_TYPE_CPU || src_dev_type == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+                        for (int b = 0; b < src_backend_id; b++) {
+                            if (ggml_backend_supports_op(sched->backends[b], tensor) && ggml_backend_offload_op(sched->backends[b], tensor)) {
+                                SET_CAUSE(tensor, "1.off");
+                                return b;
+                            }
                         }
                     }
                 }
@@ -1428,6 +1436,53 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         ggml_backend_sched_print_assignments(sched, graph);
     }
 
+    if (sched->summary_name)
+    {
+        std::map<ggml_backend_t, std::string> backendnames;
+        std::map<std::string_view, std::map<const char*, std::vector<const char*>>> assignments;
+        for (int i = 0; i < graph->n_nodes; i++) 
+        {
+            const auto node = graph->nodes[i];
+            if (ggml_is_view_op(node->op)) continue;
+            ggml_backend_t tensor_backend = ggml_backend_sched_get_tensor_backend(sched, node);
+            std::string_view be;
+            if (const auto it = backendnames.find(tensor_backend); it == backendnames.end()) 
+            {
+                std::string_view name = tensor_backend ? ggml_backend_name(tensor_backend) : "";
+                auto& name_ = backendnames[tensor_backend];
+                for (const auto ch : name) 
+                    if (ch > '9' || ch < '0')
+                        name_.push_back(ch);
+                be = name_;
+            }
+            else
+            {
+                be = it->second;
+            }
+            auto& vec = assignments[be][ggml_op_name(node->op)];
+            vec.emplace_back(node->name);
+        }
+        for (const auto& [be, ops] : assignments)
+        {
+            printf("[%s]: [%s] ops(%zu):\n", sched->summary_name, be.data(), ops.size());
+            for (const auto& [op, names] : ops)
+            {
+                printf("--[%16s]", op);
+                if (names.size() > 4)
+                    printf(" (%zu)\n", names.size());
+                else
+                {
+                    printf(" [");
+                    for (const auto name : names) 
+                    {
+                        printf("%s, ", name);
+                    }
+                    printf("]\n");
+                }
+            }
+        }
+    }
+
     // swap node_backend_ids and leaf _backend_ids with prevs
     {
         int * tmp = sched->node_backend_ids;
@@ -1889,6 +1944,12 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     free(sched->graph.leafs);
     free(sched);
 }
+
+void ggml_backend_sched_sumamry_name(ggml_backend_sched_t sched, const char* name) {
+    GGML_ASSERT(sched);
+    sched->summary_name = name;
+}
+
 
 void ggml_backend_sched_reset(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);

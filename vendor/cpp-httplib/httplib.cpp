@@ -1,4 +1,7 @@
 #include "httplib.h"
+#ifdef _WIN32
+#include <ProcessThreadsApi.h>
+#endif
 namespace httplib {
 
 /*
@@ -6754,11 +6757,24 @@ ThreadPool::ThreadPool(size_t n, size_t max_n, size_t mqr,
 #endif
   max_thread_count_ = max_n == 0 ? n : max_n;
   threads_.reserve(base_thread_count_);
+
+  std::vector<uint32_t> tids;
+  if (const char *thr = getenv("httpthr"); thr)
+  {
+    char *copy = strdup(thr);
+    for (char *token = strtok(copy, ","); token; )
+    {
+        tids.push_back(atoi(token));
+        token = strtok(NULL, ",");
+    }
+  }
+
 #ifndef CPPHTTPLIB_NO_EXCEPTIONS
   try {
 #endif
     for (size_t i = 0; i < base_thread_count_; i++) {
-      threads_.emplace_back(std::thread([this]() { worker(false); }));
+      const uint32_t tid = !tids.empty() ? tids[i % tids.size()] : UINT32_MAX;
+      threads_.emplace_back(std::thread([this, tid]() { worker(false, tid); }));
     }
 #ifndef CPPHTTPLIB_NO_EXCEPTIONS
   } catch (...) {
@@ -6846,7 +6862,34 @@ void ThreadPool::cleanup_finished_threads() {
   finished_threads_.clear();
 }
 
-void ThreadPool::worker(bool is_dynamic) {
+void ThreadPool::worker(bool is_dynamic, uint32_t tid) {
+  if (tid != UINT32_MAX)
+  {
+#ifdef _WIN32
+    GROUP_AFFINITY mask{};
+    mask.Group = 0;
+    mask.Mask = (KAFFINITY)(1u) << tid;
+    BOOL ret = ::SetThreadGroupAffinity(::GetCurrentThread(), &mask, NULL);
+    if (ret == 0)
+    {
+      char tmp[2048] = { 0 };
+      FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+          GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+          tmp, 2000, NULL);
+      fprintf(stderr, "warning: SetThreadGroupAffinity() failed: %s\n", tmp);
+    }
+#else
+    cpu_set_t sets;
+    CPU_ZERO(&sets);
+    CPU_SET(tid, &sets);
+    const auto rv = pthread_setaffinity_np(pthread_self(), sizeof(sets), &sets);
+    if (rv) 
+    {
+      fprintf(stderr, "warning: pthread_setaffinity_np() failed: %s\n", strerror(rv));
+    }
+#endif
+  }
+
   for (;;) {
     std::function<void()> fn;
     {

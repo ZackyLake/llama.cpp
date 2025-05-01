@@ -1448,7 +1448,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     const int i_gpu_start = std::max(n_layer_all + 1 - n_gpu_layers, 0);
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
-    auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
+    auto get_layer_buft_list_ = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
@@ -1459,7 +1459,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
         return {dev, &pimpl->gpu_buft_list.at(dev)};
     };
-
+    std::map<ggml_backend_dev_t, std::vector<std::pair<uint32_t, uint32_t>>, std::less<>> devLayerLookup;
+    const auto get_layer_buft_list = [&](int il) noexcept
+    {
+        auto dev = get_layer_buft_list_(il);
+        auto& entry = devLayerLookup[dev.dev];
+        const uint32_t idx = il;
+        if (!entry.empty() && entry.back().second + 1 == idx)
+            entry.back().second++;
+        else
+            entry.emplace_back(idx, idx);
+        return dev;
+    };
     // assign the input layer
     // there is very little benefit to offloading the input layer, so always keep it on the CPU
     pimpl->dev_input = { cpu_dev, &pimpl->cpu_buft_list };
@@ -1474,6 +1485,22 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
+
+    const auto putRegion = [](std::string& dst, auto i, auto j) noexcept
+    {
+        if(!dst.empty())
+            dst.append(", ");
+        dst.append(std::to_string(i));
+        if (i != j)
+            dst.append("-").append(std::to_string(j));
+    };
+    for (const auto& [dev, layers] : devLayerLookup)
+    {
+        std::string layer;
+        for (const auto& [i, j] : layers)
+            putRegion(layer, i, j);
+        LLAMA_LOG_INFO("load_tensors: device [%s] assigned layers: %s\n", ggml_backend_dev_name(dev), layer.c_str());
+    }
 
     // create tensors for the weights
     {
@@ -1644,7 +1671,113 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
                 output_in_s = create_tensor(tn(LLM_TENSOR_OUTPUT, "input_scale"), {1}, TENSOR_NOT_REQUIRED);
             }
         }
+    
+        struct TensorPack
+        {
+            size_t TotalBytes = 0;
+            struct RepeatedTensors
+            {
+                std::vector<uint32_t> LayerIds;
+                std::map<ggml_type, std::pair<std::vector<uint32_t>, size_t>> Types;
+            };
+            std::map<std::string_view, RepeatedTensors> Repeated;
+            std::vector<std::tuple<const std::string*, ggml_type, size_t>> NonRepeated;
+            void Put(const std::string& name, const ggml_tensor* tensor) noexcept
+            {
+                const auto bytes = ggml_nbytes(tensor);
+                TotalBytes += bytes;
+                constexpr std::string_view prefix = "blk.";
+                if (name.size() > prefix.size() && std::char_traits<char>::compare(name.data(), prefix.data(), prefix.size()) == 0)
+                {
+                    uint32_t numCnt = 0;
+                    auto it = name.cbegin() + 4;
+                    const auto itend = name.cend(); 
+                    while (it != itend)
+                    {
+                        if (*it >= '0' && *it <= '9')
+                        {
+                            numCnt++;
+                            it++;
+                            continue;
+                        }
+                        else if (*it == '.')
+                            it++;
+                        else
+                            it = itend;
+                        break;
+                    }
+                    if (numCnt > 0 && it != itend)
+                    {
+                        const std::string_view suffix(&*it, itend - it);
+                        auto& tensors = Repeated[suffix];
+                        const uint32_t id = std::atoi(name.data() + 4);
+                        tensors.LayerIds.push_back(id);
+                        auto& [ids, size] = tensors.Types[tensor->type];
+                        ids.push_back(id), size += bytes;
+                        return;
+                    }
+                }
+                NonRepeated.emplace_back(&name, tensor->type, bytes);
+            }
+        };
+        std::map<ggml_backend_buffer_type_t, TensorPack> overrideLookup;
+        for (const auto& [name, info] : ml.overrideList)
+            overrideLookup[info.second].Put(name, &info.first);
+        for (auto& [dev, pack] : overrideLookup)
+        {
+            LLAMA_LOG_INFO("tensor [%zu MiB] overridden to %s:\n", pack.TotalBytes / 1024 / 1024, ggml_backend_buft_name(dev));
+            for (auto& [suffix, tensors] : pack.Repeated)
+            {
+                std::string ids;
+                {
+                    std::sort(tensors.LayerIds.begin(), tensors.LayerIds.end());
+                    uint32_t lastBegin = tensors.LayerIds[0];
+                    uint32_t lastId = lastBegin;
+                    for (auto it = tensors.LayerIds.begin() + 1; it != tensors.LayerIds.end(); ++it)
+                    {
+                        if (*it == lastId + 1)
+                            lastId++;
+                        else
+                            putRegion(ids, lastBegin, lastId), lastBegin = lastId = *it;
+                    }
+                    putRegion(ids, lastBegin, lastId);
+                }
+                std::string typeSizes;
+                for (const auto& [t, v] : tensors.Types)
+                {
+                    if (!typeSizes.empty())
+                        typeSizes.append(", ");
+                    const auto& s = v.second;
+                    typeSizes.append(ggml_type_name(t)).append(": ").append(std::to_string(s / 1024 / 1024)).append("MiB");
+                }
+                LLAMA_LOG_INFO("    blk.[X].%s: %s (%s)\n", suffix.data(), ids.c_str(), typeSizes.c_str());
+                if (tensors.Types.size() > 1)
+                {
+                    for (auto& [t, v] : tensors.Types)
+                    {
+                        std::string idsT;
+                        {
+                            std::sort(v.first.begin(), v.first.end());
+                            uint32_t lastBegin = v.first[0];
+                            uint32_t lastId = lastBegin;
+                            for (auto it = v.first.begin() + 1; it != v.first.end(); ++it)
+                            {
+                                if (*it == lastId + 1)
+                                    lastId++;
+                                else
+                                    putRegion(idsT, lastBegin, lastId), lastBegin = lastId = *it;
+                            }
+                            putRegion(idsT, lastBegin, lastId);
+                        }
+                        LLAMA_LOG_INFO("    -- %s: %s\n", ggml_type_name(t), idsT.c_str());
+                    }
+                }
+            }
+            for (const auto& [name, t, s] : pack.NonRepeated)
+                LLAMA_LOG_INFO("    %s (%s: %zu MiB)\n", name->c_str(), ggml_type_name(t), s / 1024 / 1024);
+        }
     }
+    
     ml.done_getting_tensors();
 
     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
@@ -1660,7 +1793,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    ml.init_mappings(false, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
     // create the backend buffers
