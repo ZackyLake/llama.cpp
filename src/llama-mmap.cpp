@@ -36,6 +36,7 @@
         #define PATH_MAX MAX_PATH
     #endif
     #include <io.h>
+    #include <fcntl.h>
 #endif
 
 #if defined(__APPLE__)
@@ -110,7 +111,7 @@ struct llama_file::impl {
         fp_win32_direct = ReOpenFile(
             fp_win32,
             GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SHARE_READ,
             FILE_FLAG_NO_BUFFERING);
 
         if (fp_win32_direct == INVALID_HANDLE_VALUE) {
@@ -169,14 +170,44 @@ struct llama_file::impl {
     }
 
     void init_buffered_io(const char * mode) {
-        fp = ggml_fopen(fname.c_str(), mode);
-        if (fp == NULL) {
-            throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
+        if (std::strcmp(mode, "rb") == 0) {
+            init_buffered_read_shared();
+        } else {
+            fp = ggml_fopen(fname.c_str(), mode);
+            if (fp == NULL) {
+                throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
+            }
         }
+        std::setvbuf(fp, nullptr, _IONBF, 0);
         fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
         seek(0, SEEK_END);
         size = tell();
         seek(0, SEEK_SET);
+    }
+
+    // FILE_SHARE_READ only: other processes cannot write or delete the file while it is open
+    void init_buffered_read_shared() {
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, fname.c_str(), -1, nullptr, 0);
+        if (wlen == 0) {
+            throw std::runtime_error(format("failed to convert path %s: %s", fname.c_str(), GetErrorMessageWin32(GetLastError()).c_str()));
+        }
+        std::wstring wname(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, fname.c_str(), -1, &wname[0], wlen);
+
+        HANDLE h = CreateFileW(wname.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), GetErrorMessageWin32(GetLastError()).c_str()));
+        }
+        const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(h), _O_RDONLY | _O_BINARY);
+        if (fd == -1) {
+            CloseHandle(h);
+            throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
+        }
+        fp = _fdopen(fd, "rb");
+        if (fp == NULL) {
+            _close(fd);
+            throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
+        }
     }
 
     impl(FILE * file) : fname("(file*)"), owns_fp(false) {
@@ -446,6 +477,7 @@ struct llama_file::impl {
         if (fp == NULL) {
             throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
         }
+        std::setvbuf(fp, nullptr, _IONBF, 0);
         seek(0, SEEK_END);
         size = tell();
         seek(0, SEEK_SET);
@@ -549,6 +581,11 @@ struct llama_file::impl {
 
         // stage through a bounded buffer, so that a large tensor is not held in memory twice while it loads
         const size_t buffer_size = std::min<size_t>(bytes_to_read, LLAMA_DIRECT_IO_BUFFER_SIZE);
+
+        if (offset_from_alignment == 0 && size % alignment == 0 && reinterpret_cast<uintptr_t>(dest) % alignment == 0) {
+            read_raw_unsafe(dest, bytes_to_read);
+            return;
+        }
 
         void * raw_buffer = nullptr;
         int ret = posix_memalign(&raw_buffer, alignment, buffer_size);
@@ -671,6 +708,30 @@ int llama_file::file_id() const {
 #endif
 }
 
+void llama_file::hint([[maybe_unused]] bool nocache, [[maybe_unused]] bool releasecache) const
+{
+#if defined(_WIN32)
+#else
+#ifdef __linux__
+    const int fd = file_id();
+    if (releasecache)
+    {
+        if (posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)) {
+            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_DONTNEED) failed: %s\n",
+                    strerror(errno));
+        }
+    }
+    else if (nocache)
+    {
+        if (posix_fadvise(fd, 0, 0, POSIX_FADV_NOREUSE)) {
+            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_NOREUSE) failed: %s\n",
+                    strerror(errno));
+        }
+    }
+#endif
+#endif
+}
+
 void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
 void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
 void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
@@ -706,13 +767,25 @@ static llama_mmap::ranges ranges_complement(llama_mmap::ranges ranges, size_t li
 #endif
 
 struct llama_mmap::impl {
+    static void align_range(size_t * first, size_t * last, size_t page_size) {
+        size_t offset_in_page = *first & (page_size - 1);
+        size_t offset_to_page = offset_in_page == 0 ? 0 : page_size - offset_in_page;
+        *first += offset_to_page;
+
+        *last = *last & ~(page_size - 1);
+
+        if (*last <= *first) {
+            *last = *first;
+        }
+    }
 #ifdef _POSIX_MAPPED_FILES
     std::vector<std::pair<size_t, size_t>> mapped_fragments;
+    int fd;
 
     impl(struct llama_file * file, size_t prefetch, bool numa, const llama_mmap::ranges & lazy_ranges) {
         size = file->size();
-        int fd = file->file_id();
-        int flags = MAP_SHARED;
+        fd = file->file_id();
+        int flags = MAP_PRIVATE | MAP_NORESERVE;
         if (numa) { prefetch = 0; }
 #ifdef __linux__
         if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL)) {
@@ -739,7 +812,14 @@ struct llama_mmap::impl {
                 LLAMA_LOG_WARN("warning: posix_madvise(.., %s) failed: %s\n", name, strerror(errno));
             }
         };
-
+#ifdef __linux__
+        if (madvise(addr, file->size(), MADV_HUGEPAGE)) {
+            LLAMA_LOG_WARN("warning: madvise(.., MADV_HUGEPAGE) failed: %s\n", strerror(errno));
+        }
+        if (madvise(addr, file->size(), MADV_COLLAPSE)) {
+            LLAMA_LOG_WARN("warning: madvise(.., MADV_COLLAPSE) failed: %s\n", strerror(errno));
+        }
+#endif
         if (prefetch > 0) {
             for (const auto & range : ranges_complement(lazy_ranges, std::min(file->size(), prefetch))) {
                 advise(range.first, range.second, POSIX_MADV_WILLNEED, "POSIX_MADV_WILLNEED");
@@ -756,18 +836,6 @@ struct llama_mmap::impl {
         }
 
         mapped_fragments.emplace_back(0, file->size());
-    }
-
-    static void align_range(size_t * first, size_t * last, size_t page_size) {
-        size_t offset_in_page = *first & (page_size - 1);
-        size_t offset_to_page = offset_in_page == 0 ? 0 : page_size - offset_in_page;
-        *first += offset_to_page;
-
-        *last = *last & ~(page_size - 1);
-
-        if (*last <= *first) {
-            *last = *first;
-        }
     }
 
     void unmap_fragment(size_t first, size_t last) {
@@ -788,6 +856,11 @@ struct llama_mmap::impl {
         if (munmap(next_page_start, len)) {
             LLAMA_LOG_WARN("warning: munmap failed: %s\n", strerror(errno));
         }
+#ifdef __linux__
+        if (posix_fadvise(fd, first, len, POSIX_FADV_DONTNEED)) {
+            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_DONTNEED) failed: %s\n", strerror(errno));
+        }
+#endif
 
         std::vector<std::pair<size_t, size_t>> new_mapped_fragments;
         for (const auto & frag : mapped_fragments) {
@@ -866,8 +939,26 @@ struct llama_mmap::impl {
     }
 
     void unmap_fragment(size_t first, size_t last) {
-        GGML_UNUSED(first);
-        GGML_UNUSED(last);
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        size_t page_size = si.dwPageSize;
+        align_range(&first, &last, page_size);
+        size_t len = last - first;
+
+        if (len == 0) {
+            return;
+        }
+
+        GGML_ASSERT(first % page_size == 0);
+        GGML_ASSERT(last % page_size == 0);
+        GGML_ASSERT(last > first);
+
+        void * next_page_start = (uint8_t *) addr + first;
+
+        if (0 == VirtualUnlock(next_page_start, len) && GetLastError() != ERROR_NOT_LOCKED) {
+            LLAMA_LOG_WARN("warning: unmap(VirtualUnlock) failed: %s\n",
+                    llama_format_win_err(GetLastError()).c_str());
+        }
     }
 
     ~impl() {
@@ -1046,6 +1137,17 @@ struct llama_mlock::impl {
         }
     }
 
+    bool lock_region(size_t offset, size_t size_) 
+    {
+        GGML_ASSERT(addr);
+        if (failed_already) return false;
+        size_t granularity = lock_granularity();
+        auto target_size = offset + size_;
+        target_size = (target_size + granularity - 1) & ~(granularity - 1);
+        return raw_lock((uint8_t *) addr + offset, target_size - size_);
+    }
+
+
     void * addr;
     size_t size;
 
@@ -1057,6 +1159,7 @@ llama_mlock::~llama_mlock() = default;
 
 void llama_mlock::init(void * ptr) { pimpl->init(ptr); }
 void llama_mlock::grow_to(size_t target_size) { pimpl->grow_to(target_size); }
+bool llama_mlock::lock_region(size_t offset, size_t size) { return pimpl->lock_region(offset, size); }
 
 #if defined(_POSIX_MEMLOCK_RANGE) || defined(_WIN32)
 const bool llama_mlock::SUPPORTED = true;

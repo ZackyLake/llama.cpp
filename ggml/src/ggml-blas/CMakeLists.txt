@@ -69,6 +69,7 @@ if (BLAS_FOUND)
     endif()
 
     message(STATUS "BLAS found, Includes: ${BLAS_INCLUDE_DIRS}")
+    message(STATUS "BLAS found, Vendor: ${GGML_BLAS_VENDOR}")
 
     target_compile_options(ggml-blas PRIVATE ${BLAS_LINKER_FLAGS})
 
@@ -77,6 +78,9 @@ if (BLAS_FOUND)
     endif()
 
     if ("${GGML_BLAS_VENDOR}" MATCHES "Intel" OR ("${BLAS_INCLUDE_DIRS}" MATCHES "mkl" AND "${GGML_BLAS_VENDOR}" MATCHES "Generic"))
+        add_compile_definitions(GGML_BLAS_USE_MKL)
+    endif()
+    if (${GGML_BLAS_VENDOR} MATCHES "Intel10_64lp")
         add_compile_definitions(GGML_BLAS_USE_MKL)
     endif()
 
