@@ -437,7 +437,7 @@ struct server_slot {
 
         const int64_t t_now = ggml_time_us();
 
-        if (t_now - t_print_last < 3*1000*1000) {
+        if (t_now - t_print_last < 5*1000*1000) {
             return;
         }
 
@@ -901,6 +901,8 @@ private:
             params_dft.n_gpu_layers = params_spec.n_gpu_layers;
             params_dft.cache_type_k = params_spec.cache_type_k;
             params_dft.cache_type_v = params_spec.cache_type_v;
+            params_dft.n_batch      = params_base.n_batch;
+            params_dft.n_ubatch     = params_base.n_ubatch;
 
             if (params_spec.cpuparams.n_threads > 0) {
                 params_dft.cpuparams.n_threads       = params_spec.cpuparams.n_threads;
@@ -1195,7 +1197,7 @@ private:
             try {
                 chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
 
-                LOG_INF("%s: chat template, example_format: '%s'\n", __func__,
+                LOG_DBG("%s: chat template, example_format: '%s'\n", __func__,
                     common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
 
             } catch (const std::exception & e) {
@@ -2364,7 +2366,7 @@ private:
                 n_keep = std::min(slot.n_ctx - 4, n_keep);
 
                 const int n_left    = slot.prompt.n_tokens() - n_keep;
-                const int n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 2);
+                const int n_discard = slot.task->params.n_discard ? slot.task->params.n_discard : (n_left / 16);
 
                 SLT_WRN(slot, "slot context shift, n_keep = %d, n_left = %d, n_discard = %d\n", n_keep, n_left, n_discard);
 

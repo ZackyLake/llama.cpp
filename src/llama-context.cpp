@@ -579,6 +579,7 @@ void llama_context::sched_reserve() {
 
     // reserve pp (prompt processing) graph first so that buffers are only allocated once
     {
+        ggml_backend_sched_sumamry_name(sched.get(), "PP");
         auto * gf = graph_reserve(n_tokens, n_seqs, n_tokens, mctx.get(),
                 model.hparams.no_alloc, model.hparams.no_alloc ? backend_buf_exp_size.data() : nullptr);
         if (!gf) {
@@ -595,10 +596,12 @@ void llama_context::sched_reserve() {
 
         n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_pp  = ggml_graph_n_nodes(gf);
+        ggml_backend_sched_sumamry_name(sched.get(), nullptr);
     }
 
     // reserve with tg (token generation) graph to get the number of splits and nodes
     {
+        ggml_backend_sched_sumamry_name(sched.get(), "TG");
         auto * gf = graph_reserve(n_seqs, n_seqs, n_seqs, mctx.get(), model.hparams.no_alloc);
         if (!gf) {
             throw std::runtime_error("failed to allocate compute tg buffers");
@@ -606,6 +609,7 @@ void llama_context::sched_reserve() {
 
         n_splits_tg = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_tg  = ggml_graph_n_nodes(gf);
+        ggml_backend_sched_sumamry_name(sched.get(), nullptr);
     }
 
     // reserve again with pp graph to avoid ggml-alloc reallocations during inference

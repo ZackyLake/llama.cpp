@@ -145,6 +145,17 @@ static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device)
 
             err = cudaMalloc(ptr, size);
         }
+#else
+        if (err == cudaSuccess) {
+            cudaMemLocation loc { cudaMemLocationTypeDevice, device };
+#if CUDART_VERSION >= 13000
+#   define _cmadv cudaMemAdvise
+#else
+#   define _cmadv cudaMemAdvise_v2
+#endif
+            CUDA_CHECK(_cmadv(*ptr, size, cudaMemAdviseSetReadMostly, loc));
+#undef _cmadv
+        }
 #endif // defined(GGML_USE_HIP)
     } else {
         err = cudaMalloc(ptr, size);

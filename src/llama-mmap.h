@@ -18,6 +18,8 @@ struct llama_file {
     llama_file(FILE * file);
     ~llama_file();
 
+    void hint(bool nocache, bool releasecache) const;
+
     size_t tell() const;
     size_t size() const;
 
@@ -25,6 +27,7 @@ struct llama_file {
 
     void seek(size_t offset, int whence) const;
 
+    void read_raw_at(void * ptr, size_t offset, size_t len);
     void read_raw(void * ptr, size_t len);
     void read_raw_unsafe(void * ptr, size_t len);
     void read_aligned_chunk(void * dest, size_t size);
@@ -63,6 +66,7 @@ struct llama_mlock {
 
     void init(void * ptr);
     void grow_to(size_t target_size);
+    bool lock_region(size_t offset, size_t size);
 
     static const bool SUPPORTED;
 

@@ -131,9 +131,11 @@ struct clip_hparams {
     void set_limit_image_tokens(int n_tokens_min, int n_tokens_max) {
         const int cur_merge = n_merge == 0 ? 1 : n_merge;
         const int patch_area = patch_size * patch_size * cur_merge * cur_merge;
+        const int patch_len = patch_size * cur_merge;
         image_min_pixels = (custom_image_min_tokens > 0 ? custom_image_min_tokens : n_tokens_min) * patch_area;
         image_max_pixels = (custom_image_max_tokens > 0 ? custom_image_max_tokens : n_tokens_max) * patch_area;
         warmup_image_size = static_cast<int>(std::sqrt(image_max_pixels));
+        warmup_image_size = warmup_image_size / patch_len * patch_len;
     }
 
     void set_warmup_n_tokens(int n_tokens) {

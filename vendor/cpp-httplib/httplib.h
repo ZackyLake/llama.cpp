@@ -1492,7 +1492,7 @@ public:
   void shutdown() override;
 
 private:
-  void worker(bool is_dynamic);
+  void worker(bool is_dynamic, uint32_t tid = UINT32_MAX);
   void move_to_finished(std::thread::id id);
   void cleanup_finished_threads();
 

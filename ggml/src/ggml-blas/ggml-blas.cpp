@@ -11,6 +11,7 @@
 #elif defined(GGML_BLAS_USE_MKL)
 #   include <mkl.h>
 #elif defined(GGML_BLAS_USE_BLIS)
+#   include <omp.h> 
 #   include <blis.h>
 #elif defined(GGML_BLAS_USE_NVPL)
 #   include <nvpl_blas.h>

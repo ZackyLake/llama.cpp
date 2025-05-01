@@ -1576,6 +1576,16 @@ struct clip_model_loader {
                     throw std::runtime_error(string_format("%s: unknown vision projector type %s\n", __func__, proj_type.c_str()));
             }
 
+            if (hparams.custom_image_min_tokens != -1 || hparams.custom_image_max_tokens != -1) 
+            {
+                const auto eval_min = hparams.custom_image_min_tokens <= 0 ? 1 : hparams.custom_image_min_tokens;
+                const auto eval_max = hparams.custom_image_max_tokens <= 0 ? hparams.custom_image_min_tokens : hparams.custom_image_max_tokens;
+                const auto old_min = hparams.image_min_pixels, old_max = hparams.image_max_pixels;
+                hparams.set_limit_image_tokens(eval_min, eval_max);
+                hparams.image_min_pixels = std::max(hparams.image_min_pixels, old_min);
+                hparams.image_max_pixels = std::min(hparams.image_max_pixels, old_max);
+            }
+
             // sanity check
             {
                 if (hparams.image_size < 0) {
