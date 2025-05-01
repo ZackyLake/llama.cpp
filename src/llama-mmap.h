@@ -22,6 +22,8 @@ struct llama_file {
     llama_file(FILE * file);
     ~llama_file();
 
+    void hint(bool nocache, bool releasecache) const;
+
     size_t tell() const;
     size_t size() const;
 
@@ -71,6 +73,7 @@ struct llama_mlock {
 
     void init(void * ptr);
     void grow_to(size_t target_size);
+    bool lock_region(size_t offset, size_t size);
 
     static const bool SUPPORTED;
 

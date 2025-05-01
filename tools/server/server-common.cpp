@@ -19,6 +19,7 @@
 #include <sstream>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <cstring>
 #include <type_traits>
 #include <atomic>
@@ -1638,21 +1639,100 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    // Parse the OAI "reasoning_effort" field; "none" disables reasoning.
-    if (body.contains("reasoning_effort")) {
-        auto reasoning_effort = json_value(body, "reasoning_effort", std::string(""));
-        if (reasoning_effort == "none") {
-            inputs.enable_thinking = false;
-            inputs.chat_template_kwargs.erase("reasoning_effort");
-        } else if (!reasoning_effort.empty()) {
+    const bool caps_support_effort = caps.at("supports_reasoning_effort").get<bool>();
+
+    std::optional<bool>        req_enabled;
+    int                        req_budget = -1;
+    std::optional<std::string> req_effort;
+
+    if (chat_template_kwargs_object.contains("enable_thinking") && chat_template_kwargs_object.at("enable_thinking").is_boolean()) {
+        req_enabled = chat_template_kwargs_object.at("enable_thinking").get<bool>();
+    }
+    if (chat_template_kwargs_object.contains("reasoning_effort") && chat_template_kwargs_object.at("reasoning_effort").is_string()) {
+        req_effort = chat_template_kwargs_object.at("reasoning_effort").get<std::string>();
+    }
+    if (body.contains("reasoning")) {
+        const auto & reasoning = body.at("reasoning");
+        if (reasoning.is_boolean()) {
+            req_enabled = reasoning.get<bool>();
+        } else if (reasoning.is_object()) {
+            if (reasoning.contains("enabled") && reasoning.at("enabled").is_boolean()) {
+                req_enabled = reasoning.at("enabled").get<bool>();
+            }
+            req_budget = json_value(reasoning, "max_tokens", req_budget);
+            if (reasoning.contains("effort") && reasoning.at("effort").is_string()) {
+                req_effort = reasoning.at("effort").get<std::string>();
+            }
+        }
+    }
+    if (body.contains("enable_thinking") && body.at("enable_thinking").is_boolean()) {
+        req_enabled = body.at("enable_thinking").get<bool>();
+    }
+    req_budget = json_value(body, "reasoning_budget_tokens",
+                    json_value(body, "thinking_budget_tokens",
+                        json_value(body, "thinking_budget", req_budget)));
+    if (body.contains("reasoning_effort") && body.at("reasoning_effort").is_string()) {
+        req_effort = body.at("reasoning_effort").get<std::string>();
+    }
+
+    if (req_budget == 0) {
+        req_enabled = false;
+    }
+    if (req_effort == "none") {
+        req_enabled = false;
+    }
+
+    if (req_enabled != false && req_effort) {
+        const std::string& reasoning_effort = *req_effort;
+        if (caps_support_effort) {
             const auto rejected = caps.at("reasoning_effort_rejected").get<std::vector<std::string>>();
             if (std::find(rejected.begin(), rejected.end(), reasoning_effort) != rejected.end()) {
                 const auto levels = caps.at("reasoning_effort_levels").get<std::vector<std::string>>();
                 throw std::invalid_argument("reasoning_effort \"" + reasoning_effort + "\" is not supported by the chat template, supported levels: " + string_join(levels, ", "));
             }
             inputs.chat_template_kwargs["reasoning_effort"] = json(reasoning_effort).dump();
+        } else if (req_budget < 0) {
+            float percent = 0.f;
+            if (reasoning_effort == "auto" || reasoning_effort == "default") {}
+            else if (reasoning_effort == "max") percent = 0.8f;
+            else if (reasoning_effort == "xhigh") percent = 0.6f;
+            else if (reasoning_effort == "high") percent = 0.4f;
+            else if (reasoning_effort == "medium") percent = 0.3f;
+            else if (reasoning_effort == "low") percent = 0.20f;
+            else if (reasoning_effort == "minimal") percent = 0.10f;
+            else { LOG_WRN("ignore unknown reasoning.effort [%s]", reasoning_effort.c_str()); }
+            if (percent > 0) {
+                const int max_output_tokens = body.value("max_tokens", 65536); // TODO use n_ctx ??
+                req_budget = static_cast<int>(max_output_tokens * percent);
+            }
         }
     }
+
+    // no explicit enable_thinking, but the request sets a budget or an effort
+    if (!req_enabled && (req_budget >= 0 || req_effort.has_value())) {
+        req_enabled = true;
+    }
+    if (req_enabled) {
+        inputs.enable_thinking = *req_enabled;
+        if (req_enabled == false) {
+            inputs.chat_template_kwargs.erase("reasoning_effort");
+        }
+    }
+    const int reasoning_budget = req_budget >= 0 ? req_budget : opt.reasoning_budget;
+    {
+        json dumpinfo = body;
+        dumpinfo.erase("messages");
+        dumpinfo.erase("model");
+        dumpinfo.erase("tools");
+        printf("==>request: %s\n", dumpinfo.dump().c_str());
+
+        std::string kwa;
+        for (const auto& [k,v] : inputs.chat_template_kwargs) {
+            kwa.append("\"").append(k).append("\":\"").append(v).append("\", ");
+        }
+        printf("==>budget:%d, tpl_arg: %s\n", reasoning_budget, kwa.c_str());
+    }
+    
 
     inputs.force_pure_content = opt.force_pure_content;
 
@@ -1665,12 +1745,6 @@ json oaicompat_chat_params_parse(
 
     // Reasoning budget: pass parameters through to sampling layer
     {
-        int reasoning_budget = json_value(body, "reasoning_budget_tokens",
-                               json_value(body, "thinking_budget_tokens", -1));
-        if (reasoning_budget == -1) {
-            reasoning_budget = opt.reasoning_budget;
-        }
-
         if (!out_session.thinking_end_tags().empty()) {
             llama_params["reasoning_budget_tokens"] = reasoning_budget;
             llama_params["reasoning_budget_start_tag"] = out_session.thinking_start_tag();
