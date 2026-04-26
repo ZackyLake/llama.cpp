@@ -1096,7 +1096,7 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
 
         ggml_cuda_set_device(cuda_ctx->device);
         if (tensors[i]->flags & GGML_TENSOR_FLAG_COMPUTE) {
-            to_bf16(tensors[i]->data, tmp[i].get(), ne, cuda_ctx->stream());
+            to_bf16(tensors[i]->data, tmp[i].get(), 1, ne, cuda_ctx->stream());
         } else {
             CUDA_CHECK(cudaMemsetAsync(tmp[i].get(), 0, ne * sizeof(nv_bfloat16), cuda_ctx->stream()));
         }
@@ -1114,7 +1114,7 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
         ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
 
         ggml_cuda_set_device(cuda_ctx->device);
-        to_fp32(tmp[i].get(), (float *) tensors[i]->data, ne, cuda_ctx->stream());
+        to_fp32(tmp[i].get(), (float *) tensors[i]->data, 1, ne, cuda_ctx->stream());
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1157,7 +1157,7 @@ static bool ggml_backend_cuda_comm_allreduce_internal(
         if (!ggml_is_contiguously_allocated(tensors[i])) {
             GGML_LOG_DEBUG("%s: internal unsupported: tensor[%zu] is not contiguously allocated: ne=%" PRId64 " nbytes=%zu packed=%zu type=%d\n",
                            __func__, i, ne, ggml_nbytes(tensors[i]),
-                           (size_t) ne * ggml_type_size(type) / ggml_blck_size(type), (int) type);
+                           ggml_nrows(tensors[i])*ggml_row_size(type, tensors[i]->ne[0]), (int) type);
             return false;
         }
         if (((uintptr_t) tensors[i]->data & 0xF) != 0) {
@@ -1503,7 +1503,12 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
         if (ggml_is_contiguously_allocated(src0)) {
             const auto convert_func = traits::convert(src0->type);
             GGML_ASSERT(convert_func != nullptr);
-            convert_func(src0->data, src0_alloc.get(), ggml_nelements(src0), main_stream);
+            // The converters take (nrows, n_per_row) so that row-aware types
+            // (those with row meta, e.g. the R4 family) can locate their
+            // per-row super-blocks. Always pass the real row count and ne[0]:
+            // for types without row meta nrows*ne[0] is the flat element count,
+            // and for row-aware types it is the required layout.
+            convert_func(src0->data, src0_alloc.get(), ggml_nrows(src0), src0->ne[0], main_stream);
             const size_t src0_bs = ggml_blck_size(src0->type);
             s01 *= src0_bs;
             s02 *= src0_bs;
@@ -1528,7 +1533,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
         if (ggml_is_contiguously_allocated(src1)) {
             const auto convert_func = traits::convert(src1->type);
             GGML_ASSERT(convert_func != nullptr);
-            convert_func(src1->data, src1_alloc.get(), ggml_nelements(src1), main_stream);
+            convert_func(src1->data, src1_alloc.get(), ggml_nelements(src1), 1, main_stream);
             const size_t src1_bs = ggml_blck_size(src1->type);
             s11 *= src1_bs;
             s12 *= src1_bs;
@@ -1666,7 +1671,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     // Convert output back to F32 if needed
     if (cu_data_type != CUDA_R_32F) {
         const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(traits::ggml_type_val);
-        to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, main_stream);
+        to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, 1, main_stream);
     }
 }
 
@@ -1863,10 +1868,85 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     return use_mul_mat_vec_q;
 }
 
+
+template <int nh>
+static __global__ void hadamard_f32(const char * src, char * dst, int ne0,
+        size_t nb01, size_t nb02, size_t nb03, size_t nb1, size_t nb2, size_t nb3) {
+
+    constexpr float ksqrt2 = 0.707106781f;
+
+    int nc  = ne0/nh;
+    int ii1 = blockIdx.x;
+    int i1  = ii1 / nc;
+    int ic  = ii1 % nc;
+    int i2  = blockIdx.y;
+    int i3  = blockIdx.z;
+
+    int tid = threadIdx.x;
+
+    const float * x = (const float *)((const char *)src + i1*nb01 + i2*nb02 + i3*nb03) + ic*nh;
+          float * y = (      float *)((const char *)dst + i1*nb1  + i2*nb2  + i3*nb3)  + ic*nh;
+
+    __shared__ float ys[nh];
+
+    ys[2*tid+0] = x[2*tid+0] + x[2*tid+1];
+    ys[2*tid+1] = x[2*tid+0] - x[2*tid+1];
+
+    float scale = ksqrt2;
+
+#pragma unroll
+    for (int h = 2; h < nh; h <<= 1) {
+        __syncthreads();
+        int ii = tid/h, jj = tid%h;
+        int j = 2*h*ii+jj;
+        float u = ys[j], v = ys[j+h];
+        ys[j+0] = u + v;
+        ys[j+h] = u - v;
+        scale *= ksqrt2;
+    }
+
+    __syncthreads();
+    y[2*tid+0] = ys[2*tid+0] * scale;
+    y[2*tid+1] = ys[2*tid+1] * scale;
+}
+
+static bool hadamard_f32_cuda(int nh, const char * x, char * y, int ne0, int ne1, int ne2, int ne3,
+        size_t nb01, size_t nb02, size_t nb03, size_t nb1, size_t nb2, size_t nb3, cudaStream_t stream) {
+    int nc = ne0/nh;
+    int nrows = nc*ne1;
+    dim3 num_blocks = dim3(nrows, ne2, ne3);
+    switch (nh) {
+        case  64: hadamard_f32< 64><<<num_blocks,  32, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+        case 128: hadamard_f32<128><<<num_blocks,  64, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+        case 256: hadamard_f32<256><<<num_blocks, 128, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+        case 512: hadamard_f32<512><<<num_blocks, 256, 0, stream>>>(x, y, ne0, nb01, nb02, nb03, nb1, nb2, nb3); break;
+        default: return false;
+    }
+    return true;
+}
+
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGML_TENSOR_BINARY_OP_LOCALS
-
     const int32_t hint = ggml_get_op_params_i32(dst, 1);
+
+    if (hint == GGML_HINT_SRC0_IS_HADAMARD) {
+        
+        GGML_ASSERT(src1->type == GGML_TYPE_F32);
+        GGML_ASSERT(dst ->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_are_same_shape(src1, dst));
+        GGML_ASSERT(src0->ne[0] == src0->ne[1] && src0->ne[0] == src1->ne[0]);
+        GGML_ASSERT(src1->nb[0] == sizeof(float) && dst->nb[0] == sizeof(float));
+        int nh = src1->ne[0];
+        GGML_ASSERT(nh > 1 && (nh & (nh - 1)) == 0);
+        GGML_ASSERT(dst->ne[0] % nh == 0);
+
+        const auto success = hadamard_f32_cuda(nh, (const char *)src1->data, (char *)dst->data, src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+            src1->nb[1], src1->nb[2], src1->nb[3], dst->nb[1], dst->nb[2], dst->nb[3], ctx.stream());
+        if (success) return;
+        
+    }
+
     if (hint == GGML_HINT_SRC0_IS_HADAMARD && ggml_cuda_op_fwht(ctx, src1, dst)) {
         return;
     }
@@ -1904,6 +1984,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_vec_f(ctx, src1, src0, nullptr, &dst_vec);
         return;
     }
+    //printf("mulmat: vec_f[%c] vec_q[%c] f[%c] q[%c]\n", use_mul_mat_vec_f?'Y':'N', use_mul_mat_vec_q?'Y':'N', use_mul_mat_f?'Y':'N', use_mul_mat_q?'Y':'N');
     if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, ne11, /*mul_mat_id =*/ false)) {
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
         return;
@@ -5096,6 +5177,23 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_BF16:
+                    case GGML_TYPE_IQ2_K:
+                    case GGML_TYPE_IQ3_K:
+                    case GGML_TYPE_IQ4_K:
+                    case GGML_TYPE_IQ5_K:
+                    case GGML_TYPE_IQ6_K:
+                    case GGML_TYPE_IQ4_KSS:
+                    case GGML_TYPE_IQ2_KS:
+                    case GGML_TYPE_IQ3_KS:
+                    case GGML_TYPE_IQ4_KS:
+                    case GGML_TYPE_IQ5_KS:
+                    case GGML_TYPE_IQ2_KL:
+                    case GGML_TYPE_IQ1_KT:
+                    case GGML_TYPE_IQ2_KT:
+                    case GGML_TYPE_IQ3_KT:
+                    case GGML_TYPE_IQ4_KT:
+                    case GGML_TYPE_IQ1_S_R4:
+                    case GGML_TYPE_IQ1_M_R4:
                         return true;
                     default:
                         return false;
@@ -5135,6 +5233,26 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_MXFP4:
                         // 32-value sub-blocks, the row size does not guarantee
                         // the QK_K super-blocks the get_rows kernel iterates on
+                        return op->src[0]->ne[0] % QK_K == 0;
+                    case GGML_TYPE_IQ2_K:
+                    case GGML_TYPE_IQ3_K:
+                    case GGML_TYPE_IQ4_K:
+                    case GGML_TYPE_IQ5_K:
+                    case GGML_TYPE_IQ6_K:
+                    case GGML_TYPE_IQ4_KSS:
+                    case GGML_TYPE_IQ2_KS:
+                    case GGML_TYPE_IQ3_KS:
+                    case GGML_TYPE_IQ4_KS:
+                    case GGML_TYPE_IQ5_KS:
+                    case GGML_TYPE_IQ2_KL:
+                    case GGML_TYPE_IQ1_KT:
+                    case GGML_TYPE_IQ2_KT:
+                    case GGML_TYPE_IQ3_KT:
+                    case GGML_TYPE_IQ4_KT:
+                    case GGML_TYPE_IQ1_S_R4:
+                    case GGML_TYPE_IQ1_M_R4:
+                        // The row size does not always guarantee the QK_K
+                        // super-blocks the get_rows kernel iterates on.
                         return op->src[0]->ne[0] % QK_K == 0;
                     default:
                         return false;

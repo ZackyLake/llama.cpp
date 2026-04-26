@@ -376,6 +376,18 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_K,
         .nrows                    = 1,
     },
+    [GGML_TYPE_IQ1_S_R4] = {
+        .from_float               = NULL,
+        .vec_dot                  = ggml_vec_dot_iq1_s_r4_q8_K128,
+        .vec_dot_type             = GGML_TYPE_Q8_K128,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ1_M_R4] = {
+        .from_float               = NULL,
+        .vec_dot                  = ggml_vec_dot_iq1_m_r4_q8_K128,
+        .vec_dot_type             = GGML_TYPE_Q8_K128,
+        .nrows                    = 1,
+    },
     [GGML_TYPE_IQ4_NL] = {
         .from_float               = quantize_row_iq4_nl,
         .vec_dot                  = ggml_vec_dot_iq4_nl_q8_0,
@@ -390,6 +402,18 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_Q8_K] = {
         .from_float               = quantize_row_q8_K,
+    },
+    [GGML_TYPE_Q8_K128] = {
+        .from_float               = quantize_row_q8_K128,
+    },
+    [GGML_TYPE_Q8_0_X4] = {
+        .from_float               = quantize_row_q8_0_x4,
+    },
+    [GGML_TYPE_Q8_1_X4] = {
+        .from_float               = quantize_row_q8_1_x4,
+    },
+    [GGML_TYPE_Q8_2_X4] = {
+        .from_float               = quantize_row_q8_2_x4,
     },
     [GGML_TYPE_BF16] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_bf16,
@@ -411,6 +435,116 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_I32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_i32,
+    },
+    [GGML_TYPE_IQ2_K] = {
+        .from_float               = quantize_row_iq2_k,
+        .vec_dot                  = ggml_vec_dot_iq2_k_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ3_K] = {
+        .from_float               = quantize_row_iq3_k,
+        .vec_dot                  = ggml_vec_dot_iq3_k_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ4_K] = {
+        .from_float               = quantize_row_iq4_k,
+        .vec_dot                  = ggml_vec_dot_iq4_k_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ5_K] = {
+        .from_float               = quantize_row_iq5_k,
+        .vec_dot                  = ggml_vec_dot_iq5_k_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ6_K] = {
+        .from_float               = quantize_row_iq6_k,
+        .vec_dot                  = ggml_vec_dot_iq6_k_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ4_KSS] = {
+        .from_float               = quantize_row_iq4_kss,
+        .vec_dot                  = ggml_vec_dot_iq4_kss_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ2_KS] = {
+        .from_float               = quantize_row_iq2_ks,
+        .vec_dot                  = ggml_vec_dot_iq2_ks_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ3_KS] = {
+        .from_float               = quantize_row_iq3_ks,
+        .vec_dot                  = ggml_vec_dot_iq3_ks_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ4_KS] = {
+        .from_float               = quantize_row_iq4_ks,
+        .vec_dot                  = ggml_vec_dot_iq4_ks_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ5_KS] = {
+        .from_float               = quantize_row_iq5_ks,
+        .vec_dot                  = ggml_vec_dot_iq5_ks_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ2_KL] = {
+        .from_float               = quantize_row_iq2_kl,
+        .vec_dot                  = ggml_vec_dot_iq2_kl_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ1_KT] = {
+        .from_float               = quantize_row_iq1_kt,
+        .vec_dot                  = ggml_vec_dot_iq1_kt_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+//#if defined __AVX2__
+//        .vec_dot_type             = GGML_TYPE_Q8_2_X4,
+//#else
+//        .vec_dot_type             = GGML_TYPE_Q8_0_X4,
+//#endif
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ2_KT] = {
+        .from_float               = quantize_row_iq2_kt,
+        .vec_dot                  = ggml_vec_dot_iq2_kt_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+//#if defined __AVX2__
+//        .vec_dot_type             = GGML_TYPE_Q8_2_X4,
+//#else
+//        .vec_dot_type             = GGML_TYPE_Q8_0_X4,
+//#endif
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ3_KT] = {
+        .from_float               = quantize_row_iq3_kt,
+        .vec_dot                  = ggml_vec_dot_iq3_kt_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+//#if defined __AVX2__
+//        .vec_dot_type             = GGML_TYPE_Q8_2_X4,
+//#else
+//        .vec_dot_type             = GGML_TYPE_Q8_0_X4,
+//#endif
+        .nrows                    = 1,
+    },
+    [GGML_TYPE_IQ4_KT] = {
+        .from_float               = quantize_row_iq4_kt,
+        .vec_dot                  = ggml_vec_dot_iq4_kt_q8_K,
+        .vec_dot_type             = GGML_TYPE_Q8_K,
+//#if defined __AVX2__
+//        .vec_dot_type             = GGML_TYPE_Q8_2_X4,
+//#else
+//        .vec_dot_type             = GGML_TYPE_Q8_0_X4,
+//#endif
+        .nrows                    = 1,
     },
 };
 
@@ -1181,6 +1315,10 @@ static void ggml_compute_forward_mul_mat_one_chunk(
     ggml_vec_dot_t const vec_dot      = type_traits_cpu[type].vec_dot;
     enum ggml_type const vec_dot_type = type_traits_cpu[type].vec_dot_type;
 
+    if (!vec_dot) {
+        GGML_ABORT("no vec_dot for this datatype yet");
+    }
+
     // broadcast factors
     const int64_t r2 = ne12 / ne02;
     const int64_t r3 = ne13 / ne03;
@@ -1206,7 +1344,14 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
     // attempt to reduce false-sharing (does not seem to make a difference)
     // 16 * 2, accounting for mmla kernels
+    // interleaved types (e.g. iq1_s_r4) only need 16
     float tmp[32];
+
+    // interleaved types (e.g. iq1_s_r4) pack nrows_interleaved rows per super-block:
+    // ir0 must step by nrows_interleaved to keep the super-block intact
+    // ir0_step is also the number of rows passed to vec_dot per call
+    const int64_t nrows_interleaved = ggml_get_type_traits(type)->nrows_interleaved;
+    const int64_t ir0_step = nrows_interleaved > 1 ? nrows_interleaved : num_rows_per_vec_dot;
 
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
@@ -1239,11 +1384,14 @@ static void ggml_compute_forward_mul_mat_one_chunk(
                 //    vec_dot(ne00, &dst_col[ir0], src0_row + ir0*nb01, src1_col);
                 //}
 
-                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
-                    vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                // ir0_step doubles as the number of rows processed per vec_dot call:
+                // interleaved types process a whole super-block, other types num_rows_per_vec_dot rows
+                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += ir0_step) {
+                    vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), ir0_step);
                 }
 
-                for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                // interleaved types write one row group per vec_dot call (num_rows_per_vec_dot == 1)
+                for (int64_t cn = 0; cn < num_rows_per_vec_dot; ++cn) {
                     memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), (MIN(iir0 + blck_0, ir0_end) - iir0) * sizeof(float));
                 }
             }
@@ -1393,18 +1541,29 @@ UseGgmlGemm2:;
     // This is the size of the rest of the dimensions of the result
     const int64_t nr1 = ne1 * ne2 * ne3;
 
+    // number of row groups (super-blocks), == nr0 for regular types
+    int64_t nr0g = nr0;
+    // interleaved types pack nrows_interleaved rows per super-block, chunks must not split them
+    const int nrows_interleaved = ggml_get_type_traits(src0->type)->nrows_interleaved;
+    if (nrows_interleaved > 1) {
+        // the dot kernel processes a whole super-block per call, so it must pack a single row
+        GGML_ASSERT(vec_dot_num_rows == 1);
+        GGML_ASSERT(nr0 % nrows_interleaved == 0);
+        nr0g /= nrows_interleaved;
+    }
+
     // Now select a reasonable chunk size.
     int chunk_size = 16;
 
     // We need to step up the size if it's small
-    if (nr0 == 1 || nr1 == 1) {
+    if (nr0g == 1 || nr1 == 1) {
         chunk_size = 64;
     }
 
     // distribute the work across the inner or outer loop based on which one is larger
     // The number of chunks in the 0/1 dim.
-    // CEIL(nr0/chunk_size)
-    int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
+    // CEIL(nr0g/chunk_size)
+    int64_t nchunk0 = (nr0g + chunk_size - 1) / chunk_size;
     int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
 
     // If the chunking is poor for the number of threads on this setup, scrap the whole plan.  Re-chunk it by thread.
@@ -1412,13 +1571,15 @@ UseGgmlGemm2:;
     //   In theory, chunking should be just as useful on NUMA and non NUMA systems, but testing disagreed with that.
     if (nchunk0 * nchunk1 < nth * 4 || ggml_is_numa()) {
         // distribute the thread work across the inner or outer loop based on which one is larger
-        nchunk0 = nr0 > nr1 ? nth : 1; // parallelize by src0 rows
-        nchunk1 = nr0 > nr1 ? 1 : nth; // parallelize by src1 rows
+        nchunk0 = nr0g > nr1 ? nth : 1; // parallelize by src0 rows
+        nchunk1 = nr0g > nr1 ? 1 : nth; // parallelize by src1 rows
     }
 
     // The number of elements in each chunk
-    const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
+    // rows per chunk, a multiple of nrows_interleaved
+    const int64_t dr0g = (nr0g + nchunk0 - 1) / nchunk0;
     const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
+    const int64_t dr0 = dr0g * (nrows_interleaved > 1 ? nrows_interleaved : 1);
 
     // The first chunk comes from our thread_id, the rest will get auto-assigned.
     int current_chunk = ith;
@@ -1438,9 +1599,16 @@ UseGgmlGemm2:;
 
         // these checks are needed to avoid crossing dim1 boundaries
         // can be optimized, but the logic would become more complicated, so keeping it like this for simplicity
+        // interleaved types always pack a single row (asserted above), so this only affects mmla kernels
         if ((nr0 % 2 != 0) || (ne11 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
             num_rows_per_vec_dot = 1;
         }
+
+        // if (src0->type == GGML_TYPE_IQ1_S_R4 || src0->type == GGML_TYPE_IQ1_M_R4) {
+        //     printf("%s: type=%s ir0 [%ld, %ld) ir1 [%ld, %ld) ni=%ld nrpvd=%ld ne00=%ld ne11=%ld\n", __func__,
+        //         ggml_type_name(src0->type), (long) ir0_start, (long) ir0_end, (long) ir1_start, (long) ir1_end,
+        //         (long) nrows_interleaved, (long) num_rows_per_vec_dot, (long) ne00, (long) ne11);
+        // }
         ggml_compute_forward_mul_mat_one_chunk(params, dst, src0->type, num_rows_per_vec_dot, ir0_start, ir0_end, ir1_start, ir1_end);
 
         if (nth >= nchunk0 * nchunk1) {
@@ -1488,6 +1656,10 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
 
     float tmp[16];
 
+    // interleaved types pack nrows_interleaved rows per super-block, process them together
+    const int64_t nrows_interleaved = ggml_get_type_traits(type)->nrows_interleaved;
+    const int64_t ir0_step = nrows_interleaved > 1 ? nrows_interleaved : 1;
+
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
             for (int64_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ++ir1) {
@@ -1513,8 +1685,8 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
 
                 float * dst_col = (float *) ((char *) dst->data + (i1*nb1 + i2*nb2));
 
-                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
-                    vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
+                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += ir0_step) {
+                    vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, ir0_step);
                 }
 
                 memcpy(&dst_col[iir0], tmp, (MIN(iir0 + blck_0, ir0_end) - iir0)*sizeof(float));
@@ -1658,24 +1830,35 @@ static void ggml_compute_forward_mul_mat_id(
         const int64_t nr0 = ne01;
         const int64_t nr1 = cne1;
 
+        // number of row groups (super-blocks), == nr0 for regular types
+        int64_t nr0g = nr0;
+        // interleaved types pack nrows_interleaved rows per super-block, chunks must not split them
+        const int nrows_interleaved = ggml_get_type_traits(type)->nrows_interleaved;
+        if (nrows_interleaved > 1) {
+            GGML_ASSERT(nr0 % nrows_interleaved == 0);
+            nr0g /= nrows_interleaved;
+        }
+
         int chunk_size = 16;
-        if (nr0 == 1 || nr1 == 1) {
+        if (nr0g == 1 || nr1 == 1) {
             chunk_size = 64;
         }
 
         // disable for NUMA
         const bool disable_chunking = ggml_is_numa();
 
-        int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
+        int64_t nchunk0 = (nr0g + chunk_size - 1) / chunk_size;
         int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
 
         if (nchunk0 * nchunk1 < nth * 4 || disable_chunking) {
-            nchunk0 = nr0 > nr1 ? nth : 1;
-            nchunk1 = nr0 > nr1 ? 1 : nth;
+            nchunk0 = nr0g > nr1 ? nth : 1;
+            nchunk1 = nr0g > nr1 ? 1 : nth;
         }
 
-        const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
+        // rows per chunk, a multiple of nrows_interleaved
+        const int64_t dr0g = (nr0g + nchunk0 - 1) / nchunk0;
         const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
+        const int64_t dr0 = dr0g * (nrows_interleaved > 1 ? nrows_interleaved : 1);
 
         int current_chunk = ith;
 
