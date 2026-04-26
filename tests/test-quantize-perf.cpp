@@ -1,7 +1,7 @@
 // Benchmark quantization specific functions on synthetic data
 
 #include "ggml.h"
-#include "ggml-cpu.h"
+#include "test-quantize-cpu.h"
 
 #undef NDEBUG
 #include <algorithm>
@@ -31,6 +31,7 @@
 struct quantize_perf_params {
     std::vector<std::string> include_types;
     std::vector<size_t> test_sizes;
+    std::string cpu_variant;
     size_t alignment_offset = 0;
     bool op_quantize_row_q_reference = false;
     bool op_quantize_row_q = false;
@@ -123,7 +124,7 @@ static void usage(char * argv[]) {
     for (int i = 0; i < GGML_TYPE_COUNT; i++) {
         ggml_type type = (ggml_type) i;
         const auto * qfns     = ggml_get_type_traits(type);
-        const auto * qfns_cpu = ggml_get_type_traits_cpu(type);
+        const auto * qfns_cpu = get_type_traits_cpu(type);
         if (ggml_type_name(type) != NULL) {
             if (qfns_cpu->from_float && qfns->to_float) {
                 printf(" %s", ggml_type_name(type));
@@ -131,6 +132,7 @@ static void usage(char * argv[]) {
         }
     }
     printf(" (all)\n");
+    printf("  --cpu VARIANT         select CPU backend variant\n");
     printf("  --alignment-offset OFFSET\n");
     printf("                        set alignment offset as OFFSET (0)\n");
     printf("  -i NUM, --iterations NUM\n");
@@ -143,6 +145,7 @@ int main(int argc, char * argv[]) {
     // read command line
 
     bool invalid_param = false;
+    bool show_help = false;
     std::string arg;
     for (int i = 1; i < argc; i++) {
         arg = argv[i];
@@ -196,6 +199,12 @@ int main(int argc, char * argv[]) {
                 break;
             }
             params.include_types.push_back(argv[i]);
+        } else if (arg == "--cpu") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            params.cpu_variant = argv[i];
         } else if (arg == "--alignment-offset") {
             if (++i >= argc) {
                 invalid_param = true;
@@ -221,8 +230,8 @@ int main(int argc, char * argv[]) {
             }
             params.iterations = number;
         } else if ((arg == "-h") || (arg == "--help")) {
-            usage(argv);
-            return 1;
+            show_help = true;
+            break;
         } else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             return 1;
@@ -230,6 +239,12 @@ int main(int argc, char * argv[]) {
     }
     if (invalid_param) {
         fprintf(stderr, "error: invalid parameter for argument: %s\n", arg.c_str());
+        return 1;
+    }
+
+    init_cpu_backend(params.cpu_variant);
+    if (show_help) {
+        usage(argv);
         return 1;
     }
 
@@ -260,20 +275,20 @@ int main(int argc, char * argv[]) {
 
     int64_t iterations = params.iterations;
 
-    ggml_cpu_init();
-
     for (int i = 0; i < GGML_TYPE_COUNT; i++) {
         ggml_type type = (ggml_type) i;
         const auto * qfns = ggml_get_type_traits(type);
-        const auto * qfns_cpu = ggml_get_type_traits_cpu(type);
+        const auto * qfns_cpu = get_type_traits_cpu(type);
         if (!params.include_types.empty() && ggml_type_name(type) && std::find(params.include_types.begin(), params.include_types.end(), ggml_type_name(type)) == params.include_types.end()) {
             continue;
         }
-
-        if (qfns_cpu->from_float && qfns->to_float) {
+        if (qfns_cpu->from_float && qfns->to_float && qfns->from_float_ref) {
             printf("%s\n", ggml_type_name(type));
 
             ggml_quantize_init(type);
+
+            const auto * vdot = get_type_traits_cpu(qfns_cpu->vec_dot_type);
+            const auto * vdot_name = ggml_type_name(qfns_cpu->vec_dot_type);
 
             if (params.op_quantize_row_q_reference) {
                 printf("  quantize_row_q_reference\n");
@@ -318,12 +333,11 @@ int main(int argc, char * argv[]) {
                 printf("\n");
             }
 
-            if (params.op_quantize_row_q_dot) {
-                printf("  quantize_row_q_dot\n");
+            if (params.op_quantize_row_q_dot && vdot && vdot->from_float && qfns_cpu->vec_dot_type != type) {
+                printf("  quantize_row_q_dot (%s)\n", vdot_name);
                 for (size_t size : params.test_sizes) {
                     printf("    %zu values (%.2f MB)\n", size, 4*size/(float)(1024*1024));
                     auto quantize_fn = [&](void) -> float {
-                        const auto * vdot = ggml_get_type_traits_cpu(qfns_cpu->vec_dot_type);
                         vdot->from_float(test_data1, test_q1, size);
                         return test_q1[0];
                     };
@@ -333,8 +347,8 @@ int main(int argc, char * argv[]) {
                 printf("\n");
             }
 
-            if (params.op_vec_dot_q) {
-                printf("  vec_dot_q\n");
+            if (params.op_vec_dot_q && qfns_cpu->vec_dot) {
+                printf("  vec_dot_q (%s)\n", vdot_name);
                 qfns_cpu->from_float(test_data1, test_q1, largest);
                 qfns_cpu->from_float(test_data2, test_q2, largest);
                 for (size_t size : params.test_sizes) {
