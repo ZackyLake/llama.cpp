@@ -72,6 +72,25 @@ static const std::vector<quant_option> QUANT_OPTIONS = {
     { "F32",      LLAMA_FTYPE_ALL_F32,         "26.00G              @ 7B",          },
     // Note: Ensure COPY comes after F32 to avoid ftype 0 from matching.
     { "COPY",     LLAMA_FTYPE_ALL_F32,         "only copy tensors, no quantizing",  },
+
+    { "IQ2_K",    LLAMA_FTYPE_MOSTLY_IQ2_K,    " 2.375 bpw IQ2_K quantization",     },
+    { "IQ3_K",    LLAMA_FTYPE_MOSTLY_IQ3_K,    " 3.44  bpw IQ3_K quantization",     },
+    { "IQ4_K",    LLAMA_FTYPE_MOSTLY_IQ4_K,    " 4.5   bpw IQ4_K quantization",     },
+    { "IQ5_K",    LLAMA_FTYPE_MOSTLY_IQ5_K,    " 5.5   bpw IQ5_K quantization",     },
+    { "IQ6_K",    LLAMA_FTYPE_MOSTLY_IQ6_K,    " 6.625 bpw IQ6_K quantization",     },
+    { "IQ4_KSS",  LLAMA_FTYPE_MOSTLY_IQ4_KSS,  " 4.0 bpw non-linear quantization",  },
+    { "IQ2_KS",   LLAMA_FTYPE_MOSTLY_IQ2_KS,   " 2.1875 bpw non-linear quantization",},
+    { "IQ3_KS",   LLAMA_FTYPE_MOSTLY_IQ3_KS,   " 3.19 bpw non-linear quantization", },
+    { "IQ4_KS",   LLAMA_FTYPE_MOSTLY_IQ4_KS,   " 4.25 bpw non-linear quantization", },
+    { "IQ5_KS",   LLAMA_FTYPE_MOSTLY_IQ5_KS,   " 5.25 bpw non-linear quantization", },
+    { "IQ2_KL",   LLAMA_FTYPE_MOSTLY_IQ2_KL,   " 2.69 bpw non-linear quantization", },
+    { "IQ1_KT",   LLAMA_FTYPE_MOSTLY_IQ1_KT,   " 1.75 bpw trellis quantization",    },
+    { "IQ2_KT",   LLAMA_FTYPE_MOSTLY_IQ2_KT,   " 2.125 bpw trellis quantization",   },
+    { "IQ3_KT",   LLAMA_FTYPE_MOSTLY_IQ3_KT,   " 3.125 bpw trellis quantization",   },
+    { "IQ4_KT",   LLAMA_FTYPE_MOSTLY_IQ4_KT,   " 4.0 bpw trellis quantization",     },
+    { "IQ3_KL",   LLAMA_FTYPE_MOSTLY_IQ3_KL,   " 4 bpw non-linear quantization mix",},
+    { "IQ1_S_R4", LLAMA_FTYPE_MOSTLY_IQ1_S_R4, " 1.5 bpw row-4 quantization",       },
+    { "IQ1_M_R4", LLAMA_FTYPE_MOSTLY_IQ1_M_R4, " 1.75 bpw row-4 quantization",      },
 };
 
 static const char * const LLM_KV_QUANTIZE_IMATRIX_FILE       = "quantize.imatrix.file";

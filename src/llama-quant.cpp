@@ -5,11 +5,15 @@
 #include "llama.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <cinttypes>
+#include <condition_variable>
 #include <fstream>
+#include <functional>
 #include <mutex>
+#include <numeric>
 #include <regex>
 #include <thread>
 #include <unordered_map>
@@ -210,14 +214,84 @@ struct tensor_metadata {
     bool            requires_imatrix;
 };
 
+struct llama_quantize_threadpool {
+    uint32_t finish_count = 0;
+    std::atomic<int32_t> gen_id = 0;
+    std::condition_variable condition;
+    std::condition_variable condition_finished;
+    std::mutex mutex;
+    std::vector<std::function<void()>> functions;
+    std::vector<std::thread> threads;
+
+    llama_quantize_threadpool(int nthreads) {
+        threads.reserve(nthreads > 1 ? nthreads - 1 : 0);
+        functions.reserve(nthreads);
+        for (int ith = 0; ith < nthreads - 1; ++ith) {
+            threads.emplace_back([this, ith]() {
+                int32_t local_gen_id = 0;
+                std::unique_lock<std::mutex> lock(mutex);
+                while (true) {
+                    condition.wait(lock, [this, &local_gen_id]() {
+                        const int32_t current_gen_id = gen_id.load(std::memory_order_acquire);
+                        if (current_gen_id == local_gen_id) {
+                            return false;
+                        }
+                        local_gen_id = current_gen_id;
+                        return true;
+                    });
+                    if (local_gen_id == -1) {
+                        return;
+                    }
+
+                    lock.unlock();
+                    if ((size_t) ith < functions.size()) {
+                        functions[ith]();
+                    }
+                    lock.lock();
+                    const uint32_t count = ++finish_count;
+                    if (count == threads.size()) {
+                        condition_finished.notify_one();
+                    }
+                }
+            });
+        }
+    }
+
+    ~llama_quantize_threadpool() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            gen_id.store(-1, std::memory_order_release);
+            condition.notify_all();
+        }
+        for (auto & thread : threads) {
+            thread.join();
+        }
+    }
+
+    void issue() {
+        std::lock_guard<std::mutex> lock(mutex);
+        finish_count = 0;
+        gen_id.fetch_add(1, std::memory_order_release);
+        condition.notify_all();
+    }
+
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        while (finish_count != threads.size()) {
+            condition_finished.wait(lock);
+        }
+    }
+};
+
 //
 // dequantization
 //
 
 static void llama_tensor_dequantize_impl(
-    ggml_type type, const void * data, float * f32_output, std::vector<std::thread> & workers,
-    const size_t nelements, const int nthread
+    ggml_type type, const void * data, float * f32_output, llama_quantize_threadpool & threadpool,
+    const int64_t n_per_row, const int64_t total_rows, const int nthread
 ) {
+    const size_t nelements = total_rows * n_per_row;
     const ggml_type_traits * qtype = ggml_get_type_traits(type);
     if (ggml_is_quantized(type)) {
         if (qtype->to_float == NULL) {
@@ -234,37 +308,42 @@ static void llama_tensor_dequantize_impl(
         } else if (type == GGML_TYPE_BF16) {
             ggml_bf16_to_fp32_row((const ggml_bf16_t *)data, f32_output, nelements);
         } else if (ggml_is_quantized(type)) {
-            qtype->to_float(data, f32_output, nelements);
+            // row meta is stored at the start of each row, so dequantize row by row
+            // interleaved rows share a super-block, so dequantize nrows_interleaved rows at once
+            const int64_t nrows    = total_rows;
+            const size_t  row_size = ggml_row_size(type, n_per_row);
+            const int64_t num_rows = qtype->nrows_interleaved > 1 ? qtype->nrows_interleaved : 1;
+            GGML_ASSERT(nrows % num_rows == 0);
+            auto qsrc = (const char *) data;
+            for (int64_t row = 0; row < nrows; row += num_rows) {
+                qtype->to_float(qsrc, f32_output, num_rows*n_per_row);
+                qsrc       += num_rows*row_size;
+                f32_output += num_rows*n_per_row;
+            }
         } else {
             GGML_ABORT("fatal error"); // unreachable
         }
         return;
     }
 
-    size_t block_size;
-    if (type == GGML_TYPE_F16 ||
-        type == GGML_TYPE_BF16) {
-        block_size = 1;
-    } else {
-        block_size = (size_t)ggml_blck_size(type);
-    }
+    const size_t row_size = ggml_row_size(type, n_per_row);
+    const int64_t nrows_per_unit = std::max<int64_t>(1, qtype->nrows_interleaved);
+    GGML_ASSERT(total_rows % nrows_per_unit == 0);
 
-    size_t block_size_bytes = ggml_type_size(type);
+    const int64_t nunits = total_rows / nrows_per_unit;
+    const int64_t units_per_thread = nunits / nthread;
+    const int64_t spare_units = nunits - units_per_thread*nthread;
+    const int64_t n_per_unit = nrows_per_unit*n_per_row;
 
-    GGML_ASSERT(nelements % block_size == 0);
-    size_t nblocks = nelements / block_size;
-    size_t blocks_per_thread = nblocks / nthread;
-    size_t spare_blocks = nblocks - (blocks_per_thread * nthread); // if blocks aren't divisible by thread count
-
-    size_t in_buff_offs = 0;
-    size_t out_buff_offs = 0;
-
-    for (int tnum = 0; tnum < nthread; tnum++) {
-        size_t thr_blocks = blocks_per_thread + (tnum == nthread - 1 ? spare_blocks : 0); // num blocks for this thread
-        size_t thr_elems = thr_blocks * block_size; // number of elements for this thread
-        size_t thr_block_bytes = thr_blocks * block_size_bytes; // number of input bytes for this thread
-
-        auto compute = [qtype] (ggml_type typ, const uint8_t * inbuf, float * outbuf, int nels) {
+    auto compute = [qtype, n_per_unit, row_size, nrows_per_unit] (ggml_type typ, const uint8_t * inbuf, float * outbuf, int64_t n_unit) {
+        if (qtype->row_meta_size > 0) {
+            for (int64_t unit = 0; unit < n_unit; unit++) {
+                qtype->to_float(inbuf, outbuf, n_per_unit);
+                inbuf  += nrows_per_unit*row_size;
+                outbuf += n_per_unit;
+            }
+        } else {
+            const auto nels = n_unit * n_per_unit;
             if (typ == GGML_TYPE_F16) {
                 ggml_fp16_to_fp32_row((const ggml_fp16_t *)inbuf, outbuf, nels);
             } else if (typ == GGML_TYPE_BF16) {
@@ -272,13 +351,22 @@ static void llama_tensor_dequantize_impl(
             } else {
                 qtype->to_float(inbuf, outbuf, nels);
             }
-        };
-        workers.emplace_back(compute, type, (const uint8_t *) data + in_buff_offs, f32_output + out_buff_offs, thr_elems);
-        in_buff_offs += thr_block_bytes;
-        out_buff_offs += thr_elems;
+        }
+    };
+
+    threadpool.functions.clear();
+    size_t in_buff_offs = 0;
+    size_t out_buff_offs = 0;
+    for (int tnum = 0; tnum < nthread - 1; tnum++) {
+        threadpool.functions.emplace_back([compute, type, inbuf = (const uint8_t *) data + in_buff_offs, outbuf = f32_output + out_buff_offs, units_per_thread]() {
+            compute(type, inbuf, outbuf, units_per_thread);
+        });
+        in_buff_offs += units_per_thread * nrows_per_unit * row_size;
+        out_buff_offs += units_per_thread * n_per_unit;
     }
-    for (auto & w : workers) { w.join(); }
-    workers.clear();
+    threadpool.issue();
+    compute(type, (const uint8_t *) data + in_buff_offs, f32_output + out_buff_offs, units_per_thread + spare_units);
+    threadpool.wait();
 }
 
 //
@@ -469,8 +557,15 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS ||
                      ftype == LLAMA_FTYPE_MOSTLY_IQ1_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ2_S  || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M   ||
-                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
-                new_type = GGML_TYPE_Q5_K;
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_M   || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S_R4 || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M_R4 ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ2_K   || ftype == LLAMA_FTYPE_MOSTLY_IQ3_K  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ2_KS  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_KS  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_KT  || ftype == LLAMA_FTYPE_MOSTLY_IQ2_KT || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KT) {
+                new_type = qs.has_tied_embeddings ? GGML_TYPE_IQ4_K : GGML_TYPE_Q5_K;
+            }
+            else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_S  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_M  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KL  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ4_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ4_KS || ftype == LLAMA_FTYPE_MOSTLY_IQ4_KSS) {
+                new_type = qs.has_tied_embeddings ? GGML_TYPE_IQ5_K : GGML_TYPE_Q6_K;
             }
             else if (new_type != GGML_TYPE_Q8_0) {
                 new_type = GGML_TYPE_Q6_K;
@@ -494,7 +589,8 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             new_type = qs.params->token_embedding_type;
         } else {
             if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS ||
-                ftype == LLAMA_FTYPE_MOSTLY_IQ1_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
+                ftype == LLAMA_FTYPE_MOSTLY_IQ1_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M ||
+                ftype == LLAMA_FTYPE_MOSTLY_IQ1_S_R4 || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M_R4) {
                 new_type = GGML_TYPE_Q2_K;
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M) {
@@ -508,7 +604,8 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             }
         }
     } else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S ||
-               ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M    || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
+               ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M    || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M ||
+               ftype == LLAMA_FTYPE_MOSTLY_IQ1_S_R4 || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M_R4) {
         if (category_is_attn_v(category)) {
             if (qs.model.hparams.n_gqa() >= 4 || qs.model.hparams.n_expert >= 4) new_type = GGML_TYPE_Q4_K;
             else new_type = ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M ? GGML_TYPE_IQ3_S : GGML_TYPE_Q2_K;
@@ -537,6 +634,15 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
         }
         else if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K_S && qs.model.hparams.n_gqa() >= 4) {
             new_type = GGML_TYPE_Q4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_K) {
+            new_type = qs.model.hparams.n_gqa() >= 2 ? GGML_TYPE_IQ4_K : GGML_TYPE_IQ3_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_K && qs.model.hparams.n_gqa() >= 2) {
+            new_type = GGML_TYPE_IQ4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ4_K && qs.model.hparams.n_gqa() >= 2) {
+            new_type = GGML_TYPE_IQ5_K;
         }
         else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
             new_type = qs.model.hparams.n_gqa() >= 4 ? GGML_TYPE_Q4_K : !qs.has_imatrix ? GGML_TYPE_IQ3_S : GGML_TYPE_IQ3_XXS;
@@ -648,6 +754,9 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M ) new_type = GGML_TYPE_Q4_K;
                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L ) new_type = GGML_TYPE_Q5_K;
                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_M  ) new_type = GGML_TYPE_Q4_K;
+                else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_K) {
+                    new_type = GGML_TYPE_IQ3_K;
+                }
             }
         } else {
             if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) new_type = GGML_TYPE_Q4_K;
@@ -745,7 +854,7 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
 
 // quantize rows [first_row, first_row + nrows), indexed globally across all expert matrices
 // note: chunks never cross an expert boundary since each expert has its own imatrix slice
-static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * f32_data, void * new_data, const int64_t chunk_size, int64_t first_row, int64_t nrows, int64_t nrows_per_expert, int64_t n_per_row, const float * imatrix, std::vector<std::thread> & workers, const int nthread) {
+static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * f32_data, void * new_data, const int64_t nrows_chunk, int64_t first_row, int64_t nrows, int64_t nrows_per_expert, int64_t n_per_row, const float * imatrix, llama_quantize_threadpool & threadpool, const int nthread) {
     const size_t row_size = ggml_row_size(new_type, n_per_row);
 
     auto imatrix_for_row = [=](int64_t row_global) {
@@ -773,9 +882,8 @@ static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * 
     int64_t counter = 0;
     size_t new_size = 0;
     bool valid = true;
-    auto compute = [&mutex, &counter, &new_size, &valid, new_type, f32_data, new_data, chunk_size,
+    auto compute = [&mutex, &counter, &new_size, &valid, new_type, f32_data, new_data, nrows_chunk,
             first_row, nrows, nrows_per_expert, n_per_row, row_size, imatrix_for_row]() {
-        const int64_t nrows_per_chunk = chunk_size / n_per_row;
         size_t local_size = 0;
         while (true) {
             std::unique_lock<std::mutex> lock(mutex);
@@ -788,7 +896,7 @@ static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * 
             const int64_t row        = counter;
             const int64_t row_global = first_row + row;
             // stop at the expert boundary
-            const int64_t this_nrow  = std::min(std::min(nrows - row, nrows_per_chunk), nrows_per_expert - row_global % nrows_per_expert);
+            const int64_t this_nrow  = std::min(std::min(nrows - row, nrows_chunk), nrows_per_expert - row_global % nrows_per_expert);
             counter += this_nrow;
             lock.unlock();
 
@@ -804,12 +912,13 @@ static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * 
             }
         }
     };
+    threadpool.functions.clear();
     for (int it = 0; it < nthread - 1; ++it) {
-        workers.emplace_back(compute);
+        threadpool.functions.emplace_back(compute);
     }
+    threadpool.issue();
     compute();
-    for (auto & w : workers) { w.join(); }
-    workers.clear();
+    threadpool.wait();
     if (!valid) {
         throw std::runtime_error("quantized data validation failed");
     }
@@ -881,10 +990,29 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ3_XXS: return GGML_TYPE_IQ3_XXS;
         case LLAMA_FTYPE_MOSTLY_IQ1_S:   return GGML_TYPE_IQ1_S;
         case LLAMA_FTYPE_MOSTLY_IQ1_M:   return GGML_TYPE_IQ1_M;
+        case LLAMA_FTYPE_MOSTLY_IQ1_S_R4:return GGML_TYPE_IQ1_S_R4;
+        case LLAMA_FTYPE_MOSTLY_IQ1_M_R4:return GGML_TYPE_IQ1_M_R4;
         case LLAMA_FTYPE_MOSTLY_IQ4_NL:  return GGML_TYPE_IQ4_NL;
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:  return GGML_TYPE_IQ4_XS;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:
         case LLAMA_FTYPE_MOSTLY_IQ3_M:   return GGML_TYPE_IQ3_S;
+
+        case LLAMA_FTYPE_MOSTLY_IQ2_K:   return GGML_TYPE_IQ2_K;
+        case LLAMA_FTYPE_MOSTLY_IQ3_K:   return GGML_TYPE_IQ3_K;
+        case LLAMA_FTYPE_MOSTLY_IQ4_K:   return GGML_TYPE_IQ4_K;
+        case LLAMA_FTYPE_MOSTLY_IQ5_K:   return GGML_TYPE_IQ5_K;
+        case LLAMA_FTYPE_MOSTLY_IQ6_K:   return GGML_TYPE_IQ6_K;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KSS: return GGML_TYPE_IQ4_KSS;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KS:  return GGML_TYPE_IQ2_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KS:  return GGML_TYPE_IQ3_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KS:  return GGML_TYPE_IQ4_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ5_KS:  return GGML_TYPE_IQ5_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KL:  return GGML_TYPE_IQ2_KL;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KL:  return GGML_TYPE_IQ3_K;
+        case LLAMA_FTYPE_MOSTLY_IQ1_KT:  return GGML_TYPE_IQ1_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KT:  return GGML_TYPE_IQ2_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KT:  return GGML_TYPE_IQ3_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KT:  return GGML_TYPE_IQ4_KT;
 
         default: return GGML_TYPE_COUNT;
     }
@@ -1124,12 +1252,10 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     size_t total_size_org = 0;
     size_t total_size_new = 0;
 
-    std::vector<std::thread> workers;
-    workers.reserve(nthread);
-
     std::vector<no_init<uint8_t>> read_data;
     std::vector<no_init<uint8_t>> work;
     std::vector<no_init<float>> f32_conv_buf;
+    llama_quantize_threadpool threadpool(nthread);
 
     const size_t max_buf_size = params->max_buf_size ? params->max_buf_size : LLAMA_QUANT_MAX_BUF_SIZE;
 
@@ -1286,10 +1412,19 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
                 // process the rows in slabs, so that the buffers stay below max_buf_size
                 const size_t bytes_per_row = row_size_src + row_size_dst + (tensor->type == GGML_TYPE_F32 ? 0 : n_per_row*sizeof(float));
-                const int64_t nrows_slab = std::max<int64_t>(1, std::min<int64_t>(nrows_total, max_buf_size/bytes_per_row));
+
+                const int64_t nrows_interleaved_src = std::max<int64_t>(1, ggml_get_type_traits(tensor->type)->nrows_interleaved);
+                const int64_t nrows_interleaved = std::max<int64_t>(1, ggml_get_type_traits(new_type)->nrows_interleaved);
+                const int64_t nrows_interleaved_slab = std::lcm(nrows_interleaved_src, nrows_interleaved);
+                GGML_ASSERT(nrows_per_expert % nrows_interleaved_slab == 0);
+
+                const int64_t nrows_slab_max = std::min<int64_t>(nrows_total, max_buf_size/bytes_per_row);
+                const int64_t nrows_slab = std::max<int64_t>(nrows_interleaved_slab, (nrows_slab_max/nrows_interleaved_slab)*nrows_interleaved_slab);
 
                 static const int64_t min_chunk_size = 32 * 512;
-                const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row));
+                // interleaved rows share a super-block, so the chunk size must hold a multiple of nrows_interleaved rows
+                const int64_t nrows_chunk_min = std::max<int64_t>(1, (min_chunk_size + n_per_row - 1)/n_per_row);
+                const int64_t nrows_chunk = ((nrows_chunk_min + nrows_interleaved - 1)/nrows_interleaved)*nrows_interleaved;
 
                 // process rows across all experts in one pass to keep all threads busy
                 new_size = 0;
@@ -1306,7 +1441,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                         if (f32_conv_buf.size() < (size_t) nelements_cur) {
                             f32_conv_buf.resize(nelements_cur);
                         }
-                        llama_tensor_dequantize_impl(tensor->type, src, (float *) f32_conv_buf.data(), workers, nelements_cur, nthread);
+                        llama_tensor_dequantize_impl(tensor->type, src, (float *) f32_conv_buf.data(), threadpool, n_per_row, nrows_cur, nthread);
                         f32_data = (const float *) f32_conv_buf.data();
                     }
 
@@ -1314,10 +1449,10 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                         work.resize(nrows_cur*row_size_dst);
                     }
 
-                    const int64_t nchunk = (nelements_cur + chunk_size - 1)/chunk_size;
+                    const int64_t nchunk = (nrows_cur + nrows_chunk - 1)/nrows_chunk;
                     const int64_t nthread_use = nthread > 1 ? std::max((int64_t)1, std::min((int64_t)nthread, nchunk)) : 1;
 
-                    const size_t size_cur = llama_tensor_quantize_impl(new_type, f32_data, work.data(), chunk_size, ir, nrows_cur, nrows_per_expert, n_per_row, imatrix, workers, nthread_use);
+                    const size_t size_cur = llama_tensor_quantize_impl(new_type, f32_data, work.data(), nrows_chunk, ir, nrows_cur, nrows_per_expert, n_per_row, imatrix, threadpool, nthread_use);
 
                     fout.write((const char *) work.data(), size_cur);
                     new_size += size_cur;
