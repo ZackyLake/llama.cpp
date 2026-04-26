@@ -518,7 +518,7 @@ static __global__ void quantize_mmq_q8_1(
     q.y = roundf(xi.y*d_inv);
     q.z = roundf(xi.z*d_inv);
     q.w = roundf(xi.w*d_inv);
-    const float d = 1.0f / d_inv;
+    float d = amax / 127.f;
 
     // write the block once (normal) or to each of the token's compact rows (scatter)
     const int nwrite = scatter ? n_expert_used : 1;
@@ -546,6 +546,8 @@ static __global__ void quantize_mmq_q8_1(
             }
         } else if (iqs % 32 == 0) {
             if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
+                d = max(-65504.0f, min(65504.f, d));
+                sum = max(-65504.0f, min(65504.f, sum));
                 y[ib].ds4[iqs/32] = make_half2(d, sum);
             } else {
                 y[ib].d4[iqs/32]  = d;
