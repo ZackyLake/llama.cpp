@@ -975,7 +975,7 @@ void launch_fattn(
         K_f16.alloc(ggml_nelements(K));
         if (ggml_is_contiguously_allocated(K)) {
             to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(K->type);
-            to_fp16(K_data, K_f16.ptr, ggml_nelements(K), main_stream);
+            to_fp16(K_data, K_f16.ptr, 1, ggml_nelements(K), main_stream);
 
             nb11 = nb11*bs*sizeof(half)/ts;
             nb12 = nb12*bs*sizeof(half)/ts;
@@ -1008,7 +1008,7 @@ void launch_fattn(
             V_f16.alloc(ggml_nelements(V));
             if (ggml_is_contiguously_allocated(V)) {
                 to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(V->type);
-                to_fp16(V_data, V_f16.ptr, ggml_nelements(V), main_stream);
+                to_fp16(V_data, V_f16.ptr, 1, ggml_nelements(V), main_stream);
                 V_data = (char *) V_f16.ptr;
 
                 nb21 = nb21*bs*sizeof(half)/ts;

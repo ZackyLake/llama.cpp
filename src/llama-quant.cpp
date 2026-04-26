@@ -451,8 +451,15 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS ||
                      ftype == LLAMA_FTYPE_MOSTLY_IQ1_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ2_S  || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M   ||
-                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
-                new_type = GGML_TYPE_Q5_K;
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_M   || 
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ2_K   || ftype == LLAMA_FTYPE_MOSTLY_IQ3_K  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ2_KS  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_KS  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_KT  || ftype == LLAMA_FTYPE_MOSTLY_IQ2_KT || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KT) {
+                new_type = qs.has_tied_embeddings ? GGML_TYPE_IQ4_K : GGML_TYPE_Q5_K;
+            }
+            else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_S  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_M  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_KL  ||
+                     ftype == LLAMA_FTYPE_MOSTLY_IQ4_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ4_KS || ftype == LLAMA_FTYPE_MOSTLY_IQ4_KSS) {
+                new_type = qs.has_tied_embeddings ? GGML_TYPE_IQ5_K : GGML_TYPE_Q6_K;
             }
             else if (new_type != GGML_TYPE_Q8_0) {
                 new_type = GGML_TYPE_Q6_K;
@@ -514,6 +521,15 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
         }
         else if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K_S && qs.model.hparams.n_gqa() >= 4) {
             new_type = GGML_TYPE_Q4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_K) {
+            new_type = qs.model.hparams.n_gqa() >= 2 ? GGML_TYPE_IQ4_K : GGML_TYPE_IQ3_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_K && qs.model.hparams.n_gqa() >= 2) {
+            new_type = GGML_TYPE_IQ4_K;
+        }
+        else if (ftype == LLAMA_FTYPE_MOSTLY_IQ4_K && qs.model.hparams.n_gqa() >= 2) {
+            new_type = GGML_TYPE_IQ5_K;
         }
         else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
             new_type = qs.model.hparams.n_gqa() >= 4 ? GGML_TYPE_Q4_K : !qs.has_imatrix ? GGML_TYPE_IQ3_S : GGML_TYPE_IQ3_XXS;
@@ -625,6 +641,9 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M ) new_type = GGML_TYPE_Q4_K;
                 else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L ) new_type = GGML_TYPE_Q5_K;
                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_M  ) new_type = GGML_TYPE_Q4_K;
+                else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_K) {
+                    new_type = GGML_TYPE_IQ3_K;
+                }
             }
         } else {
             if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) new_type = GGML_TYPE_Q4_K;
@@ -828,6 +847,23 @@ ggml_type llama_ftype_get_default_type(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:  return GGML_TYPE_IQ4_XS;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:
         case LLAMA_FTYPE_MOSTLY_IQ3_M:   return GGML_TYPE_IQ3_S;
+
+        case LLAMA_FTYPE_MOSTLY_IQ2_K:   return GGML_TYPE_IQ2_K;
+        case LLAMA_FTYPE_MOSTLY_IQ3_K:   return GGML_TYPE_IQ3_K;
+        case LLAMA_FTYPE_MOSTLY_IQ4_K:   return GGML_TYPE_IQ4_K;
+        case LLAMA_FTYPE_MOSTLY_IQ5_K:   return GGML_TYPE_IQ5_K;
+        case LLAMA_FTYPE_MOSTLY_IQ6_K:   return GGML_TYPE_IQ6_K;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KSS: return GGML_TYPE_IQ4_KSS;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KS:  return GGML_TYPE_IQ2_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KS:  return GGML_TYPE_IQ3_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KS:  return GGML_TYPE_IQ4_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ5_KS:  return GGML_TYPE_IQ5_KS;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KL:  return GGML_TYPE_IQ2_KL;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KL:  return GGML_TYPE_IQ3_K;
+        case LLAMA_FTYPE_MOSTLY_IQ1_KT:  return GGML_TYPE_IQ1_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ2_KT:  return GGML_TYPE_IQ2_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ3_KT:  return GGML_TYPE_IQ3_KT;
+        case LLAMA_FTYPE_MOSTLY_IQ4_KT:  return GGML_TYPE_IQ4_KT;
 
         default: return GGML_TYPE_COUNT;
     }

@@ -4158,6 +4158,26 @@ class GGMLQuantizationType(IntEnum):
     NVFP4   = 40
     Q1_0    = 41
 
+    # IDs must match ik_llama.cpp for GGUF interoperability
+    Q8_0_X4 = 97,
+    Q8_1_X4 = 98,
+    Q8_2_X4 = 99,
+    IQ2_K   = 137  # 2.375 bpw
+    IQ3_K   = 138  # 3.44 bpw
+    IQ4_K   = 139  # 4.5 bpw
+    IQ5_K   = 140  # 5.5 bpw
+    IQ6_K   = 141  # 6.625 bpw
+    IQ4_KS  = 144
+    IQ2_KS  = 145
+    IQ4_KSS = 146
+    IQ5_KS  = 152
+    IQ2_KT  = 153
+    IQ3_KT  = 154
+    IQ4_KT  = 155
+    IQ3_KS  = 156
+    IQ2_KL  = 157
+    IQ1_KT  = 158
+
 
 class ExpertGatingFuncType(IntEnum):
     SOFTMAX  = 1
@@ -4211,6 +4231,23 @@ class LlamaFileType(IntEnum):
     MOSTLY_MXFP4_MOE     = 38  # except 1d tensors
     MOSTLY_NVFP4         = 39  # except 1d tensors
     MOSTLY_Q1_0          = 40  # except 1d tensors
+
+
+    MOSTLY_IQ2_K         = 130  # except 1d tensors
+    MOSTLY_IQ3_K         = 131  # except 1d tensors
+    MOSTLY_IQ4_K         = 132  # except 1d tensors
+    MOSTLY_IQ5_K         = 133  # except 1d tensors
+    MOSTLY_IQ6_K         = 134  # except 1d tensors
+    MOSTLY_IQ4_KS        = 137  # except 1d tensors
+    MOSTLY_IQ2_KS        = 138  # except 1d tensors
+    MOSTLY_IQ4_KSS       = 139  # except 1d tensors
+    MOSTLY_IQ5_KS        = 141  # except 1d tensors
+    MOSTLY_IQ2_KT        = 142  # except 1d tensors
+    MOSTLY_IQ3_KT        = 143  # except 1d tensors
+    MOSTLY_IQ4_KT        = 144  # except 1d tensors
+    MOSTLY_IQ3_KS        = 145  # except 1d tensors
+    MOSTLY_IQ2_KL        = 146  # except 1d tensors
+    MOSTLY_IQ1_KT        = 147  # except 1d tensors
 
     GUESSED              = 1024  # not specified in the model file
 
@@ -4331,6 +4368,22 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.MXFP4:   (32, 1 + 16),
     GGMLQuantizationType.NVFP4:   (64, 4 + 32),
     GGMLQuantizationType.Q1_0:    (128, 2 + 16),
+
+    GGMLQuantizationType.IQ2_K:   (256, 2 + 2 + QK_K // 32 + QK_K // 4),                           # d(2) + extra(2) + scales[8] + qs[64] = 76
+    GGMLQuantizationType.IQ3_K:   (256, 2 + 2 + 2 + QK_K // 32 + QK_K // 4 + QK_K // 8),           # d(2) + extra(2) + scales_h(2) + scales_l[8] + qs[64] + qh[32] = 110
+    GGMLQuantizationType.IQ4_K:   (256, 2 + 2 + QK_K // 64 + QK_K // 32 + QK_K // 2),              # d(2) + extra(2) + scales_h[4] + scales_l[8] + qs[128] = 144
+    GGMLQuantizationType.IQ5_K:   (256, 2 + 2 + QK_K // 64 + QK_K // 32 + QK_K // 2 + QK_K // 8),  # d(2) + extra(2) + scales_h[4] + scales_l[8] + qs[128] + qh[32] = 176
+    GGMLQuantizationType.IQ6_K:   (256, 2 + 2 + QK_K // 16 + QK_K // 2 + QK_K // 4),               # d(2) + extra(2) + scales[16] + qs[128] + qh[64] = 212
+    GGMLQuantizationType.IQ4_KSS: (256,  128),
+    GGMLQuantizationType.IQ2_KS:  (256,   70),
+    GGMLQuantizationType.IQ3_KS:  (256,  102),
+    GGMLQuantizationType.IQ4_KS:  (256,  136),
+    GGMLQuantizationType.IQ5_KS:  (256,  168),
+    GGMLQuantizationType.IQ2_KL:  (256,   86),
+    GGMLQuantizationType.IQ1_KT:  (256,   56),
+    GGMLQuantizationType.IQ2_KT:  (256,   68),
+    GGMLQuantizationType.IQ3_KT:  (256,  100),
+    GGMLQuantizationType.IQ4_KT:  (256,  128),
 }
 
 

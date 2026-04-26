@@ -4905,6 +4905,22 @@ void ggml_compute_forward_get_rows(
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ3_S:
         case GGML_TYPE_IQ2_S:
+
+        case GGML_TYPE_IQ2_K:
+        case GGML_TYPE_IQ3_K:
+        case GGML_TYPE_IQ4_K:
+        case GGML_TYPE_IQ5_K:
+        case GGML_TYPE_IQ6_K:
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ2_KL:
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
             {
                 ggml_compute_forward_get_rows_q(params, dst);
             } break;
@@ -5637,6 +5653,26 @@ void ggml_compute_forward_clamp(
         case GGML_TYPE_I32:
         case GGML_TYPE_I64:
         case GGML_TYPE_F64:
+
+        case GGML_TYPE_Q8_0_X4:
+        case GGML_TYPE_Q8_1_X4:
+        case GGML_TYPE_Q8_2_X4:
+        case GGML_TYPE_IQ2_K:
+        case GGML_TYPE_IQ3_K:
+        case GGML_TYPE_IQ4_K:
+        case GGML_TYPE_IQ5_K:
+        case GGML_TYPE_IQ6_K:
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ2_KL:
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
+
         case GGML_TYPE_COUNT:
             {
                 GGML_ABORT("fatal error");
