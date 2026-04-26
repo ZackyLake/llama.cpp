@@ -728,6 +728,10 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         list(APPEND GGML_CPU_SOURCES ${GGML_KLEIDIAI_SOURCES})
     endif()
 
+    if (MSVC)
+        target_link_options(${GGML_CPU_NAME} PRIVATE /debug)
+    endif()
+
     message(STATUS "Adding CPU backend variant ${GGML_CPU_NAME}: ${ARCH_FLAGS} ${ARCH_DEFINITIONS}")
     target_sources(${GGML_CPU_NAME} PRIVATE ${GGML_CPU_SOURCES})
     target_compile_options(${GGML_CPU_NAME} PRIVATE ${ARCH_FLAGS})

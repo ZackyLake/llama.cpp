@@ -149,20 +149,30 @@ static int test_vec_dot_q(bool verbose) {
 
         const ggml_type ei = (ggml_type)i;
 
-        printf("Testing %s\n", ggml_type_name((ggml_type) i));
+        printf("Testing %s", ggml_type_name((ggml_type) i));
         ggml_quantize_init(ei);
 
         if (qfns_cpu->from_float && qfns->to_float) {
+            printf("\n");
             const float total_error = total_quantization_error(qfns, qfns_cpu, test_size, test_data.data());
             const float max_quantization_error =
                 type == GGML_TYPE_Q1_0    ? MAX_QUANTIZATION_TOTAL_ERROR_BINARY :
                 type == GGML_TYPE_TQ1_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
                 type == GGML_TYPE_TQ2_0   ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
+                type == GGML_TYPE_IQ1_KT  ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
                 type == GGML_TYPE_Q2_0    ? MAX_QUANTIZATION_TOTAL_ERROR_TERNARY :
                 type == GGML_TYPE_Q2_K    ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
                 type == GGML_TYPE_IQ2_S   ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+                type == GGML_TYPE_IQ2_K   ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+                type == GGML_TYPE_IQ2_KS  ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+                type == GGML_TYPE_IQ2_KL  ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+                type == GGML_TYPE_IQ2_KT  ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
+                type == GGML_TYPE_IQ3_KT  ? MAX_QUANTIZATION_TOTAL_ERROR_2BITS :
                 type == GGML_TYPE_Q3_K    ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                 type == GGML_TYPE_IQ3_S   ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
+                type == GGML_TYPE_IQ3_K   ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
+                type == GGML_TYPE_IQ3_KS  ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
+                type == GGML_TYPE_IQ4_KT  ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS :
                 type == GGML_TYPE_IQ3_XXS ? MAX_QUANTIZATION_TOTAL_ERROR_3BITS_XXS :
                 type == GGML_TYPE_NVFP4   ? MAX_QUANTIZATION_TOTAL_ERROR_FP4 : MAX_QUANTIZATION_TOTAL_ERROR;
             bool failed = !(total_error < max_quantization_error);
@@ -178,22 +188,29 @@ static int test_vec_dot_q(bool verbose) {
                 printf("%5s reference implementation error: %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], reference_error);
             }
 
-            const float vec_dot_error = dot_product_error(qfns, qfns_cpu, test_size, test_data.data(), test_data2.data());
-            const float max_allowed_error = type == GGML_TYPE_Q2_K || type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
-                type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ2_S
-                ? MAX_DOT_PRODUCT_ERROR_LOWBIT
-                : type == GGML_TYPE_Q1_0
-                ? MAX_DOT_PRODUCT_ERROR_BINARY
-                : type == GGML_TYPE_TQ1_0 || type == GGML_TYPE_TQ2_0 || type == GGML_TYPE_Q2_0
-                ? MAX_DOT_PRODUCT_ERROR_TERNARY
-                : type == GGML_TYPE_NVFP4
-                ? MAX_DOT_PRODUCT_ERROR_FP4
-                : MAX_DOT_PRODUCT_ERROR;
-            failed = !(vec_dot_error < max_allowed_error);
-            num_failed += failed;
-            if (failed || verbose) {
-                printf("%5s dot product error:              %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], vec_dot_error);
+            if (!qfns_cpu->vec_dot) {
+                printf("%5s dot product error:              (skipping - no implementation)\n", ggml_type_name(type));
+            } else {
+                const float vec_dot_error = dot_product_error(qfns, qfns_cpu, test_size, test_data.data(), test_data2.data());
+                const float max_allowed_error = type == GGML_TYPE_Q2_K || type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
+                    type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S || type == GGML_TYPE_IQ2_S ||
+                                                type == GGML_TYPE_IQ2_K || type == GGML_TYPE_IQ3_K || type == GGML_TYPE_IQ2_KL
+                  ? MAX_DOT_PRODUCT_ERROR_LOWBIT
+                  : type == GGML_TYPE_Q1_0
+                  ? MAX_DOT_PRODUCT_ERROR_BINARY
+                  : type == GGML_TYPE_TQ1_0 || type == GGML_TYPE_TQ2_0 || type == GGML_TYPE_Q2_0
+                  ? MAX_DOT_PRODUCT_ERROR_TERNARY
+                  : type == GGML_TYPE_NVFP4
+                  ? MAX_DOT_PRODUCT_ERROR_FP4
+                  : MAX_DOT_PRODUCT_ERROR;
+                failed = !(vec_dot_error < max_allowed_error);
+                num_failed += failed;
+                if (failed || verbose) {
+                    printf("%5s dot product error:              %s (%f)\n", ggml_type_name(type), RESULT_STR[failed], vec_dot_error);
+                }
             }
+        } else {
+            printf(" (skipping - no quantization)\n");
         }
     }
 

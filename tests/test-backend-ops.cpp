@@ -85,7 +85,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
     if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32) {
         ggml_backend_tensor_set(tensor, data.data(), 0, nels * sizeof(float));
     } else if (ggml_is_quantized(tensor->type) || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
-        GGML_ASSERT(nels % ggml_blck_size(tensor->type) == 0);
+        GGML_ASSERT(tensor->ne[0] % ggml_blck_size(tensor->type) == 0);
 
          // dummy importance matrix
         std::vector<float> imatrix(tensor->ne[0], 1.0f);
@@ -98,30 +98,32 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
             }
         }
 
-        std::vector<uint8_t> dataq(ggml_row_size(tensor->type, nels));
+        size_t row_size = ggml_row_size(tensor->type, tensor->ne[0]);
+        const auto qsize = row_size*tensor->ne[1]*tensor->ne[2]*tensor->ne[3];
+        std::vector<uint8_t> dataq(qsize);
         {
             // parallel quantization by block
-            size_t blck_size = ggml_blck_size(tensor->type);
-            size_t n_blocks = nels / blck_size;
+            size_t n_per_row = tensor->ne[0]; //ggml_blck_size(tensor->type);
+            size_t n_rows = nels / n_per_row;
 
             auto quantize_thread = [&](size_t start, size_t end) {
                 ggml_quantize_chunk(tensor->type, data.data(), dataq.data(),
-                    start * blck_size, end - start, blck_size, im);
+                    start * n_per_row, end - start, n_per_row, im);
             };
 
             const size_t min_blocks_per_thread = 1;
             const size_t n_quant_threads = std::min<size_t>(std::max<size_t>(N_THREADS, 1),
-                                                            std::max<size_t>(1, n_blocks / min_blocks_per_thread));
+                                                            std::max<size_t>(1, n_rows / min_blocks_per_thread));
 
             if (n_quant_threads == 1) {
                 // single-threaded quantization: do all blocks in the current thread
-                quantize_thread(0, n_blocks);
+                quantize_thread(0, n_rows);
             } else {
                 std::vector<std::future<void>> tasks;
                 tasks.reserve(n_quant_threads);
                 for (size_t i = 0; i < n_quant_threads; i++) {
-                    size_t start =     i*n_blocks/n_quant_threads;
-                    size_t end   = (i+1)*n_blocks/n_quant_threads;
+                    size_t start =     i*n_rows/n_quant_threads;
+                    size_t end   = (i+1)*n_rows/n_quant_threads;
                     tasks.push_back(std::async(std::launch::async, quantize_thread, start, end));
                 }
                 for (auto & t : tasks) {
@@ -7353,7 +7355,7 @@ static bool is_non_contiguous(const input_tensor & src) {
         return false;
     }
     const size_t default_nb0 = ggml_type_size(src.type);
-    const size_t default_nb1 = default_nb0 * (src.ne[0] / ggml_blck_size(src.type));
+    const size_t default_nb1 = ggml_row_size(src.type, src.ne[0]);
     const size_t default_nb2 = default_nb1 * src.ne[1];
     const size_t default_nb3 = default_nb2 * src.ne[2];
     return src.nb[0] != default_nb0 ||
@@ -8007,6 +8009,14 @@ static const ggml_type other_types[] = {
     GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M,
     GGML_TYPE_IQ4_NL, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS,
     GGML_TYPE_BF16,
+};
+
+static const ggml_type iqk_types[] = {
+    GGML_TYPE_IQ2_K, GGML_TYPE_IQ3_K, GGML_TYPE_IQ4_K, GGML_TYPE_IQ5_K, GGML_TYPE_IQ6_K,  
+    GGML_TYPE_IQ4_KSS,
+    GGML_TYPE_IQ2_KS, GGML_TYPE_IQ3_KS, GGML_TYPE_IQ4_KS, GGML_TYPE_IQ5_KS, 
+    GGML_TYPE_IQ2_KL, 
+    GGML_TYPE_IQ1_KT, GGML_TYPE_IQ2_KT, GGML_TYPE_IQ3_KT, GGML_TYPE_IQ4_KT
 };
 
 #ifdef _MSC_VER
@@ -8818,6 +8828,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
 
+    for (ggml_type type_a : iqk_types) {
+        for (int i = 1; i < 12; ++i) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 16,  i, 256, {1,  1}, {1, 1}));
+        }
+    }
+
 #if 0
     {
         // Test paths in OpenCL
@@ -8903,6 +8919,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, ggml_blck_size(type_a), {1,  1}, {1, 1}));
             }
             test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, {1,  1}, {1, 1}));
+        }
+    }
+    for (ggml_type type_a : iqk_types) {
+        for (ggml_type type_b : {GGML_TYPE_F32}) {
+            if (ggml_blck_size(type_a) != 256) {
+                test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, ggml_blck_size(type_a), {1,  1}, {1, 1}));
+            }
+            test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, {1,  1}, {1, 1}));
+        }
+    }
+    for (int bs : {1, 512}) {
+        for (ggml_type type_a : iqk_types) {
+            for (ggml_type type_b : {GGML_TYPE_F32}) {
+                test_cases.emplace_back(new test_mul_mat(type_a, type_b, 3584, bs, 1024, {1,  1}, {1, 1}));
+                test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 32, 8, false, 512, bs, 2048, 1));
+                test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 32, 10, false, 512, bs, 1024, 1));
+            }
         }
     }
 #else
@@ -9015,6 +9048,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     for (ggml_type type_a : other_types) {
+        for (ggml_type type_b : {GGML_TYPE_F32 /*, GGML_TYPE_F16 */}) {
+            for (int n_mats : {4}) {
+                for (int n_used : {2}) {
+                    for (bool b : {false}) {
+                        for (int n : {1, 32}) {
+                            int m = 512;
+                            int k = 256;
+                            test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, n_mats, n_used, b, m, n, k));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (ggml_type type_a : iqk_types) {
         for (ggml_type type_b : {GGML_TYPE_F32 /*, GGML_TYPE_F16 */}) {
             for (int n_mats : {4}) {
                 for (int n_used : {2}) {
@@ -9799,10 +9848,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 128, 1, 16416, {8,  1}, {4, 1}, {0, 1, 2, 3}, 2*16416));
 
     // FWHT tests
-    test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 128, 1, 128));
-    test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 64, 1, 64));
-    test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 256, 1, 256));
-    test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 128, 32, 128));
+    for (int h : {64, 128, 256}) {
+        for (int len : {128, 1024, 4096, 8192, 16384}) {
+            test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, h, len, h));
+        }
+    }
 
     test_cases.emplace_back(new test_solve_tri(GGML_TYPE_F32, { 64, 64, 4, 4 }, { 32, 64, 4, 4 }));
     test_cases.emplace_back(new test_solve_tri(GGML_TYPE_F32, { 128, 128, 4, 2 }, { 32, 128, 4, 2 }));
@@ -9845,21 +9895,56 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S,
         GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M,
         GGML_TYPE_IQ4_NL, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS,
+        GGML_TYPE_IQ2_K, GGML_TYPE_IQ3_K, GGML_TYPE_IQ4_K, GGML_TYPE_IQ5_K, GGML_TYPE_IQ6_K,  
+        GGML_TYPE_IQ4_KSS,
+        GGML_TYPE_IQ2_KS, GGML_TYPE_IQ3_KS, GGML_TYPE_IQ4_KS, GGML_TYPE_IQ5_KS, 
+        GGML_TYPE_IQ2_KL, 
+        GGML_TYPE_IQ1_KT, GGML_TYPE_IQ2_KT, GGML_TYPE_IQ3_KT, GGML_TYPE_IQ4_KT
     };
 
-    // minimax-m2
-    for (int bs : {1, 2, 512}) {
-        for (ggml_type type_a : target_types) {
-            for (ggml_type type_b : {GGML_TYPE_F32}) {
-                test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 1536, bs, 3072, 1));
+    const auto perf_ffn = getenv("PERF_FFN");
+    if (!perf_ffn || perf_ffn == std::string_view("qwen3.5-27b")) {
+        for (int bs : {1, 2, 512}) {
+            for (ggml_type type_a : target_types) {
+                for (ggml_type type_b : {GGML_TYPE_F32}) {
+                    test_cases.emplace_back(new test_mul_mat(type_a, type_b, 5120, bs, 17408, {1,  1}, {1, 1}));
+                }
             }
         }
     }
-    // qwen3.5
-    for (int bs : {1, 2, 512}) {
-        for (ggml_type type_a : target_types) {
-            for (ggml_type type_b : {GGML_TYPE_F32}) {
-                test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 512, 10, false, 512, bs, 4096, 1));
+    if (!perf_ffn || perf_ffn == std::string_view("qwen3.5-35b")) {
+        for (int bs : {1, 2, 512}) {
+            for (ggml_type type_a : target_types) {
+                for (ggml_type type_b : {GGML_TYPE_F32}) {
+                    test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 512, bs, 2048, 1));
+                }
+            }
+        }
+    }
+    if (!perf_ffn || perf_ffn == std::string_view("qwen3.5-122b")) {
+        for (int bs : {1, 2, 512}) {
+            for (ggml_type type_a : target_types) {
+                for (ggml_type type_b : {GGML_TYPE_F32}) {
+                    test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 1024, bs, 3072, 1));
+                }
+            }
+        }
+    }
+    if (!perf_ffn || perf_ffn == std::string_view("qwen3.5-397b")) {
+        for (int bs : {1, 2, 512}) {
+            for (ggml_type type_a : target_types) {
+                for (ggml_type type_b : {GGML_TYPE_F32}) {
+                    test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 512, 10, false, 1024, bs, 4096, 1));
+                }
+            }
+        }
+    }
+    if (!perf_ffn || perf_ffn == std::string_view("minimax-m2")) {
+        for (int bs : {1, 2, 512}) {
+            for (ggml_type type_a : target_types) {
+                for (ggml_type type_b : {GGML_TYPE_F32}) {
+                    test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 1536, bs, 3072, 1));
+                }
             }
         }
     }
