@@ -1090,7 +1090,7 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
 
         ggml_cuda_set_device(cuda_ctx->device);
         if (tensors[i]->flags & GGML_TENSOR_FLAG_COMPUTE) {
-            to_bf16(tensors[i]->data, tmp[i].get(), ne, cuda_ctx->stream());
+            to_bf16(tensors[i]->data, tmp[i].get(), 1, ne, cuda_ctx->stream());
         } else {
             CUDA_CHECK(cudaMemsetAsync(tmp[i].get(), 0, ne * sizeof(nv_bfloat16), cuda_ctx->stream()));
         }
@@ -1108,7 +1108,7 @@ static bool ggml_backend_cuda_comm_allreduce_nccl(
         ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) comm_ctx->backends[i]->context;
 
         ggml_cuda_set_device(cuda_ctx->device);
-        to_fp32(tmp[i].get(), (float *) tensors[i]->data, ne, cuda_ctx->stream());
+        to_fp32(tmp[i].get(), (float *) tensors[i]->data, 1, ne, cuda_ctx->stream());
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1151,7 +1151,7 @@ static bool ggml_backend_cuda_comm_allreduce_internal(
         if (!ggml_is_contiguously_allocated(tensors[i])) {
             GGML_LOG_DEBUG("%s: internal unsupported: tensor[%zu] is not contiguously allocated: ne=%" PRId64 " nbytes=%zu packed=%zu type=%d\n",
                            __func__, i, ne, ggml_nbytes(tensors[i]),
-                           (size_t) ne * ggml_type_size(type) / ggml_blck_size(type), (int) type);
+                           ggml_nrows(tensors[i])*ggml_row_size(type, tensors[i]->ne[0]), (int) type);
             return false;
         }
         if (((uintptr_t) tensors[i]->data & 0xF) != 0) {
@@ -1497,7 +1497,12 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
         if (ggml_is_contiguously_allocated(src0)) {
             const auto convert_func = traits::convert(src0->type);
             GGML_ASSERT(convert_func != nullptr);
-            convert_func(src0->data, src0_alloc.get(), ggml_nelements(src0), main_stream);
+            // The converters take (nrows, n_per_row) so that row-aware types
+            // (those with row meta, e.g. the R4 family) can locate their
+            // per-row super-blocks. Always pass the real row count and ne[0]:
+            // for types without row meta nrows*ne[0] is the flat element count,
+            // and for row-aware types it is the required layout.
+            convert_func(src0->data, src0_alloc.get(), ggml_nrows(src0), src0->ne[0], main_stream);
             const size_t src0_bs = ggml_blck_size(src0->type);
             s01 *= src0_bs;
             s02 *= src0_bs;
@@ -1522,7 +1527,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
         if (ggml_is_contiguously_allocated(src1)) {
             const auto convert_func = traits::convert(src1->type);
             GGML_ASSERT(convert_func != nullptr);
-            convert_func(src1->data, src1_alloc.get(), ggml_nelements(src1), main_stream);
+            convert_func(src1->data, src1_alloc.get(), ggml_nelements(src1), 1, main_stream);
             const size_t src1_bs = ggml_blck_size(src1->type);
             s11 *= src1_bs;
             s12 *= src1_bs;
@@ -1660,7 +1665,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     // Convert output back to F32 if needed
     if (cu_data_type != CUDA_R_32F) {
         const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(traits::ggml_type_val);
-        to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, main_stream);
+        to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, 1, main_stream);
     }
 }
 
@@ -1979,6 +1984,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_vec_f(ctx, src1, src0, nullptr, &dst_vec);
         return;
     }
+    //printf("mulmat: vec_f[%c] vec_q[%c] f[%c] q[%c]\n", use_mul_mat_vec_f?'Y':'N', use_mul_mat_vec_q?'Y':'N', use_mul_mat_f?'Y':'N', use_mul_mat_q?'Y':'N');
     if (ggml_cuda_should_use_mmf(src0->type, cc, warp_size, src0->ne, src0->nb, ne11, /*mul_mat_id =*/ false)) {
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
         return;
@@ -5454,6 +5460,23 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_IQ4_NL:
                     case GGML_TYPE_IQ4_XS:
                     case GGML_TYPE_BF16:
+                    case GGML_TYPE_IQ2_K:
+                    case GGML_TYPE_IQ3_K:
+                    case GGML_TYPE_IQ4_K:
+                    case GGML_TYPE_IQ5_K:
+                    case GGML_TYPE_IQ6_K:
+                    case GGML_TYPE_IQ4_KSS:
+                    case GGML_TYPE_IQ2_KS:
+                    case GGML_TYPE_IQ3_KS:
+                    case GGML_TYPE_IQ4_KS:
+                    case GGML_TYPE_IQ5_KS:
+                    case GGML_TYPE_IQ2_KL:
+                    case GGML_TYPE_IQ1_KT:
+                    case GGML_TYPE_IQ2_KT:
+                    case GGML_TYPE_IQ3_KT:
+                    case GGML_TYPE_IQ4_KT:
+                    case GGML_TYPE_IQ1_S_R4:
+                    case GGML_TYPE_IQ1_M_R4:
                         return true;
                     default:
                         return false;
@@ -5493,6 +5516,26 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_MXFP4:
                         // 32-value sub-blocks, the row size does not guarantee
                         // the QK_K super-blocks the get_rows kernel iterates on
+                        return op->src[0]->ne[0] % QK_K == 0;
+                    case GGML_TYPE_IQ2_K:
+                    case GGML_TYPE_IQ3_K:
+                    case GGML_TYPE_IQ4_K:
+                    case GGML_TYPE_IQ5_K:
+                    case GGML_TYPE_IQ6_K:
+                    case GGML_TYPE_IQ4_KSS:
+                    case GGML_TYPE_IQ2_KS:
+                    case GGML_TYPE_IQ3_KS:
+                    case GGML_TYPE_IQ4_KS:
+                    case GGML_TYPE_IQ5_KS:
+                    case GGML_TYPE_IQ2_KL:
+                    case GGML_TYPE_IQ1_KT:
+                    case GGML_TYPE_IQ2_KT:
+                    case GGML_TYPE_IQ3_KT:
+                    case GGML_TYPE_IQ4_KT:
+                    case GGML_TYPE_IQ1_S_R4:
+                    case GGML_TYPE_IQ1_M_R4:
+                        // The row size does not always guarantee the QK_K
+                        // super-blocks the get_rows kernel iterates on.
                         return op->src[0]->ne[0] % QK_K == 0;
                     default:
                         return false;
