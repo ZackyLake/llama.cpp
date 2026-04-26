@@ -85,6 +85,55 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             }
             mul_mat_q_case<GGML_TYPE_NVFP4, GGML_PREC_Q8>(ctx, args, stream);
             break;
+// -----------------------------------------------------------------------
+        case GGML_TYPE_IQ1_S_R4:
+            mul_mat_q_case<GGML_TYPE_IQ1_S_R4, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ2_K:
+            mul_mat_q_case<GGML_TYPE_IQ2_K, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ3_K:
+            mul_mat_q_case<GGML_TYPE_IQ3_K, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ4_K:
+            mul_mat_q_case<GGML_TYPE_IQ4_K, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ5_K:
+            mul_mat_q_case<GGML_TYPE_IQ5_K, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ6_K:
+            mul_mat_q_case<GGML_TYPE_IQ6_K, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ4_KSS:
+            mul_mat_q_case<GGML_TYPE_IQ4_KSS, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ2_KS:
+            mul_mat_q_case<GGML_TYPE_IQ2_KS, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ3_KS:
+            mul_mat_q_case<GGML_TYPE_IQ3_KS, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ4_KS:
+            mul_mat_q_case<GGML_TYPE_IQ4_KS, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ5_KS:
+            mul_mat_q_case<GGML_TYPE_IQ5_KS, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ2_KL:
+            mul_mat_q_case<GGML_TYPE_IQ2_KL, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ1_KT:
+            mul_mat_q_case<GGML_TYPE_IQ1_KT, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ2_KT:
+            mul_mat_q_case<GGML_TYPE_IQ2_KT, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ3_KT:
+            mul_mat_q_case<GGML_TYPE_IQ3_KT, GGML_PREC_Q8>(ctx, args, stream);
+            break;
+        case GGML_TYPE_IQ4_KT:
+            mul_mat_q_case<GGML_TYPE_IQ4_KT, GGML_PREC_Q8>(ctx, args, stream);
+            break;
         default:
             GGML_ABORT("fatal error");
     }
@@ -171,11 +220,11 @@ void ggml_cuda_mul_mat_q(
 
     const int64_t ne10_padded = GGML_PAD(ne10, MATRIX_ROW_PADDING);
 
-    const int64_t s01 = src0->nb[1] / ts_src0;
+    const int64_t s01 = src0->nb[1]; // / ts_src0;
     const int64_t s1  =  dst->nb[1] / ts_dst;
-    const int64_t s02 = src0->nb[2] / ts_src0;
+    const int64_t s02 = src0->nb[2]; // / ts_src0;
     const int64_t s2  =  dst->nb[2] / ts_dst;
-    const int64_t s03 = src0->nb[3] / ts_src0;
+    const int64_t s03 = src0->nb[3]; // / ts_src0;
     const int64_t s3  =  dst->nb[3] / ts_dst;
 
     const bool fallback = ggml_cuda_mmq_needs_fallback(ne01);
@@ -387,6 +436,24 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         case GGML_TYPE_NVFP4:
             mmq_supported = true;
             break;
+        case GGML_TYPE_IQ1_S_R4:
+        case GGML_TYPE_IQ2_K:
+        case GGML_TYPE_IQ3_K:
+        case GGML_TYPE_IQ4_K:
+        case GGML_TYPE_IQ5_K:
+        case GGML_TYPE_IQ6_K:
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ2_KL:
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
+            mmq_supported = GGML_CUDA_CC_IS_NVIDIA(cc);
+            break;
         default:
             mmq_supported = false;
             break;
@@ -407,6 +474,11 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
 
     if (turing_mma_available(cc)) {
         return true;
+    }
+
+    // IQ1_M_R4 has no dp4a MMQ implementation yet, only its MMA path exists.
+    if (type == GGML_TYPE_IQ1_M_R4) {
+        return false;
     }
 
     if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
