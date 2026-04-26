@@ -135,6 +135,233 @@ void quantize_row_q8_K(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, in
     quantize_row_q8_K_ref(x, y, k);
 }
 
+void quantize_row_q8_0_x4(const float * x, void * vy, int64_t k) {
+    const int nb = k / QK8_0;
+    const int nb4 = 4*(nb/4);
+
+    block_q8_0 * y = (block_q8_0 *)vy;
+    block_q8_0_x4 * y4 = (block_q8_0_x4 *)vy;
+#if defined(__ARM_NEON)
+    for (int i = 0; i < nb; i++) {
+        int i4 = i/4, ir = i%4;
+        float32x4_t srcv [8];
+        float32x4_t asrcv[8];
+        float32x4_t amaxv[8];
+
+        for (int j = 0; j < 8; j++) srcv[j]  = vld1q_f32(x + i*32 + 4*j);
+        for (int j = 0; j < 8; j++) asrcv[j] = vabsq_f32(srcv[j]);
+
+        for (int j = 0; j < 4; j++) amaxv[2*j] = vmaxq_f32(asrcv[2*j], asrcv[2*j+1]);
+        for (int j = 0; j < 2; j++) amaxv[4*j] = vmaxq_f32(amaxv[4*j], amaxv[4*j+2]);
+        for (int j = 0; j < 1; j++) amaxv[8*j] = vmaxq_f32(amaxv[8*j], amaxv[8*j+4]);
+
+        const float amax = vmaxvq_f32(amaxv[0]);
+        const float d = amax / ((1 << 7) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+
+        if (i < nb4) {
+            y4[i4].d[ir] = GGML_CPU_FP32_TO_FP16(d);
+        } else {
+            y[i].d = GGML_CPU_FP32_TO_FP16(d);
+        }
+
+        for (int j = 0; j < 8; j++) {
+            const float32x4_t v  = vmulq_n_f32(srcv[j], id);
+            const int32x4_t   vi = vcvtnq_s32_f32(v);
+
+            if (i < nb4) {
+                y4[i4].qs[32*ir + 4*j + 0] = vgetq_lane_s32(vi, 0);
+                y4[i4].qs[32*ir + 4*j + 1] = vgetq_lane_s32(vi, 1);
+                y4[i4].qs[32*ir + 4*j + 2] = vgetq_lane_s32(vi, 2);
+                y4[i4].qs[32*ir + 4*j + 3] = vgetq_lane_s32(vi, 3);
+            } else {
+                y[i].qs[4*j + 0] = vgetq_lane_s32(vi, 0);
+                y[i].qs[4*j + 1] = vgetq_lane_s32(vi, 1);
+                y[i].qs[4*j + 2] = vgetq_lane_s32(vi, 2);
+                y[i].qs[4*j + 3] = vgetq_lane_s32(vi, 3);
+            }
+        }
+    }
+#else
+    GGML_UNUSED(nb);
+    quantize_row_q8_0_x4_ref(x, y, k);
+#endif
+}
+
+void quantize_row_q8_1_x4(const float * x, void * vy, int64_t k) {
+    assert(k % QK8_1 == 0);
+    const int nb = k / QK8_1;
+
+    const int nb4 = 4*(nb/4);
+    block_q8_1 * y = (block_q8_1 *)vy;
+    block_q8_1_x4 * y4 = (block_q8_1_x4 *)y;
+#if defined(__ARM_NEON)
+    for (int i = 0; i < nb; i++) {
+        int i4 = i/4, ir = i%4;
+        float32x4_t srcv [8];
+        float32x4_t asrcv[8];
+        float32x4_t amaxv[8];
+
+        for (int j = 0; j < 8; j++) srcv[j]  = vld1q_f32(x + i*32 + 4*j);
+        for (int j = 0; j < 8; j++) asrcv[j] = vabsq_f32(srcv[j]);
+
+        for (int j = 0; j < 4; j++) amaxv[2*j] = vmaxq_f32(asrcv[2*j], asrcv[2*j+1]);
+        for (int j = 0; j < 2; j++) amaxv[4*j] = vmaxq_f32(amaxv[4*j], amaxv[4*j+2]);
+        for (int j = 0; j < 1; j++) amaxv[8*j] = vmaxq_f32(amaxv[8*j], amaxv[8*j+4]);
+
+        const float amax = vmaxvq_f32(amaxv[0]);
+
+        const float d = amax / ((1 << 7) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+
+        if (i < nb4) {
+            y4[i4].d[ir] = GGML_CPU_FP32_TO_FP16(d);
+        } else {
+            y[i].d = GGML_CPU_FP32_TO_FP16(d);
+        }
+
+        int32x4_t accv = vdupq_n_s32(0);
+
+        for (int j = 0; j < 8; j++) {
+            const float32x4_t v  = vmulq_n_f32(srcv[j], id);
+            const int32x4_t   vi = vcvtnq_s32_f32(v);
+
+            if (i < nb4) {
+                y4[i4].qs[QK8_1*ir + 4*j + 0] = vgetq_lane_s32(vi, 0);
+                y4[i4].qs[QK8_1*ir + 4*j + 1] = vgetq_lane_s32(vi, 1);
+                y4[i4].qs[QK8_1*ir + 4*j + 2] = vgetq_lane_s32(vi, 2);
+                y4[i4].qs[QK8_1*ir + 4*j + 3] = vgetq_lane_s32(vi, 3);
+            } else {
+                y[i].qs[4*j + 0] = vgetq_lane_s32(vi, 0);
+                y[i].qs[4*j + 1] = vgetq_lane_s32(vi, 1);
+                y[i].qs[4*j + 2] = vgetq_lane_s32(vi, 2);
+                y[i].qs[4*j + 3] = vgetq_lane_s32(vi, 3);
+            }
+
+            accv = vaddq_s32(accv, vi);
+        }
+
+        if (i < nb4) {
+            y4[i4].d[ir+4] = GGML_CPU_FP32_TO_FP16(d * vaddvq_s32(accv));
+        } else {
+            y[i].s = GGML_CPU_FP32_TO_FP16(d * vaddvq_s32(accv));
+        }
+    }
+#else
+    GGML_UNUSED(nb);
+    quantize_row_q8_1_x4_ref(x, y, k);
+#endif
+}
+
+void quantize_row_q8_2_x4(const float * x, void * vy, int64_t k) {
+    assert(k % QK8_2 == 0);
+    const int nb = k / QK8_2;
+
+    const int nb4 = 4*(nb/4);
+    block_q8_2 * y = (block_q8_2 *)vy;
+    block_q8_2_x4 * y4 = (block_q8_2_x4 *)y;
+#if defined(__ARM_NEON)
+    for (int i = 0; i < nb; i++) {
+        int i4 = i/4, ir = i%4;
+        float32x4_t srcv [8];
+        float32x4_t asrcv[8];
+        float32x4_t amaxv[8];
+
+        for (int j = 0; j < 8; j++) srcv[j]  = vld1q_f32(x + i*32 + 4*j);
+        for (int j = 0; j < 8; j++) asrcv[j] = vabsq_f32(srcv[j]);
+
+        for (int j = 0; j < 4; j++) amaxv[2*j] = vmaxq_f32(asrcv[2*j], asrcv[2*j+1]);
+        for (int j = 0; j < 2; j++) amaxv[4*j] = vmaxq_f32(amaxv[4*j], amaxv[4*j+2]);
+        for (int j = 0; j < 1; j++) amaxv[8*j] = vmaxq_f32(amaxv[8*j], amaxv[8*j+4]);
+
+        const float amax = vmaxvq_f32(amaxv[0]);
+
+        float d = amax / ((1 << 7) - 1);
+        const ggml_bf16_t t = GGML_FP32_TO_BF16(d);
+        d = GGML_BF16_TO_FP32(t);
+        const float id = d ? 1.0f/d : 0.0f;
+
+        if (i < nb4) {
+            y4[i4].d[ir] = t.bits;
+        } else {
+            y[i].d = t.bits;
+        }
+
+        int32x4_t accv = vdupq_n_s32(0);
+
+        for (int j = 0; j < 8; j++) {
+            const float32x4_t v  = vmulq_n_f32(srcv[j], id);
+            const int32x4_t   vi = vcvtnq_s32_f32(v);
+
+            if (i < nb4) {
+                y4[i4].qs[QK8_1*ir + 4*j + 0] = vgetq_lane_s32(vi, 0);
+                y4[i4].qs[QK8_1*ir + 4*j + 1] = vgetq_lane_s32(vi, 1);
+                y4[i4].qs[QK8_1*ir + 4*j + 2] = vgetq_lane_s32(vi, 2);
+                y4[i4].qs[QK8_1*ir + 4*j + 3] = vgetq_lane_s32(vi, 3);
+            } else {
+                y[i].qs[4*j + 0] = vgetq_lane_s32(vi, 0);
+                y[i].qs[4*j + 1] = vgetq_lane_s32(vi, 1);
+                y[i].qs[4*j + 2] = vgetq_lane_s32(vi, 2);
+                y[i].qs[4*j + 3] = vgetq_lane_s32(vi, 3);
+            }
+
+            accv = vaddq_s32(accv, vi);
+        }
+
+        if (i < nb4) {
+            y4[i4].d[ir+4] = GGML_CPU_FP32_TO_BF16(d * vaddvq_s32(accv)).bits;
+        } else {
+            y[i].s = GGML_CPU_FP32_TO_BF16(d * vaddvq_s32(accv)).bits;
+        }
+    }
+#else
+    GGML_UNUSED(nb);
+    quantize_row_q8_2_x4_ref(x, y, k);
+#endif
+}
+
+void quantize_row_q8_K128(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    const int kBlockSize = 128;
+    assert(k % kBlockSize == 0);
+    const int nb = k / kBlockSize;
+
+    block_q8_K128 * GGML_RESTRICT y = vy;
+#if defined __ARM_NEON
+    int32x4_t ival[8];
+    for (int i = 0; i < nb; i++) {
+        const float * xb = x + i*kBlockSize;
+        float32x4_t vmax = vdupq_n_f32(0.f);
+        for (int j = 0; j < kBlockSize; j += 4) {
+            vmax = vmaxq_f32(vmax, vabsq_f32(vld1q_f32(xb + j)));
+        }
+        float smax = vmaxvq_f32(vmax);
+        if (!smax) {
+            memset(&y[i], 0, sizeof(y[i]));
+            continue;
+        }
+        y[i].d = smax/127;
+        float32x4_t vid = vdupq_n_f32(127/smax);
+        for (int ib = 0; ib < kBlockSize/32; ++ib) {
+            int32x4_t isum = vdupq_n_s32(0);
+            for (int k = 0; k < 8; ++k) {
+                float32x4_t val = vld1q_f32(xb + 32*ib + 4*k);
+                ival[k] = vcvtnq_s32_f32(vmulq_f32(val, vid));
+                isum = vaddq_s32(isum, ival[k]);
+            }
+            y[i].bsums[ib] = vaddvq_s32(isum);
+            for (int k = 0; k < 4; ++k) {
+                int16x8_t i16 = vcombine_s16(vmovn_s32(ival[2*k+0]), vmovn_s32(ival[2*k+1]));
+                vst1_s8(y[i].qs + 32*ib + 8*k, vmovn_s16(i16));
+            }
+        }
+    }
+#else
+    GGML_UNUSED(nb);
+    // scalar
+    quantize_row_q8_K128_ref(x, y, k);
+#endif
+}
+
 //===================================== Dot products =================================
 
 void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
