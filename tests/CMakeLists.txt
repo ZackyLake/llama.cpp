@@ -346,11 +346,24 @@ if (APPLE)
     llama_build(test-rset-release.cpp)
 endif()
 
+if (GGML_CPU)
+    llama_build_and_test(test-quantize-fns.cpp  LABEL "main behavior" LINK ggml)
+    llama_build_and_test(test-quantize-perf.cpp  LABEL "main behavior backend" LINK ggml)
+    if (GGML_BACKEND_DL)
+        target_compile_definitions(test-quantize-fns PRIVATE
+            GGML_TEST_BACKEND_DIR="$<TARGET_FILE_DIR:test-quantize-fns>")
+        target_compile_definitions(test-quantize-perf PRIVATE
+            GGML_TEST_BACKEND_DIR="$<TARGET_FILE_DIR:test-quantize-perf>")
+        if (CMAKE_DL_LIBS)
+            target_link_libraries(test-quantize-fns PRIVATE ${CMAKE_DL_LIBS})
+            target_link_libraries(test-quantize-perf PRIVATE ${CMAKE_DL_LIBS})
+        endif()
+    endif()
+endif()
+
 if (NOT GGML_BACKEND_DL AND GGML_CPU)
     # these tests use the backends directly and cannot be built with dynamic loading
     llama_build_and_test(test-barrier.cpp  LABEL "main behavior"  LINK ggml)
-    llama_build_and_test(test-quantize-fns.cpp  LABEL "main behavior"  LINK ggml)
-    llama_build_and_test(test-quantize-perf.cpp  LABEL "main behavior backend"  LINK ggml)
     llama_build_and_test(test-rope.cpp  LABEL "main behavior backend"  LINK ggml)
     llama_build_and_test(test-col2im-1d.cpp  LABEL "main behavior backend"  LINK ggml)
     llama_build_and_test(test-conv-1d.cpp  LABEL "main behavior backend"  LINK ggml)
