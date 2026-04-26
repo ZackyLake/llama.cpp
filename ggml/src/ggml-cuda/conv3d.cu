@@ -315,7 +315,7 @@ void ggml_cuda_op_conv3d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         ggml_cuda_pool_alloc<half> x_half(ctx.pool(), padded_total);
         // Match im2col's F16 input precision without materializing all patches in global memory.
         if (p[3] == 0 && p[4] == 0 && p[5] == 0) {
-            ggml_get_to_fp16_cuda(input->type)(x, x_half.get(), padded_total, stream);
+            ggml_get_to_fp16_cuda(input->type)(x, x_half.get(), 1, padded_total, stream);
         } else {
             conv3d_pad_f16<<<(padded_total + 255) / 256, 256, 0, stream>>>(
                 x, x_half.get(), int(IW), int(IH), int(ID), int(pw), int(ph), int(pd), p[3], p[4], p[5], padded_total);

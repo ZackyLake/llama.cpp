@@ -13,7 +13,7 @@ from typing import Any, Literal, NamedTuple, TypeVar, Union
 import numpy as np
 import numpy.typing as npt
 
-from .quants import quant_shape_to_byte_shape
+from .quants import quant_nbytes, quant_shape_to_byte_shape
 
 if __name__ == "__main__":
     from pathlib import Path
@@ -23,7 +23,6 @@ if __name__ == "__main__":
 
 from gguf.constants import (
     GGML_MAX_DIMS,
-    GGML_QUANT_SIZES,
     GGUF_DEFAULT_ALIGNMENT,
     GGUF_MAGIC,
     GGUF_VERSION,
@@ -348,8 +347,7 @@ class GGUFReader:
             for dim in dims.tolist():
                 n_elems *= int(dim)
             np_dims = tuple(reversed(dims.tolist()))
-            block_size, type_size = GGML_QUANT_SIZES[ggml_type]
-            n_bytes = n_elems * type_size // block_size
+            n_bytes = quant_nbytes(np_dims, ggml_type)
             data_offs = start_offs + int(offset_tensor[0])
             if data_offs + n_bytes > self.data.nbytes:
                 raise ValueError(f'Tensor {tensor_name} data exceeds file size {self.data.nbytes}')
