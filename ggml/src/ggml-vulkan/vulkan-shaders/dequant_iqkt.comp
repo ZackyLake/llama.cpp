@@ -1,0 +1,138 @@
+#version 450
+
+#include "dequant_head.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A { uint data_a_packed32[]; };
+layout (binding = 1) writeonly buffer D { D_TYPE data_b[]; };
+
+#if defined(DATA_A_IQ1_KT)
+const uint IQKT_BLOCK_WORDS = 14u;
+#elif defined(DATA_A_IQ2_KT)
+const uint IQKT_BLOCK_WORDS = 17u;
+#elif defined(DATA_A_IQ3_KT)
+const uint IQKT_BLOCK_WORDS = 25u;
+#elif defined(DATA_A_IQ4_KT)
+const uint IQKT_BLOCK_WORDS = 32u;
+#else
+#error unsupported IQKT type
+#endif
+
+uint get_a_byte(const uint word_base, const uint byte_offset) {
+    const uint word = data_a_packed32[word_base + byte_offset / 4u];
+    return (word >> (8u * (byte_offset % 4u))) & 0xffu;
+}
+
+uint get_a_u16(const uint word_base, const uint byte_offset) {
+    return get_a_byte(word_base, byte_offset) | (get_a_byte(word_base, byte_offset + 1u) << 8u);
+}
+
+int trellis_next_int(inout uint val) {
+    val *= 0xCBAC1FEDu;
+    const uint sv = val & 0x3f3f3f3fu;
+    return int(sv & 0xffu) + int((sv >> 8u) & 0xffu) + int((sv >> 16u) & 0xffu) + int((sv >> 24u) & 0xffu) - 126;
+}
+
+void trellis_g4(inout uint val, out int v0, out int v1, out int v2, out int v3) {
+    v0 = trellis_next_int(val);
+    v1 = trellis_next_int(val);
+    v2 = trellis_next_int(val);
+    v3 = trellis_next_int(val);
+}
+
+void main() {
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+    const uint superblocks_per_row = p.K / QUANT_K;
+    const uint row_stride_words = p.stride_a / 4u;
+    const uint total_superblocks = p.nel / QUANT_K;
+    const uint ib = gl_LocalInvocationID.x;
+
+    [[unroll]] for (uint wgy = 0; wgy < 32u; ++wgy) {
+        const uint superblock = gl_WorkGroupID.x * 32u + wgy;
+        if (superblock >= total_superblocks) {
+            return;
+        }
+
+        const uint row = superblock / superblocks_per_row;
+        const uint superblock_in_row = superblock % superblocks_per_row;
+        const uint row_base_words = row * row_stride_words;
+        const float scale = uintBitsToFloat(data_a_packed32[row_base_words]);
+        const uint block_words = row_base_words + 1u + superblock_in_row * IQKT_BLOCK_WORDS;
+        const uint y_idx = superblock * QUANT_K + 8u * ib;
+
+#if defined(DATA_A_IQ1_KT)
+        const uint ib32 = ib / 4u;
+        const uint ig = ib % 4u;
+        const uint sh = get_a_byte(block_words, ib32);
+        const uint qh_shift = 8u - 4u * (ib32 / 4u);
+        uint idx = get_a_byte(block_words, 8u + ib)
+            | ((get_a_byte(block_words, 40u + 4u * (ib32 % 4u) + ig) << qh_shift) & 0xf00u)
+            | ((sh << (8u - ig)) & 0x1000u)
+            | 4096u;
+        const FLOAT_TYPE dl = FLOAT_TYPE(scale) * kvalues_iq4k[sh & 0x0fu];
+
+        [[unroll]] for (uint j = 0; j < 8u; ++j) {
+            data_b[y_idx + j] = D_TYPE(dl * FLOAT_TYPE(trellis_next_int(idx)));
+        }
+#elif defined(DATA_A_IQ2_KT)
+        uint idx = get_a_u16(block_words, 4u + 2u * ib) + 4096u;
+        const uint ib32 = ib / 4u;
+        const uint scale_byte = get_a_byte(block_words, ib32 % 4u);
+        const uint ls = (scale_byte >> (4u * (ib32 / 4u))) & 0x0fu;
+        const FLOAT_TYPE dl = FLOAT_TYPE(scale * 1.05f) * kvalues_iq4k[ls];
+
+        [[unroll]] for (uint j = 0; j < 8u; ++j) {
+            data_b[y_idx + j] = D_TYPE(dl * FLOAT_TYPE(trellis_next_int(idx)));
+        }
+#elif defined(DATA_A_IQ3_KT)
+        uint idx = get_a_u16(block_words, 4u + 2u * ib) + 4096u;
+        const uint ib32 = ib / 4u;
+        const uint ig = ib % 4u;
+        const uint scale_byte = get_a_byte(block_words, ib32 % 4u);
+        const uint ls = (scale_byte >> (4u * (ib32 / 4u))) & 0x0fu;
+        const uint mask = 1u << ib32;
+        const FLOAT_TYPE dl = FLOAT_TYPE(scale * 1.01f * float(ls));
+
+        [[unroll]] for (uint j = 0; j < 8u; ++j) {
+            const float sign = (get_a_byte(block_words, 68u + 8u * ig + j) & mask) != 0u ? -1.0f : 1.0f;
+            data_b[y_idx + j] = D_TYPE(dl * FLOAT_TYPE(abs(trellis_next_int(idx))) * FLOAT_TYPE(sign));
+        }
+#elif defined(DATA_A_IQ4_KT)
+        const uint ib32 = ib / 4u;
+        const uint ig = ib % 4u;
+        const uint jj = ib32 * 8u + 2u * ig;
+        const uint sh = data_a_packed32[block_words + ib32];
+        const uint qh_base = 96u + 8u * (ib32 % 4u);
+        const uint qh_shift = 8u - 4u * (ib32 / 4u);
+        const uint offset = (sh & 1u) != 0u ? (4096u + 32768u) : 4096u;
+        uint idx1 = get_a_byte(block_words, 32u + jj + 0u)
+            | ((get_a_byte(block_words, qh_base + 2u * ig + 0u) << qh_shift) & 0xf00u)
+            | (((sh >> (8u + 6u * ig + 0u)) & 7u) << 12u)
+            | offset;
+        uint idx2 = get_a_byte(block_words, 32u + jj + 1u)
+            | ((get_a_byte(block_words, qh_base + 2u * ig + 1u) << qh_shift) & 0xf00u)
+            | (((sh >> (8u + 6u * ig + 3u)) & 7u) << 12u)
+            | offset;
+        const int ls = int((sh & 0xffu) >> 1u) - 64;
+        const FLOAT_TYPE dl = FLOAT_TYPE(scale * float(ls));
+        int v0, v1, v2, v3;
+        int v4, v5, v6, v7;
+
+        trellis_g4(idx1, v0, v1, v2, v3);
+        trellis_g4(idx2, v4, v5, v6, v7);
+
+        data_b[y_idx + 0u] = D_TYPE(dl * FLOAT_TYPE(v0));
+        data_b[y_idx + 1u] = D_TYPE(dl * FLOAT_TYPE(v1));
+        data_b[y_idx + 2u] = D_TYPE(dl * FLOAT_TYPE(v2));
+        data_b[y_idx + 3u] = D_TYPE(dl * FLOAT_TYPE(v3));
+        data_b[y_idx + 4u] = D_TYPE(dl * FLOAT_TYPE(v4));
+        data_b[y_idx + 5u] = D_TYPE(dl * FLOAT_TYPE(v5));
+        data_b[y_idx + 6u] = D_TYPE(dl * FLOAT_TYPE(v6));
+        data_b[y_idx + 7u] = D_TYPE(dl * FLOAT_TYPE(v7));
+#endif
+    }
+}

@@ -710,6 +710,159 @@ void process_shaders() {
         string_to_spv("get_rows_" + tname + "_f32", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float"}}));
     }
 
+    {
+        const std::string tname = "iq4_ks";
+        const std::string data_a_key = "DATA_A_IQ4_KS";
+        const std::string shader = "mul_mat_vec_iqks.comp";
+
+        string_to_spv("dequant_" + tname, "dequant_iqks.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
+
+    #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}}));
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}}));
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+    #endif
+    }
+
+    {
+        const std::string shader = "mul_mat_vec_iqkt.comp";
+
+        for (const std::string & tname : {std::string("iq1_kt"), std::string("iq2_kt"), std::string("iq3_kt"), std::string("iq4_kt")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("dequant_" + tname, "dequant_iqkt.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+        #endif
+        }
+    }
+
+    {
+        const std::string shader = "mul_mm_iqkt.comp";
+
+        for (const std::string & tname : {std::string("iq1_kt"), std::string("iq2_kt"), std::string("iq3_kt"), std::string("iq4_kt")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("matmul_" + tname + "_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("matmul_" + tname + "_q8_1", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_q8_1", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+        #endif
+        }
+    }
+
+    {
+        const std::string shader = "mul_mat_vec_iqk.comp";
+
+        for (const std::string & tname : {std::string("iq2_k"), std::string("iq3_k"), std::string("iq4_k"), std::string("iq5_k"), std::string("iq6_k")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("dequant_" + tname, "dequant_iqk.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+        #endif
+        }
+    }
+
+    {
+        const std::string shader = "mul_mm_iqk.comp";
+
+        for (const std::string & tname : {std::string("iq2_k"), std::string("iq3_k"), std::string("iq4_k"), std::string("iq5_k"), std::string("iq6_k")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("matmul_" + tname + "_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("matmul_" + tname + "_q8_1", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_q8_1", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+        #endif
+        }
+    }
+
+    {
+        const std::string shader = "mul_mat_vec_iqks.comp";
+
+        for (const std::string & tname : {std::string("iq4_kss"), std::string("iq5_ks"), std::string("iq2_ks"), std::string("iq3_ks"), std::string("iq2_kl")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("dequant_" + tname, "dequant_iqks.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+            string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+        #endif
+        }
+    }
+
+    {
+        const std::string shader = "mul_mm_iqks.comp";
+
+        for (const std::string & tname : {std::string("iq4_ks"), std::string("iq4_kss"), std::string("iq5_ks"), std::string("iq2_ks"), std::string("iq3_ks"), std::string("iq2_kl")}) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+
+            string_to_spv("matmul_" + tname + "_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f32_aligned", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_f16_aligned", shader, merge_maps(base_dict, {{"FLOAT16", "1"}, {"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}, {"ALIGNED", "1"}}));
+
+        #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+            string_to_spv("matmul_" + tname + "_q8_1", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+            string_to_spv("matmul_id_subgroup_" + tname + "_q8_1", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {"MUL_MAT_ID_USE_SUBGROUPS", "1"}, {data_a_key, "1"}, {"B_IS_Q8_1", "1"}, {"D_TYPE", "float"}}));
+        #endif
+        }
+    }
+
     string_to_spv("get_rows_i32", "get_rows.comp", {{"TEMP_TYPE", "uint"}, {"A_TYPE", "uint"}, {"B_TYPE", "int"}, {"D_TYPE", "uint"}});
 
     string_to_spv("mul_mat_vec_p021_f16_f32_subgroup_add", "mul_mat_vec_p021.comp", {{"A_TYPE", "float16_t"}, {"A_TYPEV4", "f16vec4"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}});
@@ -1142,6 +1295,63 @@ void write_output_files() {
             src << "const uint64_t arr_dmmv_id_" << tname << "_" << btype << "_f32_len[3] =  {mul_mat_vec_id_" << tname << "_" << btype << "_f32_len,  mul_mat_vec_id_" << tname << "_" << btype << "_f32_subgroup_len, mul_mat_vec_id_"  << tname << "_" << btype << "_f32_subgroup_no_shmem_len};\n";
         }
     }
+    }
+
+    // IQ*_KS/KL types expose grouped q8_1 vec helper arrays.
+    for (const char * tname : {"iq4_ks", "iq4_kss", "iq5_ks", "iq2_ks", "iq3_ks", "iq2_kl"}) {
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+        hdr << "extern const void * arr_dmmv_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqks.comp") {
+            src << "const void * arr_dmmv_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_" << tname << "_q8_1_f32_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_" << tname << "_q8_1_f32_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+
+        hdr << "extern const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqks.comp") {
+            src << "const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+#endif
+    }
+
+    // IQ*_KT types only have q8_1 vec path (integer_dot_product required)
+    for (const char * tname : {"iq1_kt", "iq2_kt", "iq3_kt", "iq4_kt"}) {
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+        hdr << "extern const void * arr_dmmv_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqkt.comp") {
+            src << "const void * arr_dmmv_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_" << tname << "_q8_1_f32_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_" << tname << "_q8_1_f32_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+
+        hdr << "extern const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqkt.comp") {
+            src << "const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+#endif
+    }
+
+    // IQ*_K types only have q8_1 vec path (integer_dot_product required)
+    for (const char * tname : {"iq2_k", "iq3_k", "iq4_k", "iq5_k", "iq6_k"}) {
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+        hdr << "extern const void * arr_dmmv_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqk.comp") {
+            src << "const void * arr_dmmv_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_" << tname << "_q8_1_f32_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_" << tname << "_q8_1_f32_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+
+        hdr << "extern const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec_iqk.comp") {
+            src << "const void * arr_dmmv_id_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+#endif
     }
 
     if (input_filepath == "") {

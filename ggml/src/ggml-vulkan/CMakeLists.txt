@@ -160,7 +160,7 @@ if (Vulkan_FOUND)
     ExternalProject_Add(
         vulkan-shaders-gen
         SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders
-        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
+        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}
                    -DCMAKE_INSTALL_BINDIR=.
                    -DCMAKE_BUILD_TYPE=$<CONFIG>
                    ${VULKAN_SHADER_GEN_CMAKE_ARGS}
@@ -174,7 +174,7 @@ if (Vulkan_FOUND)
         # to ensure that does not happen.
 
         INSTALL_COMMAND ${CMAKE_COMMAND} -E env --unset=DESTDIR
-                        ${CMAKE_COMMAND} --install . --config $<CONFIG>
+                        ${CMAKE_COMMAND} --install . --config $<CONFIG> --prefix ${CMAKE_BINARY_DIR}/$<CONFIG>
     )
 
     set (_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
@@ -199,7 +199,8 @@ if (Vulkan_FOUND)
         COMMAND ${_ggml_vk_genshaders_cmd}
             --output-dir ${_ggml_vk_output_dir}
             --target-hpp ${_ggml_vk_header}
-        DEPENDS ${_ggml_vk_shaders_gen_sources}
+        DEPENDS ${_ggml_vk_shader_files}
+                ${_ggml_vk_shaders_gen_sources}
                 vulkan-shaders-gen
         COMMENT "Generate vulkan shaders header"
     )

@@ -1,0 +1,486 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+
+#define B_TYPE block_q8_1_x4
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+// Superblock sizes
+#if defined(DATA_A_IQ4_KS)
+const uint IQKS_SUPERBLOCK_WORDS = 34u;  // 8 scales + 128 qs = 136 bytes = 34 words
+#elif defined(DATA_A_IQ4_KSS)
+const uint IQKS_SUPERBLOCK_WORDS = 32u;  // 128 qs bytes = 32 words (scales in LSBs)
+#elif defined(DATA_A_IQ5_KS)
+const uint IQKS_SUPERBLOCK_WORDS = 42u;  // 8 scales + 128 qs + 32 qh = 168 bytes = 42 words
+#elif defined(DATA_A_IQ2_KS)
+const uint IQKS_SUPERBLOCK_BYTES = 70u;  // 2 extra + 4 scales + 64 qs
+#elif defined(DATA_A_IQ3_KS)
+const uint IQKS_SUPERBLOCK_BYTES = 102u; // 2 extra + 4 scales + 64 qs + 32 qh
+#elif defined(DATA_A_IQ2_KL)
+const uint IQKS_SUPERBLOCK_BYTES = 86u;  // 2 scales_h + 4 scales_l + 64 qs + 16 qh
+#else
+#error "unsupported IQKS type"
+#endif
+
+// Row prefix size and alignment
+#if defined(DATA_A_IQ4_KS) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ5_KS)
+#define WORD_ALIGNED_ROWS
+#endif
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+void get_offsets_iqks(
+#ifdef WORD_ALIGNED_ROWS
+    out uint a_offset,
+#else
+    out uint a_offset_bytes,
+#endif
+    out uint b_offset, out uint d_offset)
+{
+#ifdef MUL_MAT_ID
+    const uint expert_i0 = gl_WorkGroupID.y;
+    expert_id = data_ids[expert_i0 + p.expert_i1 * p.nbi1];
+#ifdef WORD_ALIGNED_ROWS
+    a_offset = (expert_id * p.batch_stride_a) / 4u;
+#else
+    a_offset_bytes = expert_id * p.batch_stride_a;
+#endif
+    b_offset = (expert_i0 % p.ne11) * p.stride_b + p.expert_i1 * p.batch_stride_b;
+    d_offset = expert_i0 * p.stride_d + p.expert_i1 * p.batch_stride_d;
+#else
+    const uint batch_idx = gl_WorkGroupID.y + p.base_work_group_y;
+    uint batch_idx_a = 0;
+    if (batch_idx != 0) {
+        const uint i13 = batch_idx / p.ne12;
+        const uint i12 = batch_idx % p.ne12;
+        batch_idx_a = (i13 / p.broadcast3) * p.ne02 + (i12 / p.broadcast2);
+    }
+#ifdef WORD_ALIGNED_ROWS
+    a_offset = (batch_idx_a * p.batch_stride_a) / 4u;
+#else
+    a_offset_bytes = batch_idx_a * p.batch_stride_a;
+#endif
+    b_offset = batch_idx * p.batch_stride_b;
+    d_offset = batch_idx * p.batch_stride_d;
+#endif
+}
+
+// ============================================================================
+// Byte-access helpers for non-word-aligned types
+// ============================================================================
+#ifndef WORD_ALIGNED_ROWS
+uint get_byte_at(const uint byte_offset) {
+    return (data_a_packed32[byte_offset >> 2u] >> (8u * (byte_offset & 3u))) & 0xffu;
+}
+
+uint get_u16_at(const uint byte_offset) {
+    uint word = data_a_packed32[byte_offset >> 2u];
+    uint shift = 8u * (byte_offset & 3u);
+    if ((byte_offset & 3u) <= 2u) {
+        return (word >> shift) & 0xffffu;
+    }
+    // Crosses word boundary
+    return ((word >> 24u) & 0xffu) | ((data_a_packed32[(byte_offset >> 2u) + 1u] & 0xffu) << 8u);
+}
+
+uint get_u32_at(const uint byte_offset) {
+    if ((byte_offset & 3u) == 0u) {
+        return data_a_packed32[byte_offset >> 2u];
+    }
+    uint w0 = data_a_packed32[byte_offset >> 2u];
+    uint w1 = data_a_packed32[(byte_offset >> 2u) + 1u];
+    uint shift = 8u * (byte_offset & 3u);
+    return (w0 >> shift) | (w1 << (32u - shift));
+}
+#endif
+
+// ============================================================================
+// IQ4_KS: 4-bit, 32-entry table, separate scale byte per block
+// Layout: scales[8] + qs[128] = 136B = 34 words per superblock
+// ============================================================================
+#if defined(DATA_A_IQ4_KS)
+int32_t dot_block(const uint qs_words, const uint values_offset, const uint b_outer, const uint q8_base) {
+    int32_t q_sum = 0;
+    [[unroll]] for (uint j = 0; j < 4u; ++j) {
+        const uint qw = data_a_packed32[qs_words + j];
+        const int32_t lo = int32_t(pack32(i8vec4(
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  0u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  8u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 16u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 24u) & 0xfu)]))));
+        const int32_t hi = int32_t(pack32(i8vec4(
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  4u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 12u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 20u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 28u) & 0xfu)]))));
+        q_sum += dotPacked4x8EXT(lo, data_b[b_outer].qs[q8_base + j]);
+        q_sum += dotPacked4x8EXT(hi, data_b[b_outer].qs[q8_base + 4u + j]);
+    }
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// IQ4_KSS: 4-bit, scale embedded in LSBs, XOR decode
+// Layout: qs[128] = 128B = 32 words per superblock
+// ============================================================================
+#if defined(DATA_A_IQ4_KSS)
+int32_t dot_block(const uint qs_words, out float dl_out, const float d, const uint b_outer, const uint q8_base) {
+    // Extract scale from LSBs of the 4 words
+    uint w0 = data_a_packed32[qs_words + 0u];
+    uint w1 = data_a_packed32[qs_words + 1u];
+    uint w2 = data_a_packed32[qs_words + 2u];
+    uint w3 = data_a_packed32[qs_words + 3u];
+    uint s32 = (w0 & 0x00010001u) | ((w1 & 0x00010001u) << 2u) |
+               ((w2 & 0x00010001u) << 4u) | ((w3 & 0x00010001u) << 6u);
+    uint ls = (s32 | (s32 >> 15u)) & 0xffu;
+    dl_out = d * float(int(ls & 0xfeu) - 127);
+    const uint values_offset = (ls & 1u) << 4u;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint j = 0; j < 4u; ++j) {
+        uint qw = data_a_packed32[qs_words + j] & 0xfffefffeU;
+        qw ^= (qw >> 1u);
+        const int32_t lo = int32_t(pack32(i8vec4(
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  0u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  8u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 16u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 24u) & 0xfu)]))));
+        const int32_t hi = int32_t(pack32(i8vec4(
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >>  4u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 12u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 20u) & 0xfu)]),
+            int8_t(kvalues_iq4k_const[values_offset + ((qw >> 28u) & 0xfu)]))));
+        q_sum += dotPacked4x8EXT(lo, data_b[b_outer].qs[q8_base + j]);
+        q_sum += dotPacked4x8EXT(hi, data_b[b_outer].qs[q8_base + 4u + j]);
+    }
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// IQ5_KS: 5-bit, 64-entry table (two 32-halves selected by scale bit 0)
+// Layout: scales[8] + qs[128] + qh[32] = 168B = 42 words per superblock
+// Per ib32: low nibble of qs for even blocks, high nibble for odd blocks.
+// qh provides bit 4. Scale byte per ib32.
+// ============================================================================
+#if defined(DATA_A_IQ5_KS)
+int32_t dot_block(const uint block_words, const uint ib32, out float dl_out, const float d,
+                  const uint b_outer, const uint q8_base) {
+    const uint ib64 = ib32 / 2u;
+    const uint ihalf = ib32 & 1u;
+
+    // Scale for this ib32
+    const uint scale = (data_a_packed32[block_words + ib32 / 4u] >> (8u * (ib32 & 3u))) & 0xffu;
+    dl_out = d * float(int(scale & 0xfeu) - 127);
+    const uint values_offset = (scale & 1u) << 5u;
+
+    // qs: 128 bytes at block_words + 2, 32 bytes per ib64 section = 8 words
+    const uint qs_base = block_words + 2u + 8u * ib64;
+    // qh: 32 bytes at block_words + 34 = 8 words (shared across all ib64)
+    const uint qh_base = block_words + 34u;
+    const uint qh_bit_pos = 2u * ib64 + ihalf;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint w = 0; w < 8u; ++w) {
+        const uint qs_word = data_a_packed32[qs_base + w];
+        const uint qh_word = data_a_packed32[qh_base + w];
+
+        uint nibbles;
+        if (ihalf == 0u) {
+            nibbles = qs_word & 0x0f0f0f0fu;
+        } else {
+            nibbles = (qs_word >> 4u) & 0x0f0f0f0fu;
+        }
+        const uint high_bits = ((qh_word >> qh_bit_pos) & 0x01010101u) << 4u;
+        const uint indices = nibbles | high_bits;
+
+        const int32_t v = int32_t(pack32(i8vec4(
+            int8_t(kvalues_iq5nl_const[values_offset + (indices & 0x1fu)]),
+            int8_t(kvalues_iq5nl_const[values_offset + ((indices >> 8u) & 0x1fu)]),
+            int8_t(kvalues_iq5nl_const[values_offset + ((indices >> 16u) & 0x1fu)]),
+            int8_t(kvalues_iq5nl_const[values_offset + ((indices >> 24u) & 0x1fu)]))));
+        q_sum += dotPacked4x8EXT(v, data_b[b_outer].qs[q8_base + w]);
+    }
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// IQ2_KS: 2-bit quants, 8-entry table (two 4-halves), half row prefix
+// Layout: extra(2) + scales(4) + qs(64) = 70B per superblock
+// Per ib32: extract specific bit-pair from 32 consecutive qs bytes.
+// ============================================================================
+#if defined(DATA_A_IQ2_KS)
+int32_t dot_block(const uint block_base, const uint ib32, out float dl_out, const float d,
+                  const uint b_outer, const uint q8_base) {
+    const uint ib128 = ib32 / 4u;
+    const uint group = ib32 & 3u;
+    const uint bit_shift = 2u * group;
+
+    // Read extra (16-bit)
+    const uint extra = get_u16_at(block_base);
+    const uint extra_shifted = extra >> (4u * ib128);
+
+    // Table offset: bit (group) of lower nibble of extra_shifted selects table half
+    const uint table_offset = ((extra_shifted >> group) & 1u) * 4u;
+
+    // Scale: 4 scales packed in 4 bytes, each nibble is one scale
+    const uint scale_byte = get_byte_at(block_base + 2u + 2u * ib128 + group / 2u);
+    uint scale_nibble = ((group & 1u) == 0u) ? (scale_byte & 0xfu) : ((scale_byte >> 4u) & 0xfu);
+    uint extra_scale = ((extra_shifted >> (8u + group)) & 1u) << 4u;
+    dl_out = d * float(int(scale_nibble | extra_scale) - 16);
+
+    // qs: 64 bytes at block_base + 6, 32 bytes per ib128 half
+    const uint qs_base = block_base + 6u + 32u * ib128;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint w = 0; w < 8u; ++w) {
+        const uint qs_word = get_u32_at(qs_base + 4u * w);
+        // Extract 2-bit values at bit_shift position in each byte
+        const uint indices = (qs_word >> bit_shift) & 0x03030303u;
+        const int32_t v = int32_t(pack32(i8vec4(
+            kvalues_iq2nl_const[table_offset + (indices & 3u)],
+            kvalues_iq2nl_const[table_offset + ((indices >> 8u) & 3u)],
+            kvalues_iq2nl_const[table_offset + ((indices >> 16u) & 3u)],
+            kvalues_iq2nl_const[table_offset + ((indices >> 24u) & 3u)])));
+        q_sum += dotPacked4x8EXT(v, data_b[b_outer].qs[q8_base + w]);
+    }
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// IQ3_KS: 3-bit quants (2 from qs + 1 from qh), 16-entry table, half prefix
+// Layout: extra(2) + scales(4) + qs(64) + qh(32) = 102B per superblock
+// Per ib32: extract bit-pair from qs + 1 bit from qh = 3-bit index.
+// ============================================================================
+#if defined(DATA_A_IQ3_KS)
+int32_t dot_block(const uint block_base, const uint ib32, out float dl_out, const float d,
+                  const uint b_outer, const uint q8_base) {
+    const uint ib128 = ib32 / 4u;
+    const uint group = ib32 & 3u;
+    const uint bit_shift = 2u * group;
+    const uint qh_bit_pos = 4u * ib128 + group;
+
+    // Read extra (16-bit)
+    const uint extra = get_u16_at(block_base);
+    const uint extra_shifted = extra >> (4u * ib128);
+
+    // Table offset: upper nibble bit selects table half (8-entry halves)
+    const uint extra_v = (extra_shifted >> 8u) & 0xfu;
+    const uint table_offset = ((extra_v >> group) & 1u) * 8u;
+
+    // Scale: 4 bytes at block_base + 2, each byte has 2 nibbles for the 2 ib128 halves
+    const uint scale_byte = get_byte_at(block_base + 2u + group);
+    uint scale_nibble = (scale_byte >> (4u * ib128)) & 0xfu;
+    uint extra_scale = ((extra_shifted >> group) & 1u) << 4u;
+    dl_out = d * float(int(scale_nibble | extra_scale) - 16);
+
+    // qs: 64 bytes at block_base + 6, 32 bytes per ib128 half
+    const uint qs_base = block_base + 6u + 32u * ib128;
+    // qh: 32 bytes at block_base + 70 (shared, shifted by qh_bit_pos)
+    const uint qh_base = block_base + 70u;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint w = 0; w < 8u; ++w) {
+        const uint qs_word = get_u32_at(qs_base + 4u * w);
+        const uint qh_word = get_u32_at(qh_base + 4u * w);
+
+        // 2-bit from qs
+        const uint qs_bits = (qs_word >> bit_shift) & 0x03030303u;
+        // 1-bit from qh shifted to bit position 2
+        const uint qh_bits = ((qh_word >> qh_bit_pos) & 0x01010101u) << 2u;
+        // 3-bit index
+        const uint indices = qs_bits | qh_bits;
+
+        const int32_t v = int32_t(pack32(i8vec4(
+            kvalues_iq3nl_const[table_offset + (indices & 7u)],
+            kvalues_iq3nl_const[table_offset + ((indices >> 8u) & 7u)],
+            kvalues_iq3nl_const[table_offset + ((indices >> 16u) & 7u)],
+            kvalues_iq3nl_const[table_offset + ((indices >> 24u) & 7u)])));
+        q_sum += dotPacked4x8EXT(v, data_b[b_outer].qs[q8_base + w]);
+    }
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// IQ2_KL: 5-bit index (4 from qs + 1 from qh), uint16 table (2 int8 per entry)
+// Layout: scales_h(2) + scales_l(4) + qs(64) + qh(16) = 86B per superblock
+// Per ib32: low nibble for even blocks, high nibble for odd blocks.
+// Each lookup produces 2 int8 values, so 16 qs bytes ? 32 values.
+// ============================================================================
+#if defined(DATA_A_IQ2_KL)
+int32_t dot_block(const uint block_base, const uint ib32, out float dl_out, const float d,
+                  const uint b_outer, const uint q8_base) {
+    const uint ib64 = ib32 / 2u;
+    const uint ihalf = ib32 & 1u;
+
+    // qs: 64 bytes at block_base + 6, 16 bytes per ib64 section
+    const uint qs_base = block_base + 6u + 16u * ib64;
+    // qh: 16 bytes at block_base + 70 (shared, shifted by 2*ib64)
+    const uint qh_base = block_base + 70u;
+    const uint qh_shift = 2u * ib64;
+
+    int32_t q_sum = 0;
+    [[unroll]] for (uint w = 0; w < 4u; ++w) {
+        const uint qs_word = get_u32_at(qs_base + 4u * w);
+        const uint qh_word = get_u32_at(qh_base + 4u * w);
+        const uint vh = qh_word >> qh_shift;
+
+        uint idx_packed;
+        if (ihalf == 0u) {
+            idx_packed = (qs_word & 0x0f0f0f0fu) | ((vh << 4u) & 0x10101010u);
+        } else {
+            idx_packed = ((qs_word >> 4u) & 0x0f0f0f0fu) | ((vh << 3u) & 0x10101010u);
+        }
+
+        const uint idx0 = idx_packed & 0x1fu;
+        const uint idx1 = (idx_packed >> 8u) & 0x1fu;
+        const uint idx2 = (idx_packed >> 16u) & 0x1fu;
+        const uint idx3 = (idx_packed >> 24u) & 0x1fu;
+
+        // Each table entry is uint16 packing 2 int8 values
+        const int32_t v1 = int32_t(kvalues_iq2kl_const[idx0] | (kvalues_iq2kl_const[idx1] << 16u));
+        const int32_t v2 = int32_t(kvalues_iq2kl_const[idx2] | (kvalues_iq2kl_const[idx3] << 16u));
+        q_sum += dotPacked4x8EXT(v1, data_b[b_outer].qs[q8_base + 2u * w + 0u]);
+        q_sum += dotPacked4x8EXT(v2, data_b[b_outer].qs[q8_base + 2u * w + 1u]);
+    }
+
+    // Scale extraction
+    const uint sh = get_u16_at(block_base) >> (4u * ib64);
+    const uint sl_byte0 = get_byte_at(block_base + 2u + (2u * ib64 + 0u) % 4u);
+    const uint sl_byte1 = get_byte_at(block_base + 2u + (2u * ib64 + 1u) % 4u);
+    const uint sl0 = (sl_byte0 >> (4u * (ib64 / 2u))) & 0xfu;
+    const uint sl1 = (sl_byte1 >> (4u * (ib64 / 2u))) & 0xfu;
+    int ls1 = int(sl0 | ((sh << 4u) & 0x30u)) - 32;
+    int ls2 = int(sl1 | ((sh << 2u) & 0x30u)) - 32;
+
+    dl_out = d * float(ihalf == 0u ? ls1 : ls2);
+    return q_sum;
+}
+#endif
+
+// ============================================================================
+// Main compute function
+// ============================================================================
+void compute_outputs(const uint first_row, const uint num_rows) {
+    const uint tid = gl_LocalInvocationID.x;
+
+#ifdef WORD_ALIGNED_ROWS
+    uint a_offset;
+#else
+    uint a_offset_bytes;
+#endif
+    uint b_offset, d_offset;
+    get_offsets_iqks(
+#ifdef WORD_ALIGNED_ROWS
+        a_offset,
+#else
+        a_offset_bytes,
+#endif
+        b_offset, d_offset);
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint n = 0; n < NUM_ROWS; ++n) {
+            temp[j][n] = FLOAT_TYPE(0);
+        }
+    }
+
+#ifdef WORD_ALIGNED_ROWS
+    const uint row_stride_words = p.stride_a / 4u;
+#endif
+    const uint b_offset_blocks = b_offset / QUANT_K_Q8_1;
+    const uint batch_stride_b_blocks = p.batch_stride_b / QUANT_K_Q8_1;
+    const uint num_blocks_per_row = p.ncols / QUANT_K_Q8_1;
+    const uint blocks_per_superblock = QUANT_K / QUANT_K_Q8_1;  // 8
+
+    for (uint block_idx = tid; block_idx < num_blocks_per_row; block_idx += gl_WorkGroupSize.x) {
+        const uint superblock = block_idx / blocks_per_superblock;
+        const uint ib32 = block_idx % blocks_per_superblock;
+
+        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+            [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+                const uint b_block_idx = b_offset_blocks + j * batch_stride_b_blocks + block_idx;
+                const uint b_outer = b_block_idx / 4u;
+                const uint b_inner = b_block_idx % 4u;
+                const FLOAT_TYPE db = FLOAT_TYPE(vec2(data_b[b_outer].ds[b_inner]).x);
+                const uint q8_base = b_inner * 8u;
+
+#if defined(DATA_A_IQ4_KS)
+                const uint row_words = a_offset + (first_row + n) * row_stride_words;
+                const float d = uintBitsToFloat(data_a_packed32[row_words]);
+                const uint blk = row_words + 1u + superblock * IQKS_SUPERBLOCK_WORDS;
+                const uint scale = (data_a_packed32[blk + ib32 / 4u] >> (8u * (ib32 & 3u))) & 0xffu;
+                const FLOAT_TYPE dl = FLOAT_TYPE(d * float(int(scale & 0xfeu) - 127));
+                const uint values_offset = (scale & 1u) << 4u;
+                temp[j][n] += dl * db * FLOAT_TYPE(dot_block(blk + 2u + 4u * ib32, values_offset, b_outer, q8_base));
+
+#elif defined(DATA_A_IQ4_KSS)
+                const uint row_words = a_offset + (first_row + n) * row_stride_words;
+                const float d = uintBitsToFloat(data_a_packed32[row_words]);
+                const uint blk = row_words + 1u + superblock * IQKS_SUPERBLOCK_WORDS;
+                float dl;
+                int32_t q_sum = dot_block(blk + 4u * ib32, dl, d, b_outer, q8_base);
+                temp[j][n] += FLOAT_TYPE(dl) * db * FLOAT_TYPE(q_sum);
+
+#elif defined(DATA_A_IQ5_KS)
+                const uint row_words = a_offset + (first_row + n) * row_stride_words;
+                const float d = uintBitsToFloat(data_a_packed32[row_words]);
+                const uint blk = row_words + 1u + superblock * IQKS_SUPERBLOCK_WORDS;
+                float dl;
+                int32_t q_sum = dot_block(blk, ib32, dl, d, b_outer, q8_base);
+                temp[j][n] += FLOAT_TYPE(dl) * db * FLOAT_TYPE(q_sum);
+
+#elif defined(DATA_A_IQ2_KS)
+                const uint row_bytes = a_offset_bytes + (first_row + n) * p.stride_a;
+                const float d = unpackHalf2x16(get_u16_at(row_bytes)).x;
+                const uint blk = row_bytes + 2u + superblock * IQKS_SUPERBLOCK_BYTES;
+                float dl;
+                int32_t q_sum = dot_block(blk, ib32, dl, d, b_outer, q8_base);
+                temp[j][n] += FLOAT_TYPE(dl) * db * FLOAT_TYPE(q_sum);
+
+#elif defined(DATA_A_IQ3_KS)
+                const uint row_bytes = a_offset_bytes + (first_row + n) * p.stride_a;
+                const float d = unpackHalf2x16(get_u16_at(row_bytes)).x;
+                const uint blk = row_bytes + 2u + superblock * IQKS_SUPERBLOCK_BYTES;
+                float dl;
+                int32_t q_sum = dot_block(blk, ib32, dl, d, b_outer, q8_base);
+                temp[j][n] += FLOAT_TYPE(dl) * db * FLOAT_TYPE(q_sum);
+
+#elif defined(DATA_A_IQ2_KL)
+                const uint row_bytes = a_offset_bytes + (first_row + n) * p.stride_a;
+                const float d = unpackHalf2x16(get_u16_at(row_bytes)).x;
+                const uint blk = row_bytes + 2u + superblock * IQKS_SUPERBLOCK_BYTES;
+                float dl;
+                int32_t q_sum = dot_block(blk, ib32, dl, d, b_outer, q8_base);
+                temp[j][n] += FLOAT_TYPE(dl) * db * FLOAT_TYPE(q_sum);
+#endif
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, p.stride_d - first_row);
+    }
+}

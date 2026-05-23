@@ -1,0 +1,226 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+
+#define B_TYPE block_q8_1_x4
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(DATA_A_IQ1_KT)
+const uint IQKT_BLOCK_WORDS = 14u;
+#elif defined(DATA_A_IQ2_KT)
+const uint IQKT_BLOCK_WORDS = 17u;
+#elif defined(DATA_A_IQ3_KT)
+const uint IQKT_BLOCK_WORDS = 25u;
+#elif defined(DATA_A_IQ4_KT)
+const uint IQKT_BLOCK_WORDS = 32u;
+#else
+#error unsupported IQKT type
+#endif
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+void get_offsets_iqkt(out uint a_offset_words, out uint b_offset, out uint d_offset) {
+#ifdef MUL_MAT_ID
+    const uint expert_i0 = gl_WorkGroupID.y;
+    expert_id = data_ids[expert_i0 + p.expert_i1 * p.nbi1];
+
+    a_offset_words = (expert_id * p.batch_stride_a) / 4u;
+    b_offset = (expert_i0 % p.ne11) * p.stride_b + p.expert_i1 * p.batch_stride_b;
+    d_offset = expert_i0 * p.stride_d + p.expert_i1 * p.batch_stride_d;
+#else
+    const uint batch_idx = gl_WorkGroupID.y + p.base_work_group_y;
+
+    uint batch_idx_a = 0u;
+    if (batch_idx != 0u) {
+        const uint i13 = batch_idx / p.ne12;
+        const uint i12 = batch_idx % p.ne12;
+
+        const uint i03 = i13 / p.broadcast3;
+        const uint i02 = i12 / p.broadcast2;
+
+        batch_idx_a = i03 * p.ne02 + i02;
+    }
+
+    a_offset_words = (batch_idx_a * p.batch_stride_a) / 4u;
+    b_offset = batch_idx * p.batch_stride_b;
+    d_offset = batch_idx * p.batch_stride_d;
+#endif
+}
+
+uint get_a_byte(const uint word_base, const uint byte_offset) {
+    const uint word = data_a_packed32[word_base + byte_offset / 4u];
+    return (word >> (8u * (byte_offset % 4u))) & 0xffu;
+}
+
+uint get_a_u16(const uint word_base, const uint byte_offset) {
+    return get_a_byte(word_base, byte_offset) | (get_a_byte(word_base, byte_offset + 1u) << 8u);
+}
+
+int trellis_next_int(inout uint val) {
+    val *= 0xCBAC1FEDu;
+    const uint sv = val & 0x3f3f3f3fu;
+    return int(sv & 0xffu) + int((sv >> 8u) & 0xffu) + int((sv >> 16u) & 0xffu) + int((sv >> 24u) & 0xffu) - 126;
+}
+
+void trellis_g4(inout uint val, out int v0, out int v1, out int v2, out int v3) {
+    v0 = trellis_next_int(val);
+    v1 = trellis_next_int(val);
+    v2 = trellis_next_int(val);
+    v3 = trellis_next_int(val);
+}
+
+#ifdef B_IS_Q8_1
+int dot_trellis_g8_q8_1(uint idx, const uint offset, const uint b_outer, const uint q8_base) {
+    uint xh = idx + offset;
+    const int32_t lo = int32_t(pack32(i8vec4(
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)))));
+    const int32_t hi = int32_t(pack32(i8vec4(
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)))));
+    return dotPacked4x8EXT(lo, data_b[b_outer].qs[q8_base + 0u])
+         + dotPacked4x8EXT(hi, data_b[b_outer].qs[q8_base + 1u]);
+}
+
+int dot_trellis_g8_abs_q8_1(uint idx, const uint offset, const uint b_outer, const uint q8_base, const uint block_words, const uint ig, const uint mask) {
+    uint xh = idx + offset;
+    const int v0 = ((get_a_byte(block_words, 68u + 8u * ig + 0u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v1 = ((get_a_byte(block_words, 68u + 8u * ig + 1u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v2 = ((get_a_byte(block_words, 68u + 8u * ig + 2u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v3 = ((get_a_byte(block_words, 68u + 8u * ig + 3u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v4 = ((get_a_byte(block_words, 68u + 8u * ig + 4u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v5 = ((get_a_byte(block_words, 68u + 8u * ig + 5u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v6 = ((get_a_byte(block_words, 68u + 8u * ig + 6u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int v7 = ((get_a_byte(block_words, 68u + 8u * ig + 7u) & mask) != 0u ? -1 : 1) * abs(trellis_next_int(xh));
+    const int32_t lo = int32_t(pack32(i8vec4(int8_t(v0), int8_t(v1), int8_t(v2), int8_t(v3))));
+    const int32_t hi = int32_t(pack32(i8vec4(int8_t(v4), int8_t(v5), int8_t(v6), int8_t(v7))));
+    return dotPacked4x8EXT(lo, data_b[b_outer].qs[q8_base + 0u])
+         + dotPacked4x8EXT(hi, data_b[b_outer].qs[q8_base + 1u]);
+}
+
+int dot_trellis_g4_q8_1(uint idx, const uint offset, const uint b_outer, const uint q8_idx) {
+    uint xh = idx + offset;
+    const int32_t packed = int32_t(pack32(i8vec4(
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)),
+        int8_t(trellis_next_int(xh)))));
+    return dotPacked4x8EXT(packed, data_b[b_outer].qs[q8_idx]);
+}
+#endif
+
+void compute_outputs(const uint first_row, const uint num_rows) {
+    const uint tid = gl_LocalInvocationID.x;
+
+    uint a_offset_words;
+    uint b_offset;
+    uint d_offset;
+    get_offsets_iqkt(a_offset_words, b_offset, d_offset);
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint n = 0; n < NUM_ROWS; ++n) {
+            temp[j][n] = FLOAT_TYPE(0);
+        }
+    }
+
+    const uint row_stride_words = p.stride_a / 4u;
+
+    const uint b_offset_blocks = b_offset / QUANT_K_Q8_1;
+    const uint batch_stride_b_blocks = p.batch_stride_b / QUANT_K_Q8_1;
+    const uint num_blocks_per_row = p.ncols / QUANT_K_Q8_1;
+    const uint blocks_per_superblock = QUANT_K / QUANT_K_Q8_1;
+
+    for (uint block_idx = tid; block_idx < num_blocks_per_row; block_idx += gl_WorkGroupSize.x) {
+        const uint superblock = block_idx / blocks_per_superblock;
+        const uint ib32 = block_idx % blocks_per_superblock;
+
+        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+            const uint row_base_words = a_offset_words + (first_row + n) * row_stride_words;
+            const float scale = uintBitsToFloat(data_a_packed32[row_base_words]);
+            const uint block_words = row_base_words + 1u + superblock * IQKT_BLOCK_WORDS;
+
+            [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+                const uint b_block_idx = b_offset_blocks + j * batch_stride_b_blocks + block_idx;
+                const uint b_outer = b_block_idx / 4u;
+                const uint b_inner = b_block_idx % 4u;
+                const FLOAT_TYPE db = FLOAT_TYPE(vec2(data_b[b_outer].ds[b_inner]).x);
+                const uint q8_base = b_inner * 8u;
+
+#if defined(DATA_A_IQ1_KT)
+                const uint sh = get_a_byte(block_words, ib32);
+                const uint qh_shift = 8u - 4u * (ib32 / 4u);
+                const uint qh_base = 40u + 4u * (ib32 % 4u);
+                const FLOAT_TYPE dl = FLOAT_TYPE(scale) * kvalues_iq4k[sh & 0x0fu] * db;
+                int q_sum = 0;
+                [[unroll]] for (uint ig = 0u; ig < 4u; ++ig) {
+                    const uint idx = get_a_byte(block_words, 8u + 4u * ib32 + ig)
+                        | ((get_a_byte(block_words, qh_base + ig) << qh_shift) & 0xf00u)
+                        | ((sh << (8u - ig)) & 0x1000u);
+                    q_sum += dot_trellis_g8_q8_1(idx, 4096u, b_outer, q8_base + 2u * ig);
+                }
+                temp[j][n] += dl * FLOAT_TYPE(q_sum);
+#elif defined(DATA_A_IQ2_KT)
+                const uint scale_byte = get_a_byte(block_words, ib32 % 4u);
+                const uint ls = (scale_byte >> (4u * (ib32 / 4u))) & 0x0fu;
+                const FLOAT_TYPE dl = FLOAT_TYPE(scale * 1.05f) * kvalues_iq4k[ls] * db;
+                int q_sum = 0;
+                [[unroll]] for (uint ig = 0; ig < 4u; ++ig) {
+                    q_sum += dot_trellis_g8_q8_1(get_a_u16(block_words, 4u + 2u * (4u * ib32 + ig)), 4096u, b_outer, q8_base + 2u * ig);
+                }
+                temp[j][n] += dl * FLOAT_TYPE(q_sum);
+#elif defined(DATA_A_IQ3_KT)
+                const uint scale_byte = get_a_byte(block_words, ib32 % 4u);
+                const uint ls = (scale_byte >> (4u * (ib32 / 4u))) & 0x0fu;
+                const uint mask = 1u << ib32;
+                const FLOAT_TYPE dl = FLOAT_TYPE(scale * 1.015f * float(ls)) * db;
+                int q_sum = 0;
+                [[unroll]] for (uint ig = 0; ig < 4u; ++ig) {
+                    q_sum += dot_trellis_g8_abs_q8_1(get_a_u16(block_words, 4u + 2u * (4u * ib32 + ig)), 4096u, b_outer, q8_base + 2u * ig, block_words, ig, mask);
+                }
+                temp[j][n] += dl * FLOAT_TYPE(q_sum);
+#elif defined(DATA_A_IQ4_KT)
+                const uint sh = data_a_packed32[block_words + ib32];
+                const uint offset = (sh & 1u) != 0u ? (4096u + 32768u) : 4096u;
+                const int ls = int((sh & 0xffu) >> 1u) - 64;
+                const FLOAT_TYPE dl = FLOAT_TYPE(scale * float(ls)) * db;
+                int q_sum = 0;
+                [[unroll]] for (uint ig = 0; ig < 8u; ++ig) {
+                    const uint jj = ib32 * 8u + ig;
+                    const uint idx = get_a_byte(block_words, 32u + jj)
+                        | ((get_a_byte(block_words, 96u + (jj % 32u)) << (8u - 4u * (jj / 32u))) & 0xf00u)
+                        | (((sh >> (8u + 3u * ig)) & 7u) << 12u);
+                    q_sum += dot_trellis_g4_q8_1(idx, offset, b_outer, q8_base + ig);
+                }
+                temp[j][n] += dl * FLOAT_TYPE(q_sum);
+#endif
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, p.stride_d - first_row);
+    }
+}

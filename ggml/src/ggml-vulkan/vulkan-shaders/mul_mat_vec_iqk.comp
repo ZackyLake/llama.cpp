@@ -1,0 +1,367 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+
+#define B_TYPE block_q8_1_x4
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#if defined(DATA_A_IQ2_K)
+const uint IQK_BLOCK_BYTES = 76u;
+#elif defined(DATA_A_IQ3_K)
+const uint IQK_BLOCK_BYTES = 110u;
+#elif defined(DATA_A_IQ4_K)
+const uint IQK_BLOCK_BYTES = 144u;
+#elif defined(DATA_A_IQ5_K)
+const uint IQK_BLOCK_BYTES = 176u;
+#elif defined(DATA_A_IQ6_K)
+const uint IQK_BLOCK_BYTES = 212u;
+#else
+#error unsupported IQ_K type
+#endif
+
+FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+void get_offsets_iqk(out uint a_offset_bytes, out uint b_offset, out uint d_offset) {
+#ifdef MUL_MAT_ID
+    const uint expert_i0 = gl_WorkGroupID.y;
+    expert_id = data_ids[expert_i0 + p.expert_i1 * p.nbi1];
+
+    a_offset_bytes = expert_id * p.batch_stride_a;
+    b_offset = (expert_i0 % p.ne11) * p.stride_b + p.expert_i1 * p.batch_stride_b;
+    d_offset = expert_i0 * p.stride_d + p.expert_i1 * p.batch_stride_d;
+#else
+    const uint batch_idx = gl_WorkGroupID.y + p.base_work_group_y;
+
+    uint batch_idx_a = 0u;
+    if (batch_idx != 0u) {
+        const uint i13 = batch_idx / p.ne12;
+        const uint i12 = batch_idx % p.ne12;
+
+        const uint i03 = i13 / p.broadcast3;
+        const uint i02 = i12 / p.broadcast2;
+
+        batch_idx_a = i03 * p.ne02 + i02;
+    }
+
+    a_offset_bytes = batch_idx_a * p.batch_stride_a;
+    b_offset = batch_idx * p.batch_stride_b;
+    d_offset = batch_idx * p.batch_stride_d;
+#endif
+}
+
+uint get_a_byte(const uint byte_offset) {
+    return (data_a_packed32[byte_offset >> 2u] >> (8u * (byte_offset & 3u))) & 0xffu;
+}
+
+uint get_a_u16(const uint byte_offset) {
+    const uint word = data_a_packed32[byte_offset >> 2u];
+    const uint shift = 8u * (byte_offset & 3u);
+    if ((byte_offset & 3u) <= 2u) {
+        return (word >> shift) & 0xffffu;
+    }
+    return ((word >> 24u) & 0xffu) | ((data_a_packed32[(byte_offset >> 2u) + 1u] & 0xffu) << 8u);
+}
+
+uint get_a_u32(const uint byte_offset) {
+    if ((byte_offset & 3u) == 0u) {
+        return data_a_packed32[byte_offset >> 2u];
+    }
+    const uint w0 = data_a_packed32[byte_offset >> 2u];
+    const uint w1 = data_a_packed32[(byte_offset >> 2u) + 1u];
+    const uint shift = 8u * (byte_offset & 3u);
+    return (w0 >> shift) | (w1 << (32u - shift));
+}
+
+int32_t pack_i8_4(const int v0, const int v1, const int v2, const int v3) {
+    return int32_t(pack32(i8vec4(int8_t(v0), int8_t(v1), int8_t(v2), int8_t(v3))));
+}
+
+int32_t q8_word(const uint q8_block_idx, const uint word_idx) {
+    const uint b_outer = q8_block_idx / 4u;
+    const uint b_inner = q8_block_idx % 4u;
+    return data_b[b_outer].qs[8u * b_inner + word_idx];
+}
+
+float q8_scale(const uint q8_block_idx) {
+    const uint b_outer = q8_block_idx / 4u;
+    const uint b_inner = q8_block_idx % 4u;
+    return vec2(data_b[b_outer].ds[b_inner]).x;
+}
+
+#if defined(DATA_A_IQ2_K)
+int32_t pack_iq2(const uint indices, const uint shift, const uint table_offset) {
+    return pack_i8_4(
+        int(kvalues_iq2nl_const[table_offset + ((indices >> (0u  + shift)) & 0x3u)]),
+        int(kvalues_iq2nl_const[table_offset + ((indices >> (8u  + shift)) & 0x3u)]),
+        int(kvalues_iq2nl_const[table_offset + ((indices >> (16u + shift)) & 0x3u)]),
+        int(kvalues_iq2nl_const[table_offset + ((indices >> (24u + shift)) & 0x3u)]));
+}
+#endif
+
+#if defined(DATA_A_IQ3_K)
+int32_t pack_iq3_low(const uint indices) {
+    return pack_i8_4(
+        int(kvalues_iq3nl_const[indices & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 8u) & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 16u) & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 24u) & 0xfu]));
+}
+
+int32_t pack_iq3_high(const uint indices) {
+    return pack_i8_4(
+        int(kvalues_iq3nl_const[(indices >> 4u) & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 12u) & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 20u) & 0xfu]),
+        int(kvalues_iq3nl_const[(indices >> 28u) & 0xfu]));
+}
+#endif
+
+#if defined(DATA_A_IQ4_K)
+int32_t pack_iq4_low(const uint indices, const uint table_offset) {
+    return pack_i8_4(
+        int(kvalues_iq4k_const[table_offset + (indices & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 8u) & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 16u) & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 24u) & 0xfu)]));
+}
+
+int32_t pack_iq4_high(const uint indices, const uint table_offset) {
+    return pack_i8_4(
+        int(kvalues_iq4k_const[table_offset + ((indices >> 4u) & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 12u) & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 20u) & 0xfu)]),
+        int(kvalues_iq4k_const[table_offset + ((indices >> 28u) & 0xfu)]));
+}
+    #endif
+
+    #if defined(DATA_A_IQ5_K)
+int32_t pack_iq5_low(const uint indices, const uint table_offset) {
+    return pack_i8_4(
+        int(kvalues_iq5nl_const[table_offset + (indices & 0x1fu)]),
+        int(kvalues_iq5nl_const[table_offset + ((indices >> 8u) & 0x1fu)]),
+        int(kvalues_iq5nl_const[table_offset + ((indices >> 16u) & 0x1fu)]),
+        int(kvalues_iq5nl_const[table_offset + ((indices >> 24u) & 0x1fu)]));
+}
+    #endif
+
+#if defined(DATA_A_IQ6_K)
+int32_t pack_iq6(const uint indices, const uint table_offset) {
+    return pack_i8_4(
+        int(kvalues_iq6nl_const[table_offset + (indices & 0x3fu)]),
+        int(kvalues_iq6nl_const[table_offset + ((indices >> 8u) & 0x3fu)]),
+        int(kvalues_iq6nl_const[table_offset + ((indices >> 16u) & 0x3fu)]),
+        int(kvalues_iq6nl_const[table_offset + ((indices >> 24u) & 0x3fu)]));
+}
+#endif
+
+float dot_slice(const uint block_base, const uint slice_in_super, const uint b_block_base) {
+#if defined(DATA_A_IQ2_K)
+    const uint i4 = slice_in_super;
+    const uint ib128 = i4 / 4u;
+    const uint q8_block_base = b_block_base + 4u * ib128;
+    const uint q8_word_idx = 2u * (i4 % 4u);
+    const uint q2_base = block_base + 12u + 32u * ib128 + 8u * (i4 % 4u);
+    const uint q2_0 = get_a_u32(q2_base + 0u);
+    const uint q2_1 = get_a_u32(q2_base + 4u);
+    const uint extra = (get_a_u16(block_base + 2u) >> (8u * ib128 + (i4 % 4u) / 2u)) & 0xffu;
+    const uint scales_base = block_base + 4u + 4u * ib128;
+    const uint scale_shift = 4u * ((i4 & 2u) >> 1u);
+    int s0 = int((get_a_byte(scales_base + 0u) >> scale_shift) & 0xfu) - 8;
+    int s1 = int((get_a_byte(scales_base + 1u) >> scale_shift) & 0xfu) - 8;
+    int s2 = int((get_a_byte(scales_base + 2u) >> scale_shift) & 0xfu) - 8;
+    int s3 = int((get_a_byte(scales_base + 3u) >> scale_shift) & 0xfu) - 8;
+    const uint offset0 = (extra & 0x01u) != 0u ? 4u : 0u;
+    const uint offset1 = (extra & 0x04u) != 0u ? 4u : 0u;
+    const uint offset2 = (extra & 0x10u) != 0u ? 4u : 0u;
+    const uint offset3 = (extra & 0x40u) != 0u ? 4u : 0u;
+    const int sum0 = dotPacked4x8EXT(pack_iq2(q2_0, 0u, offset0), q8_word(q8_block_base + 0u, q8_word_idx + 0u))
+                   + dotPacked4x8EXT(pack_iq2(q2_1, 0u, offset0), q8_word(q8_block_base + 0u, q8_word_idx + 1u));
+    const int sum1 = dotPacked4x8EXT(pack_iq2(q2_0, 2u, offset1), q8_word(q8_block_base + 1u, q8_word_idx + 0u))
+                   + dotPacked4x8EXT(pack_iq2(q2_1, 2u, offset1), q8_word(q8_block_base + 1u, q8_word_idx + 1u));
+    const int sum2 = dotPacked4x8EXT(pack_iq2(q2_0, 4u, offset2), q8_word(q8_block_base + 2u, q8_word_idx + 0u))
+                   + dotPacked4x8EXT(pack_iq2(q2_1, 4u, offset2), q8_word(q8_block_base + 2u, q8_word_idx + 1u));
+    const int sum3 = dotPacked4x8EXT(pack_iq2(q2_0, 6u, offset3), q8_word(q8_block_base + 3u, q8_word_idx + 0u))
+                   + dotPacked4x8EXT(pack_iq2(q2_1, 6u, offset3), q8_word(q8_block_base + 3u, q8_word_idx + 1u));
+    const float d = unpackHalf2x16(get_a_u16(block_base)).x;
+
+    return d * (
+        q8_scale(q8_block_base + 0u) * float(s0 * sum0) +
+        q8_scale(q8_block_base + 1u) * float(s1 * sum1) +
+        q8_scale(q8_block_base + 2u) * float(s2 * sum2) +
+        q8_scale(q8_block_base + 3u) * float(s3 * sum3));
+#elif defined(DATA_A_IQ3_K)
+    const uint i4 = slice_in_super;
+    const uint ib128 = i4 / 4u;
+    const uint q8_block_base = b_block_base + 4u * ib128;
+    const uint il8 = i4 % 4u;
+    const uint ql_base = block_base + 14u + 32u * ib128 + 8u * il8;
+    const uint qh_base = block_base + 78u + 8u * il8;
+    const uint hshift = 4u * (1u - ib128);
+    const uint sh = get_a_u16(block_base + 4u) >> (8u * ib128 + il8 / 2u);
+    const uint extra = (get_a_u16(block_base + 2u) >> (8u * ib128 + il8 / 2u)) & 0xffu;
+    const uint extra32 = extra * 0x01010101u;
+    const uint extra32_1 = (extra32 << 3u) & 0x88888888u;
+    const uint extra32_2 = (extra32 << 1u) & 0x88888888u;
+    const uint sl_base = block_base + 6u + 4u * ib128;
+    const uint shift = 4u * (il8 / 2u);
+    const uint sl_word = get_a_u32(sl_base);
+    const int m0 = 2 * int((sl_word >> (0u  + shift)) & 0xfu) + 1;
+    const int m1 = 2 * int((sl_word >> (8u  + shift)) & 0xfu) + 1;
+    const int m2 = 2 * int((sl_word >> (16u + shift)) & 0xfu) + 1;
+    const int m3 = 2 * int((sl_word >> (24u + shift)) & 0xfu) + 1;
+    int sums[4] = { 0, 0, 0, 0 };
+
+    [[unroll]] for (uint i = 0u; i < 2u; ++i) {
+        const uint vl = get_a_u32(ql_base + 4u * i);
+        const uint vh = get_a_u32(qh_base + 4u * i) << hshift;
+        const uint val1 = ((vl >> 0u) & 0x33333333u) | extra32_1 | ((vh >> 2u) & 0x04040404u) | ((vh >> 0u) & 0x40404040u);
+        const uint val2 = ((vl >> 2u) & 0x33333333u) | extra32_2 | ((vh >> 3u) & 0x04040404u) | ((vh >> 1u) & 0x40404040u);
+        sums[0] += dotPacked4x8EXT(pack_iq3_low(val1),  q8_word(q8_block_base + 0u, 2u * il8 + i));
+        sums[1] += dotPacked4x8EXT(pack_iq3_low(val2),  q8_word(q8_block_base + 1u, 2u * il8 + i));
+        sums[2] += dotPacked4x8EXT(pack_iq3_high(val1), q8_word(q8_block_base + 2u, 2u * il8 + i));
+        sums[3] += dotPacked4x8EXT(pack_iq3_high(val2), q8_word(q8_block_base + 3u, 2u * il8 + i));
+    }
+
+    const float d = unpackHalf2x16(get_a_u16(block_base)).x;
+    const int sign0 = (sh & 0x01u) != 0u ? -1 : 1;
+    const int sign1 = (sh & 0x04u) != 0u ? -1 : 1;
+    const int sign2 = (sh & 0x10u) != 0u ? -1 : 1;
+    const int sign3 = (sh & 0x40u) != 0u ? -1 : 1;
+
+    return d * (
+        q8_scale(q8_block_base + 0u) * float(m0 * sign0 * sums[0]) +
+        q8_scale(q8_block_base + 1u) * float(m1 * sign1 * sums[1]) +
+        q8_scale(q8_block_base + 2u) * float(m2 * sign2 * sums[2]) +
+        q8_scale(q8_block_base + 3u) * float(m3 * sign3 * sums[3]));
+#elif defined(DATA_A_IQ4_K)
+    const uint ib32 = slice_in_super;
+    const uint q4_base = block_base + 16u + 16u * ib32;
+    const uint extra = get_a_u16(block_base + 2u) >> (2u * ib32);
+    int sum1 = 0;
+    int sum2 = 0;
+
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        const uint q4 = get_a_u32(q4_base + 4u * j);
+        const int32_t v1 = pack_iq4_low(q4, ((extra & 1u) != 0u) ? 16u : 0u);
+        const int32_t v2 = pack_iq4_high(q4, ((extra & 2u) != 0u) ? 16u : 0u);
+        sum1 += dotPacked4x8EXT(v1, q8_word(b_block_base + ib32, j + 0u));
+        sum2 += dotPacked4x8EXT(v2, q8_word(b_block_base + ib32, j + 4u));
+    }
+
+    const float d = unpackHalf2x16(get_a_u16(block_base)).x * q8_scale(b_block_base + ib32);
+    const uint sh = get_a_byte(block_base + 4u + ib32 / 2u) >> (4u * (ib32 % 2u));
+    const int ls1 = int((get_a_byte(block_base + 8u + ib32) & 0xfu) | ((sh << 4u) & 0x30u)) - 32;
+    const int ls2 = int((get_a_byte(block_base + 8u + ib32) >> 4u) | ((sh << 2u) & 0x30u)) - 32;
+
+    return d * float(sum1 * ls1 + sum2 * ls2);
+#elif defined(DATA_A_IQ5_K)
+    const uint i4 = slice_in_super;
+    const uint pair = i4 / 2u;
+    const uint half_idx = i4 % 2u;
+    const uint q4_base = block_base + 16u + 32u * pair + 16u * half_idx;
+    const uint qh_base = block_base + 144u + 16u * half_idx;
+    const uint extra = get_a_u16(block_base + 2u) >> (4u * pair + half_idx);
+    const uint values_offset1 = ((extra & 1u) != 0u) ? 32u : 0u;
+    const uint values_offset2 = ((extra & 4u) != 0u) ? 32u : 0u;
+    int sum1 = 0;
+    int sum2 = 0;
+
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        const uint q4 = get_a_u32(q4_base + 4u * j);
+        const uint h = get_a_u32(qh_base + 4u * j) >> (2u * pair);
+        const uint idx1 = ((q4 >> 0u) & 0x0f0f0f0fu) | ((h << 4u) & 0x10101010u);
+        const uint idx2 = ((q4 >> 4u) & 0x0f0f0f0fu) | ((h << 3u) & 0x10101010u);
+        sum1 += dotPacked4x8EXT(pack_iq5_low(idx1, values_offset1), q8_word(b_block_base + 2u * pair + 0u, 4u * half_idx + j));
+        sum2 += dotPacked4x8EXT(pack_iq5_low(idx2, values_offset2), q8_word(b_block_base + 2u * pair + 1u, 4u * half_idx + j));
+    }
+
+    const float d = unpackHalf2x16(get_a_u16(block_base)).x;
+    const uint sh = get_a_byte(block_base + 4u + pair) >> (2u * half_idx);
+    const int ls1 = int(((get_a_byte(block_base + 8u + 2u * pair + 0u) >> (4u * half_idx)) & 0xfu) | ((sh << 4u) & 0x30u)) - 32;
+    const int ls2 = int(((get_a_byte(block_base + 8u + 2u * pair + 1u) >> (4u * half_idx)) & 0xfu) | ((sh >> 0u) & 0x30u)) - 32;
+
+    return d * (
+        q8_scale(b_block_base + 2u * pair + 0u) * float(sum1 * ls1) +
+        q8_scale(b_block_base + 2u * pair + 1u) * float(sum2 * ls2));
+#elif defined(DATA_A_IQ6_K)
+    const uint i4 = slice_in_super;
+    const uint pair = i4 / 2u;
+    const uint half_idx = i4 % 2u;
+    const uint q4_base = block_base + 20u + 32u * pair + 16u * half_idx;
+    const uint qh_base = block_base + 148u + 32u * (pair / 2u) + 16u * half_idx;
+    const uint extra = get_a_u16(block_base + 2u) >> (4u * pair + half_idx);
+    const uint values_offset1 = ((extra & 1u) != 0u) ? 64u : 0u;
+    const uint values_offset2 = ((extra & 4u) != 0u) ? 64u : 0u;
+    int sum1 = 0;
+    int sum2 = 0;
+
+    [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+        const uint q4 = get_a_u32(q4_base + 4u * j);
+        const uint h = get_a_u32(qh_base + 4u * j) >> (4u * (pair % 2u));
+        const uint idx1 = ((q4 >> 0u) & 0x0f0f0f0fu) | ((h << 4u) & 0x30303030u);
+        const uint idx2 = ((q4 >> 4u) & 0x0f0f0f0fu) | ((h << 2u) & 0x30303030u);
+        sum1 += dotPacked4x8EXT(pack_iq6(idx1, values_offset1), q8_word(b_block_base + 2u * pair + 0u, 4u * half_idx + j));
+        sum2 += dotPacked4x8EXT(pack_iq6(idx2, values_offset2), q8_word(b_block_base + 2u * pair + 1u, 4u * half_idx + j));
+    }
+
+    const float d = unpackHalf2x16(get_a_u16(block_base)).x;
+    const int ls1 = int(int8_t(get_a_byte(block_base + 4u + 4u * pair + half_idx + 0u)));
+    const int ls2 = int(int8_t(get_a_byte(block_base + 4u + 4u * pair + half_idx + 2u)));
+
+    return d * (
+        q8_scale(b_block_base + 2u * pair + 0u) * float(sum1 * ls1) +
+        q8_scale(b_block_base + 2u * pair + 1u) * float(sum2 * ls2));
+#else
+#error unsupported IQ_K type
+#endif
+}
+
+void compute_outputs(const uint first_row, const uint num_rows) {
+    const uint tid = gl_LocalInvocationID.x;
+
+    uint a_offset_bytes, b_offset, d_offset;
+    get_offsets_iqk(a_offset_bytes, b_offset, d_offset);
+
+    [[unroll]] for (uint j = 0u; j < NUM_COLS; ++j) {
+        [[unroll]] for (uint n = 0u; n < NUM_ROWS; ++n) {
+            temp[j][n] = FLOAT_TYPE(0);
+        }
+    }
+
+    const uint b_offset_blocks = b_offset / QUANT_K_Q8_1;
+    const uint batch_stride_b_blocks = p.batch_stride_b / QUANT_K_Q8_1;
+    const uint num_slices = p.ncols / QUANT_K_Q8_1;
+
+    for (uint slice_idx = tid; slice_idx < num_slices; slice_idx += gl_WorkGroupSize.x) {
+        const uint superblock = slice_idx / 8u;
+        const uint slice_in_super = slice_idx % 8u;
+
+        [[unroll]] for (uint n = 0u; n < num_rows; ++n) {
+            const uint block_base = a_offset_bytes + (first_row + n) * p.stride_a + superblock * IQK_BLOCK_BYTES;
+
+            [[unroll]] for (uint j = 0u; j < NUM_COLS; ++j) {
+                const uint b_block_base = b_offset_blocks + j * batch_stride_b_blocks + 8u * superblock;
+                temp[j][n] += FLOAT_TYPE(dot_slice(block_base, slice_in_super, b_block_base));
+            }
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+    if (first_row + NUM_ROWS <= p.stride_d) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        if (first_row >= p.stride_d) {
+            return;
+        }
+        compute_outputs(first_row, p.stride_d - first_row);
+    }
+}

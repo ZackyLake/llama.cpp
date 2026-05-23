@@ -1,0 +1,162 @@
+#version 450
+
+#include "dequant_head.glsl"
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A { uint data_a_packed32[]; };
+layout (binding = 1) writeonly buffer D { D_TYPE data_b[]; };
+
+#if defined(DATA_A_IQ2_K)
+const uint IQK_BLOCK_BYTES = 76u;
+#elif defined(DATA_A_IQ3_K)
+const uint IQK_BLOCK_BYTES = 110u;
+#elif defined(DATA_A_IQ4_K)
+const uint IQK_BLOCK_BYTES = 144u;
+#elif defined(DATA_A_IQ5_K)
+const uint IQK_BLOCK_BYTES = 176u;
+#elif defined(DATA_A_IQ6_K)
+const uint IQK_BLOCK_BYTES = 212u;
+#else
+#error unsupported IQ_K type
+#endif
+
+uint get_byte_at(const uint byte_offset) {
+    return (data_a_packed32[byte_offset >> 2u] >> (8u * (byte_offset & 3u))) & 0xffu;
+}
+
+uint get_u16_at(const uint byte_offset) {
+    const uint word = data_a_packed32[byte_offset >> 2u];
+    const uint shift = 8u * (byte_offset & 3u);
+    if ((byte_offset & 3u) <= 2u) {
+        return (word >> shift) & 0xffffu;
+    }
+    return ((word >> 24u) & 0xffu) | ((data_a_packed32[(byte_offset >> 2u) + 1u] & 0xffu) << 8u);
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint total_superblocks = p.nel / QUANT_K;
+    const uint superblocks_per_row = p.K / QUANT_K;
+
+    [[unroll]] for (uint wgy = 0u; wgy < 32u; ++wgy) {
+        const uint superblock = gl_WorkGroupID.x * 32u + wgy;
+        if (superblock >= total_superblocks) {
+            return;
+        }
+
+        const uint row = superblock / superblocks_per_row;
+        const uint superblock_in_row = superblock % superblocks_per_row;
+        const uint block_base = row * p.stride_a + superblock_in_row * IQK_BLOCK_BYTES;
+        const uint y_base = superblock * QUANT_K;
+        const float d = unpackHalf2x16(get_u16_at(block_base)).x;
+
+#if defined(DATA_A_IQ2_K)
+        const uint ib128 = tid / 16u;
+        const uint il = tid % 16u;
+        const uint y = y_base + 128u * ib128 + 2u * il;
+        const uint scale_shift = 4u * (il / 8u);
+        const float dl1 = d * float(int((get_byte_at(block_base + 4u + 4u * ib128 + 0u) >> scale_shift) & 0xfu) - 8);
+        const float dl2 = d * float(int((get_byte_at(block_base + 4u + 4u * ib128 + 1u) >> scale_shift) & 0xfu) - 8);
+        const float dl3 = d * float(int((get_byte_at(block_base + 4u + 4u * ib128 + 2u) >> scale_shift) & 0xfu) - 8);
+        const float dl4 = d * float(int((get_byte_at(block_base + 4u + 4u * ib128 + 3u) >> scale_shift) & 0xfu) - 8);
+        const uint extra = get_u16_at(block_base + 2u) >> (8u * ib128 + il / 8u);
+        const uint qs_base = block_base + 12u + 32u * ib128 + 2u * il;
+
+        [[unroll]] for (uint j = 0u; j < 2u; ++j) {
+            const uint qs = get_byte_at(qs_base + j);
+            data_b[y + j +  0u] = D_TYPE(dl1 * float(kvalues_iq2nl_const[((qs >> 0u) & 3u) + ((extra << 2u) & 4u)]));
+            data_b[y + j + 32u] = D_TYPE(dl2 * float(kvalues_iq2nl_const[((qs >> 2u) & 3u) + ((extra << 0u) & 4u)]));
+            data_b[y + j + 64u] = D_TYPE(dl3 * float(kvalues_iq2nl_const[((qs >> 4u) & 3u) + ((extra >> 2u) & 4u)]));
+            data_b[y + j + 96u] = D_TYPE(dl4 * float(kvalues_iq2nl_const[((qs >> 6u) & 3u) + ((extra >> 4u) & 4u)]));
+        }
+#elif defined(DATA_A_IQ3_K)
+        const uint ib128 = tid / 16u;
+        const uint il = tid % 16u;
+        const uint y = y_base + 128u * ib128 + 2u * il;
+        const uint scale_shift = 4u * (il / 8u);
+        const uint sh = get_u16_at(block_base + 4u) >> (8u * ib128 + il / 8u);
+        const float dl1 = d * float((2 * int((get_byte_at(block_base + 6u + 4u * ib128 + 0u) >> scale_shift) & 0xfu) + 1) * ((sh & 0x01u) != 0u ? -1 : 1));
+        const float dl2 = d * float((2 * int((get_byte_at(block_base + 6u + 4u * ib128 + 1u) >> scale_shift) & 0xfu) + 1) * ((sh & 0x04u) != 0u ? -1 : 1));
+        const float dl3 = d * float((2 * int((get_byte_at(block_base + 6u + 4u * ib128 + 2u) >> scale_shift) & 0xfu) + 1) * ((sh & 0x10u) != 0u ? -1 : 1));
+        const float dl4 = d * float((2 * int((get_byte_at(block_base + 6u + 4u * ib128 + 3u) >> scale_shift) & 0xfu) + 1) * ((sh & 0x40u) != 0u ? -1 : 1));
+        const uint extra = get_u16_at(block_base + 2u) >> (8u * ib128 + il / 8u);
+        const uint qs_base = block_base + 14u + 32u * ib128 + 2u * il;
+        const uint qh_base = block_base + 78u + 2u * il;
+
+        [[unroll]] for (uint j = 0u; j < 2u; ++j) {
+            const uint qs = get_byte_at(qs_base + j);
+            const uint h = get_byte_at(qh_base + j) >> (4u * (ib128 % 2u));
+            data_b[y + j +  0u] = D_TYPE(dl1 * float(kvalues_iq3nl_const[(((qs >> 0u) & 3u) | ((h & 0x01u) << 2u)) + ((extra << 3u) & 8u)]));
+            data_b[y + j + 32u] = D_TYPE(dl2 * float(kvalues_iq3nl_const[(((qs >> 2u) & 3u) | ((h & 0x02u) << 1u)) + ((extra << 1u) & 8u)]));
+            data_b[y + j + 64u] = D_TYPE(dl3 * float(kvalues_iq3nl_const[(((qs >> 4u) & 3u) | ((h & 0x04u) >> 0u)) + ((extra >> 1u) & 8u)]));
+            data_b[y + j + 96u] = D_TYPE(dl4 * float(kvalues_iq3nl_const[(((qs >> 6u) & 3u) | ((h & 0x08u) >> 1u)) + ((extra >> 3u) & 8u)]));
+        }
+#elif defined(DATA_A_IQ4_K)
+        const uint il = tid / 8u;
+        const uint ib = tid % 8u;
+        const uint y = y_base + 32u * ib + 4u * il;
+        const uint q4_base = block_base + 16u + 16u * ib + 4u * il;
+        const uint sh = get_byte_at(block_base + 4u + ib / 2u) >> (4u * (ib % 2u));
+        const float d1 = d * float(int((get_byte_at(block_base + 8u + ib) & 0xfu) | ((sh << 4u) & 0x30u)) - 32);
+        const float d2 = d * float(int((get_byte_at(block_base + 8u + ib) >> 4u) | ((sh << 2u) & 0x30u)) - 32);
+        const uint extra = get_u16_at(block_base + 2u);
+        const uint values_offset1 = ((extra >> (2u * ib + 0u)) & 1u) << 4u;
+        const uint values_offset2 = ((extra >> (2u * ib + 1u)) & 1u) << 4u;
+
+        [[unroll]] for (uint j = 0u; j < 4u; ++j) {
+            const uint q4 = get_byte_at(q4_base + j);
+            data_b[y + j +  0u] = D_TYPE(d1 * float(kvalues_iq4k_const[values_offset1 + (q4 & 0xfu)]));
+            data_b[y + j + 16u] = D_TYPE(d2 * float(kvalues_iq4k_const[values_offset2 + (q4 >> 4u)]));
+        }
+    #elif defined(DATA_A_IQ5_K)
+        const uint ib64 = tid / 8u;
+        const uint il = tid % 8u;
+        const uint y = y_base + 64u * ib64 + 2u * il;
+        const uint sh = get_byte_at(block_base + 4u + ib64);
+        const float dl1 = d * float(int((get_byte_at(block_base + 8u + 2u * ib64 + 0u) & 0xfu) | ((sh << 4u) & 0x30u)) - 32);
+        const float dl2 = d * float(int((get_byte_at(block_base + 8u + 2u * ib64 + 0u) >> 4u) | ((sh << 2u) & 0x30u)) - 32);
+        const float dl3 = d * float(int((get_byte_at(block_base + 8u + 2u * ib64 + 1u) & 0xfu) | ((sh >> 0u) & 0x30u)) - 32);
+        const float dl4 = d * float(int((get_byte_at(block_base + 8u + 2u * ib64 + 1u) >> 4u) | ((sh >> 2u) & 0x30u)) - 32);
+        const uint extra = get_u16_at(block_base + 2u) >> (4u * (ib64 % 4u));
+        const uint qs_base = block_base + 16u + 32u * ib64 + 2u * il;
+        const uint qh_base = block_base + 144u + 2u * il;
+
+        [[unroll]] for (uint j = 0u; j < 2u; ++j) {
+            const uint q0 = get_byte_at(qs_base + j +  0u);
+            const uint q1 = get_byte_at(qs_base + j + 16u);
+            const uint h0 = get_byte_at(qh_base + j +  0u) >> (2u * (ib64 % 4u));
+            const uint h1 = get_byte_at(qh_base + j + 16u) >> (2u * (ib64 % 4u));
+            data_b[y + j +  0u] = D_TYPE(dl1 * float(kvalues_iq5nl_const[(q0 & 0xfu) | ((h0 & 1u) << 4u) | ((extra << 5u) & 0x20u)]));
+            data_b[y + j + 16u] = D_TYPE(dl2 * float(kvalues_iq5nl_const[(q1 & 0xfu) | ((h1 & 1u) << 4u) | ((extra << 4u) & 0x20u)]));
+            data_b[y + j + 32u] = D_TYPE(dl3 * float(kvalues_iq5nl_const[(q0 >> 4u) | ((h0 & 2u) << 3u) | ((extra << 3u) & 0x20u)]));
+            data_b[y + j + 48u] = D_TYPE(dl4 * float(kvalues_iq5nl_const[(q1 >> 4u) | ((h1 & 2u) << 3u) | ((extra << 2u) & 0x20u)]));
+        }
+#elif defined(DATA_A_IQ6_K)
+        const uint ib64 = tid / 8u;
+        const uint il = tid % 8u;
+        const uint y = y_base + 64u * ib64 + 2u * il;
+        const float dl1 = d * float(int(int8_t(get_byte_at(block_base + 4u + 4u * ib64 + 0u))));
+        const float dl2 = d * float(int(int8_t(get_byte_at(block_base + 4u + 4u * ib64 + 1u))));
+        const float dl3 = d * float(int(int8_t(get_byte_at(block_base + 4u + 4u * ib64 + 2u))));
+        const float dl4 = d * float(int(int8_t(get_byte_at(block_base + 4u + 4u * ib64 + 3u))));
+        const uint extra = get_u16_at(block_base + 2u) >> (4u * ib64);
+        const uint qs_base = block_base + 20u + 32u * ib64 + 2u * il;
+        const uint qh_base = block_base + 148u + 32u * (ib64 / 2u) + 2u * il;
+        const uint shift = 4u * (ib64 % 2u);
+
+        [[unroll]] for (uint j = 0u; j < 2u; ++j) {
+            const uint q0 = get_byte_at(qs_base + j +  0u);
+            const uint q1 = get_byte_at(qs_base + j + 16u);
+            const uint h0 = get_byte_at(qh_base + j +  0u) >> shift;
+            const uint h1 = get_byte_at(qh_base + j + 16u) >> shift;
+            data_b[y + j +  0u] = D_TYPE(dl1 * float(kvalues_iq6nl_const[(q0 & 0xfu) | ((h0 & 0x03u) << 4u) | ((extra << 6u) & 0x40u)]));
+            data_b[y + j + 16u] = D_TYPE(dl2 * float(kvalues_iq6nl_const[(q1 & 0xfu) | ((h1 & 0x03u) << 4u) | ((extra << 5u) & 0x40u)]));
+            data_b[y + j + 32u] = D_TYPE(dl3 * float(kvalues_iq6nl_const[(q0 >> 4u) | ((h0 & 0x0cu) << 2u) | ((extra << 4u) & 0x40u)]));
+            data_b[y + j + 48u] = D_TYPE(dl4 * float(kvalues_iq6nl_const[(q1 >> 4u) | ((h1 & 0x0cu) << 2u) | ((extra << 3u) & 0x40u)]));
+        }
+#else
+#error unsupported IQ_K type
+#endif
+    }
+}
