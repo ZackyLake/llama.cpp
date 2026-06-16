@@ -2158,17 +2158,18 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
         // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
             ggml_backend_event_synchronize(sched->events[split_backend_id][sched->cur_copy]);
-        } else {
+        } else if (!split_backend->iface.cpy_tensor_async) {
             ggml_backend_synchronize(split_backend);
         }
-        ggml_backend_tensor_copy(input, input_cpy);
+        ggml_backend_tensor_copy_async(input_backend, split_backend, input, input_cpy);
+        // ggml_backend_tensor_copy(input, input_cpy);
         return;
     }
 
     // wait for the split backend to finish using the input before overwriting it
     if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
         ggml_backend_event_wait(split_backend, sched->events[split_backend_id][sched->cur_copy]);
-    } else {
+    } else if (!split_backend->iface.cpy_tensor_async) {
         ggml_backend_synchronize(split_backend);
     }
 
@@ -2211,6 +2212,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        ggml_backend_synchronize(split_backend);
+
         // copy the input tensors to the split backend
         // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
@@ -2223,6 +2226,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 ggml_backend_sched_copy_input(sched, split, split->inputs[input_id]);
             }
         }
+
+        ggml_backend_synchronize(split_backend);
 
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
