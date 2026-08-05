@@ -1,0 +1,996 @@
+// -*- mode:c++;indent-tabs-mode:nil;c-basic-offset:4;coding:utf-8 -*-
+// vi: set et ft=cpp fenc=utf-8 :vi
+//
+//
+// Copyright (C) 2024 Iwan Kawrakow
+// MIT license
+// SPDX-License-Identifier: MIT
+//
+
+#include "iqk_config.h"
+
+#if defined IQK_IMPLEMENT
+
+#include <algorithm>
+#include <cmath>
+
+#include "iqk_mul_mat.h"
+#include "iqk_gemm_1bit.h"
+#include "iqk_gemm_iquants.h"
+#include "iqk_gemm_kquants.h"
+#include "iqk_gemm_ktquants.h"
+#include "iqk_gemm_legacy_quants.h"
+#include "iqk_gemm_iqk_quants.h"
+#include "iqk_utils.h"
+
+// clang-format off
+
+// This matrix - vector and matrix - matrix multiplication implementation
+// for k-quants, i-quants, and legacy quants, makes prompt processing
+// 150-350% faster (depending on quantization type) compared to mainline llama.cpp.
+// It is AVX2 and ARM_NEON only for now.
+// There are also implementations for fp16/32 x fp16/32 matrix multiplications
+// on AVX2 and fp16 x fp16 on ARM_NEON.
+//
+// Main idea is that unpacking the quants and the block scales to
+// be ready for dot products with the corresponding Q8_X quants
+// takes time. Hence, if we are performing a QX x Q8_X matrix matrix
+// multiplication (as needed for prompt processing), we can get
+// a significant speedup by reusing the unpacked QX quants and scales
+// for multiplication with several Q8_X columns.
+//
+// For fp16/fp32 matri multiplications tiling is used to improve
+// performance.
+
+namespace {
+
+constexpr int IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
+
+struct MulMat {
+    std::array<mul_mat_t, IQK_MAX_NY> funcs = {};
+    mul_mat_t func16 = nullptr;
+    inline void mul_mat_NxM(int n, const void * vx, size_t bx, DataInfo& info, int nrc_x, int nrc_y) {
+#ifdef __aarch64__
+        constexpr int k_x_step = 64; //8192; // Tiling does not seem to help on my M2 Max (but difference to tiling is small)
+#else
+        constexpr int k_x_step = 64; // This works best on my Ryzen-7950X (but differences to other tile size are small)
+#endif
+        if (func16 && nrc_y >= 16) {
+            int n_step = (nrc_y - info.cur_y)/16;
+            for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                auto this_info = info;
+                this_info.s += ix;
+                int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                for (int iy = 0; iy < n_step; ++iy) {
+                    func16(n, (const void *)((const char *)vx + ix*bx), bx, this_info, this_nrc_x);
+                    this_info.cur_y += 16;
+                }
+            }
+            info.cur_y += 16 * n_step;
+            if (info.cur_y == nrc_y) return;
+        }
+        int ny = funcs.size();
+        while (!funcs[ny-1] && ny > 0) --ny;
+        int n_left = nrc_y - info.cur_y;
+        int n_step = n_left/ny;
+        if (n_step > 0) {
+            if (n_step*ny != n_left) {
+                ++n_step;
+                int ny1 = n_left/n_step;
+                int ny2 = ny1 + 1;
+                int my1 = n_step*ny2 - n_left;
+                int my2 = n_step - my1;
+                for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                    auto this_info = info;
+                    this_info.s += ix;
+                    int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                    for (int iy = 0; iy < my1; ++iy) {
+                        funcs[ny1-1](n, (const void *)((const char *)vx + ix*bx), bx, this_info, this_nrc_x);
+                        this_info.cur_y += ny1;
+                    }
+                    for (int iy = 0; iy < my2; ++iy) {
+                        funcs[ny2-1](n, (const void *)((const char *)vx + ix*bx), bx, this_info, this_nrc_x);
+                        this_info.cur_y += ny2;
+                    }
+                }
+                info.cur_y += n_left;
+            }
+            else {
+                for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                    auto this_info = info;
+                    this_info.s += ix;
+                    int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                    for (int iy = 0; iy < n_step; ++iy) {
+                        funcs[ny-1](n, (const void *)((const char *)vx + ix*bx), bx, this_info, this_nrc_x);
+                        this_info.cur_y += ny;
+                    }
+                }
+                info.cur_y += ny * n_step;
+            }
+        }
+        n_left = nrc_y - info.cur_y;
+        if (n_left > 0) {
+            funcs[n_left-1](n, vx, bx, info, nrc_x);
+        }
+    }
+    inline static void gelu(int n, const float * src, float * dst);
+    inline static void relu(int n, const float * src, float * dst);
+    inline static void silu(int n, const float * src, float * dst);
+    inline static void swiglu_oai(int n, const float * src, float * dst);
+    inline static void clamp_oai(int n, float *x);
+    inline static void activate(ggml_unary_op op, int n, const float * src, float * dst) {
+        if      (op == GGML_UNARY_OP_GELU) gelu(n, src, dst);
+        else if (op == GGML_UNARY_OP_RELU) relu(n, src, dst);
+        else if (op == GGML_UNARY_OP_SILU) silu(n, src, dst);
+        else if (op == IQK_UNARY_OP_SWIGLU_OAI) swiglu_oai(n, src, dst);
+        else GGML_ABORT("fatal error");
+    }
+    inline void mul_mat_up_gate_NxM(int n, const void * vx_up, const void * vx_gate, size_t bx,
+            const float * up_b, const float * gate_b,
+            DataInfo& info, int nrc_x, int nrc_y, int unary_op, float limit) {
+#ifdef __aarch64__
+        constexpr int k_x_step = 64; //8192; // Tiling does not seem to help on my M2 Max (but difference to tiling is small)
+#else
+        constexpr int k_x_step = 64; // This works best on my Ryzen-7950X (but differences to other tile size are small)
+#endif
+        auto op = ggml_unary_op(unary_op);
+        float tmp[k_x_step*16];
+        auto process = [&tmp, n, op, vx_gate, vx_up, gate_b, up_b, bx, xstep = k_x_step, limit] (mul_mat_t func, const DataInfo& this_info, int ix, int this_nrc_x, int ny) {
+            func(n, (const void *)((const char *)vx_gate + ix*bx), bx, this_info, this_nrc_x);
+            for (int ky = 0; ky < ny; ++ky) {
+                if (gate_b) {
+                    auto b = gate_b + ix;
+                    auto x = this_info.dst_row(ky);
+                    for (int j = 0; j < this_nrc_x; ++j) x[j] += b[j];
+                }
+                activate(op, this_nrc_x, this_info.dst_row(ky), tmp + ky*xstep);
+                if (limit > 1e-6f) {
+                    for (int j = 0; j < this_nrc_x; ++j) tmp[ky*xstep + j] = std::min(tmp[ky*xstep + j], limit);
+                }
+            }
+            func(n, (const void *)((const char *)vx_up + ix*bx), bx, this_info, this_nrc_x);
+            for (int ky = 0; ky < ny; ++ky) {
+                auto result = this_info.dst_row(ky);
+                if (up_b) {
+                    auto b = up_b + ix;
+                    for (int j = 0; j < this_nrc_x; ++j) result[j] += b[j];
+                }
+                if (op == IQK_UNARY_OP_SWIGLU_OAI) {
+                    clamp_oai(this_nrc_x, result);
+                } else if (limit > 1e-6f) {
+                    for (int j = 0; j < this_nrc_x; ++j) result[j] = std::max(-limit, std::min(limit, result[j]));
+                }
+                for (int j = 0; j < this_nrc_x; ++j) result[j] *= tmp[ky*xstep + j];
+            }
+        };
+        if (func16 && nrc_y >= 16) {
+            int n_step = (nrc_y - info.cur_y)/16;
+            for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                auto this_info = info;
+                this_info.s += ix;
+                int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                for (int iy = 0; iy < n_step; ++iy) {
+                    process(func16, this_info, ix, this_nrc_x, 16);
+                    this_info.cur_y += 16;
+                }
+            }
+            info.cur_y += 16 * n_step;
+            if (info.cur_y == nrc_y) return;
+        }
+        int ny = funcs.size();
+        while (!funcs[ny-1] && ny > 0) --ny;
+        int n_left = nrc_y - info.cur_y;
+        int n_step = n_left/ny;
+        if (n_step > 0) {
+            if (n_step*ny != n_left) {
+                ++n_step;
+                int ny1 = n_left/n_step;
+                int ny2 = ny1 + 1;
+                int my1 = n_step*ny2 - n_left;
+                int my2 = n_step - my1;
+                for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                    auto this_info = info;
+                    this_info.s += ix;
+                    int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                    for (int iy = 0; iy < my1; ++iy) {
+                        process(funcs[ny1-1], this_info, ix, this_nrc_x, ny1);
+                        this_info.cur_y += ny1;
+                    }
+                    for (int iy = 0; iy < my2; ++iy) {
+                        process(funcs[ny2-1], this_info, ix, this_nrc_x, ny2);
+                        this_info.cur_y += ny2;
+                    }
+                }
+                info.cur_y += n_left;
+            }
+            else {
+                for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                    auto this_info = info;
+                    this_info.s += ix;
+                    int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                    for (int iy = 0; iy < n_step; ++iy) {
+                        process(funcs[ny-1], this_info, ix, this_nrc_x, ny);
+                        this_info.cur_y += ny;
+                    }
+                }
+                info.cur_y += ny * n_step;
+            }
+        }
+        n_left = nrc_y - info.cur_y;
+        if (n_left > 0) {
+            for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                auto this_info = info;
+                this_info.s += ix;
+                int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                process(funcs[n_left-1], this_info, ix, this_nrc_x, n_left);
+            }
+        }
+    }
+    static bool prepare(int typeA, int typeB, int ne00, MulMat& mm, int Ny);
+    static inline int is_dequant_better(int type, int nrc_y) {
+#ifdef HAVE_FANCY_SIMD
+        const int q8_k_type = GGML_TYPE_Q8_K_R16;
+#else
+        const int q8_k_type = GGML_TYPE_Q8_K_R8;
+#endif
+        switch (ggml_type(type)) {
+            case GGML_TYPE_IQ2_XXS: return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ2_XS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ2_S  : return nrc_y >= 16 ? q8_k_type : type;
+            case GGML_TYPE_IQ3_XXS: return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ4_XS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ3_S  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ1_S  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ1_M  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ2_KS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ2_K  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ2_KL : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ3_KS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ3_K  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ4_KS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ4_KSS: return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ4_K  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ5_KS : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ5_K  : return nrc_y >= 32 ? q8_k_type : type;
+            case GGML_TYPE_IQ6_K  : return nrc_y >= 32 ? q8_k_type : type;
+
+            case GGML_TYPE_IQ4_NL : return nrc_y >= 32 ? GGML_TYPE_Q8_0_R8 : type;
+            case GGML_TYPE_IQ1_KT : return nrc_y >= 16 ? GGML_TYPE_Q8_0_R8 : type;
+            case GGML_TYPE_IQ2_KT : return nrc_y >= 16 ? GGML_TYPE_Q8_0_R8 : type;
+            case GGML_TYPE_IQ3_KT : return nrc_y >= 16 ? GGML_TYPE_Q8_0_R8 : type;
+            case GGML_TYPE_IQ4_KT : return nrc_y >= 24 ? GGML_TYPE_Q8_0_R8 : type;
+            default: break;
+        }
+        return type;
+    }
+    static inline int num_rows([[maybe_unused]] int type) {
+#ifdef HAVE_FANCY_SIMD
+        switch (type) {
+            // case GGML_TYPE_Q2_K_R4:
+            // case GGML_TYPE_Q3_K_R4:
+            // case GGML_TYPE_Q6_K_R4:
+            // case GGML_TYPE_IQ2_K_R4:
+            // case GGML_TYPE_IQ3_K_R4:
+            // case GGML_TYPE_IQ4_K_R4:
+            // case GGML_TYPE_IQ5_K_R4:
+            // case GGML_TYPE_IQ4_KS_R4:
+            // case GGML_TYPE_IQ5_KS_R4:
+            // case GGML_TYPE_IQ2_XXS_R4:
+            // case GGML_TYPE_IQ2_XS_R4:
+            // case GGML_TYPE_IQ2_S_R4:
+            // case GGML_TYPE_IQ3_XXS_R4:
+            // case GGML_TYPE_IQ1_S_R4:
+            // case GGML_TYPE_IQ1_M_R4:
+            // case GGML_TYPE_IQ3_S_R4: return 4;
+            // case GGML_TYPE_IQ4_NL_R4:
+            // case GGML_TYPE_Q5_0_R4:
+            // case GGML_TYPE_Q6_0_R4:
+            // case GGML_TYPE_IQ2_BN_R4:
+            // case GGML_TYPE_IQ4_XS_R8:
+            // case GGML_TYPE_Q4_K_R4:
+            // case GGML_TYPE_Q5_K_R4:
+            // case GGML_TYPE_Q8_KV:
+            // case GGML_TYPE_Q8_KV_R8:
+            case GGML_TYPE_Q8_K_R8: return 8;
+            // case GGML_TYPE_Q4_0_R8:
+            case GGML_TYPE_Q8_0_R8:
+            // case GGML_TYPE_Q8_1:
+            case GGML_TYPE_Q8_K_R16: return 16;
+            // case GGML_TYPE_BF16_R16: return 16;
+            default: return 1;
+        }
+#else
+        switch (type) {
+            // case GGML_TYPE_Q2_K_R4:
+            // case GGML_TYPE_Q3_K_R4:
+            // case GGML_TYPE_Q4_K_R4:
+            // case GGML_TYPE_Q5_K_R4:
+            // case GGML_TYPE_Q6_K_R4:
+            // case GGML_TYPE_Q5_0_R4:
+            // case GGML_TYPE_Q6_0_R4:
+            // case GGML_TYPE_IQ4_NL_R4:
+            // case GGML_TYPE_IQ2_K_R4:
+            // case GGML_TYPE_IQ3_K_R4:
+            // case GGML_TYPE_IQ4_K_R4:
+            // case GGML_TYPE_IQ5_K_R4:
+            // case GGML_TYPE_IQ4_KS_R4:
+            // case GGML_TYPE_IQ5_KS_R4:
+            // case GGML_TYPE_IQ2_XXS_R4:
+            // case GGML_TYPE_IQ2_XS_R4:
+            // case GGML_TYPE_IQ2_S_R4:
+            // case GGML_TYPE_IQ3_XXS_R4:
+            // case GGML_TYPE_IQ3_S_R4:
+            // case GGML_TYPE_IQ1_S_R4:
+            // case GGML_TYPE_IQ1_M_R4:
+            // case GGML_TYPE_IQ2_BN_R4: return 4;
+            // case GGML_TYPE_IQ4_XS_R8:
+            // case GGML_TYPE_Q4_0_R8:
+            case GGML_TYPE_Q8_0_R8:
+            // case GGML_TYPE_Q8_KV:
+            // case GGML_TYPE_Q8_KV_R8:
+            // case GGML_TYPE_Q8_1:
+            case GGML_TYPE_Q8_K_R8: return 8;
+            case GGML_TYPE_Q8_K_R16: return 16;
+            // case GGML_TYPE_BF16_R16: return 16;
+            default: return 1;
+        }
+#endif
+    }
+};
+
+static std::vector<char> & thread_local_work_buffer() {
+    thread_local std::vector<char> f;
+    return f;
+}
+
+bool iqk_convert_repack(int typeA, int n, const void * vx, size_t bx, void * vy, size_t stride_y, int nrc_x) {
+    switch (typeA) {
+        case GGML_TYPE_IQ4_XS:
+            return iqk_convert_kquants_q8X_r8(typeA, n, vx, bx, vy, nrc_x);
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+            return iqk_convert_iquants_q80_r8(typeA, n, vx, bx, vy, nrc_x);
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ2_K:
+        case GGML_TYPE_IQ2_KL:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ3_K:
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ4_K:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ5_K:
+        case GGML_TYPE_IQ6_K:
+            return iqk_convert_iqk_quants_q80_r8(typeA, n, vx, bx, vy, nrc_x);
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
+            return iqk_dequantize_ktquants(typeA, n, vx, bx, vy, stride_y, nrc_x);
+        case GGML_TYPE_IQ4_NL:
+            return iqk_convert_legacy_quants_q8_r8(typeA, n, vx, bx, vy, nrc_x);
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ1_M:
+            return iqk_convert_1bit_q80_r8(typeA, n, vx, bx, vy, nrc_x);
+
+        default:
+            break;
+    }
+
+    return false;
+}
+
+
+}
+
+
+extern "C" IQK_API int iqk_dequant_type(int type, int Ny) {
+    return MulMat::is_dequant_better(ggml_type(type), Ny);
+}
+
+extern "C" IQK_API bool iqk_mul_mat(long Nx, long Ny, long ne00,
+        int typeA, const void * A, long strideA,
+        int typeB, const void * B, long strideB,
+        float * C, long stride_C, int ith, int nth) {
+
+    constexpr int k_min_step = 32;
+
+    MulMat mm;
+
+    size_t row_size_qx = strideA; //*ggml_type_size(ggml_type(typeA));
+    size_t row_size_qy = strideB; //*ggml_type_size(ggml_type(typeB));
+
+    if (Nx/nth < k_min_step) {
+        if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+            return false;
+        }
+        const int min_step = Ny <= 16 ? 16 : 32;
+        int ntile_x = (Nx + min_step - 1)/min_step;
+        int ntile_y = (Ny + min_step - 1)/min_step;
+        int ntile   = ntile_x * ntile_y;
+        for (int itile = ith; itile < ntile; itile += nth) {
+            int iy = (itile / ntile_x) * min_step;
+            int ix = (itile % ntile_x) * min_step;
+            int nrc_x = std::min<int>(min_step, Nx - ix);
+            int nrc_y = std::min<int>(min_step, Ny - iy);
+            DataInfo info{C + ix, (const char *)B, (size_t)stride_C, row_size_qy, iy, 1, nullptr, 0};
+            mm.mul_mat_NxM(ne00, (const char *)A + ix*row_size_qx, row_size_qx, info, nrc_x, iy + nrc_y);
+        }
+        return true;
+    }
+
+    int npt = (Nx + nth - 1)/nth;
+
+    auto etypeA = ggml_type(typeA);
+    if (auto dequant_type = MulMat::is_dequant_better(etypeA, Ny); npt >= 16 &&
+             dequant_type != etypeA && MulMat::prepare(dequant_type, typeB, ne00, mm, Ny) &&
+             Nx%MulMat::num_rows(dequant_type) == 0) {
+        constexpr int k_x_step = 32;
+
+        auto num_rows = MulMat::num_rows(dequant_type);
+        GGML_ASSERT(Nx%num_rows == 0);
+        auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+        auto first_x = ith*nrc_x;
+        if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+        first_x *= num_rows;
+        nrc_x   *= num_rows;
+
+        size_t row_size_qx = iqk_packed_row_size(dequant_type, ne00);
+        size_t row_size_qy = strideB;
+
+        DataInfo info{C + first_x, (const char *)B, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
+
+        auto& f = thread_local_work_buffer();
+
+        for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+            auto this_info = info;
+            this_info.s += ix;
+            int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+            if (f.size() < row_size_qx*this_nrc_x) f.resize(row_size_qx*this_nrc_x);
+            if (!iqk_convert_repack(typeA, ne00, (const char *)A + (first_x + ix)*strideA, strideA, f.data(), ne00, this_nrc_x)) {
+                GGML_ABORT("Fatal error");
+            }
+            mm.mul_mat_NxM(ne00, f.data(), row_size_qx, this_info, this_nrc_x, Ny);
+        }
+
+        return true;
+
+    }
+
+    if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+        return false;
+    }
+
+    auto num_rows = MulMat::num_rows(ggml_type(typeA));
+    if (Nx%num_rows) {
+        fprintf(stderr, "%s: Nx = %d, Ny = %d, ne00 = %d, num_rows = %d, types = %s, %s\n", __func__, (int)Nx, (int)Ny,
+                (int)ne00, num_rows, ggml_type_name(ggml_type(typeA)), ggml_type_name(ggml_type(typeB)));
+        GGML_ASSERT(false);
+    }
+    GGML_ASSERT(Nx%num_rows == 0);
+
+    if (npt <= 16 && nth%2 == 0 && Ny >= 16 && Ny%2 == 0) {
+        int nth_new = nth/2;
+        auto nrc_x = num_rows*((Nx/num_rows + nth_new - 1)/nth_new);
+        if (ith < nth_new) {
+            auto first_x = ith*nrc_x;
+            nrc_x = std::min(nrc_x, Nx - first_x);
+            DataInfo info{C + first_x, (const char *)B, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
+            mm.mul_mat_NxM(ne00, (const char *)A + row_size_qx*first_x, row_size_qx, info, nrc_x, Ny/2);
+        } else {
+            ith -= nth_new;
+            auto first_x = ith*nrc_x;
+            nrc_x = std::min(nrc_x, Nx - first_x);
+            DataInfo info{C + first_x + (Ny/2)*stride_C, (const char *)B + (Ny/2)*row_size_qy, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
+            mm.mul_mat_NxM(ne00, (const char *)A + row_size_qx*first_x, row_size_qx, info, nrc_x, Ny/2);
+        }
+        return true;
+    }
+
+    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+    auto first_x = ith*nrc_x;
+    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+
+    DataInfo info{C + first_x*num_rows, (const char *)B, (size_t)stride_C, row_size_qy, 0, 1, nullptr, 0};
+
+    mm.mul_mat_NxM(ne00, (const char *)A + row_size_qx*first_x*num_rows, row_size_qx, info, nrc_x*num_rows, Ny);
+
+    return true;
+}
+
+namespace {
+inline uint32_t simple_gcd(uint32_t a, uint32_t b) {
+    while (a != b) {
+        if (a > b) a -= b;
+        else b -= a;
+    }
+    return a;
+}
+}
+
+extern "C" IQK_API bool iqk_mul_mat_4d(long Nx, long Ny, long ne00,
+        long ne02, long ne03, long ne12, long ne13,
+        long nb02, long nb03, long nb12, long nb13, long nb2, long nb3,
+        int typeA, const void * A, long strideA,
+        int typeB, const void * B, long strideB,
+        float * C, long stride_C, int ith, int nth) {
+
+    auto r2 = ne12 / ne02;
+    auto r3 = ne13 / ne03;
+
+    if (ne13 == 1 && Ny == 1 && r2 > 1) {
+        if (Nx >= 256 && Nx%32 == 0) {
+            int nx32 = Nx/32;
+            int nchunk = nx32*ne02;
+            if (r2 <= IQK_MAX_NY) {
+                MulMat mm;
+                if (!MulMat::prepare(typeA, typeB, ne00, mm, r2)) return false;
+                int ny = mm.funcs.size();
+                while (ny > 0 && !mm.funcs[ny-1]) --ny;
+                if (ny >= r2) {
+                    nchunk = nx32*ne02;
+                    for (int ichunk = ith; ichunk < nchunk; ichunk += nth) {
+                        int i02 = ichunk/nx32;
+                        int ix = 32*(ichunk - i02*nx32);
+                        DataInfo info{C + ix + r2*i02*nb2, (const char *)B + r2*i02*nb12, (size_t)nb2, (size_t)nb12, 0, 1, nullptr, 0};
+                        mm.funcs[r2-1](ne00, (const void *)((const char *)A + ix*strideA + i02*nb02), strideA, info, 32);
+                    }
+                    return true;
+                }
+            }
+            for (int ichunk = ith; ichunk < nchunk; ichunk += nth) {
+                int i02 = ichunk/nx32;
+                int ix = ichunk - i02*nx32;
+                if (!iqk_mul_mat(32, r2, ne00,
+                            typeA, (const char *)A + 32*ix*strideA + i02*nb02, strideA,
+                            typeB, (const char *)B + i02*r2*nb12, nb12,
+                            C + 32*ix + r2*i02*nb2, nb2, 0, 1)) return false;
+
+            }
+            return true;
+        }
+        int gcd = simple_gcd(ne02, nth);
+        int counter = 0;
+        for (int64_t i12 = 0; i12 < ne02; i12++) {
+            if ((counter++ % gcd) == (ith%gcd)) {
+                if (!iqk_mul_mat(Nx, r2, ne00,
+                            typeA, (const char *)A + i12*nb02, strideA,
+                            typeB, (const char *)B + i12*r2*nb12, nb12,
+                            C + r2*i12*nb2, nb2,
+                            ith/gcd, nth/gcd)) return false;
+            }
+        }
+        return true;
+    }
+
+    if (ne13 == 1 && ne12 > 1 && ne12 == ne02 && Ny == 1 && nb02 < strideA) {
+        MulMat mm;
+        if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+            return false;
+        }
+        int n_per_thread = (Nx + nth - 1)/nth;
+        int first = ith*n_per_thread;
+        if (first >= Nx) return true;
+        int last = first + n_per_thread <= Nx ? first + n_per_thread : Nx;
+        for (int ix = first; ix < last; ++ix) {
+            for (int i02 = 0; i02 < ne02; ++i02) {
+                DataInfo info{C + ix + i02*nb2, (const char *)B + i02*nb12, (size_t)nb2, (size_t)nb12, 0, 1, nullptr, 0};
+                mm.funcs[0](ne00, (const void *)((const char *)A + ix*strideA + i02*nb02), nb02, info, 1);
+            }
+        }
+        return true;
+    }
+
+    int gcd = simple_gcd(ne12*ne13, nth);
+    int counter = 0;
+    for (int64_t i13 = 0; i13 < ne13; i13++) {
+        for (int64_t i12 = 0; i12 < ne12; i12++) {
+            if ((counter++ % gcd) == (ith%gcd)) {
+                if (!iqk_mul_mat(Nx, Ny, ne00,
+                            typeA, (const char *)A + i12/r2*nb02 + i13/r3*nb03, strideA,
+                            typeB, (const char *)B + i12*nb12 + i13*nb13, strideB,
+                            C + i12*nb2 + i13*nb3, stride_C,
+                            ith/gcd, nth/gcd)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_moe(long Nx, long Ny, long ne00, int ne11,
+        int typeA, const void * A, long strideA,
+        int typeB, const void * B, long strideB,
+        float * C, long nb1, long nb2, const void * vrow_mapping, int ith, int nth) {
+    const mmid_row_mapping * row_mapping = (const mmid_row_mapping *)vrow_mapping;
+    assert(row_mapping != nullptr);
+
+    MulMat mm;
+
+    auto etypeA = ggml_type(typeA);
+    //auto etypeB = ggml_type(typeB);
+    auto dequant_type = MulMat::is_dequant_better(etypeA, Ny);
+    //if (etypeB != GGML_TYPE_F32) {
+    //    if (ith == 0) printf("%s: typeA = %s, typeB = %s, dequant_type = %s\n", __func__, ggml_type_name(etypeA), ggml_type_name(etypeB), ggml_type_name(dequant_type));
+    //}
+    if (dequant_type != etypeA) {
+        if (!MulMat::prepare(dequant_type, typeB, ne00, mm, Ny)) {
+            return false;
+        }
+
+        constexpr int k_x_step = 32;
+
+        auto num_rows = MulMat::num_rows(dequant_type);
+        GGML_ASSERT(Nx%num_rows == 0);
+        auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+        auto first_x = ith*nrc_x;
+        if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+        first_x *= num_rows;
+        nrc_x   *= num_rows;
+
+        size_t row_size_qx = iqk_packed_row_size(dequant_type, ne00);
+        size_t row_size_qy = strideB;
+
+        DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float), row_size_qy, 0, ne11, row_mapping, nb2/sizeof(float)};
+
+        auto& f = thread_local_work_buffer();
+
+        for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+            auto this_info = info;
+            this_info.s += ix;
+            int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+            if (f.size() < row_size_qx*this_nrc_x) f.resize(row_size_qx*this_nrc_x);
+            if (!iqk_convert_repack(typeA, ne00, (const char *)A + (first_x + ix)*strideA, strideA, f.data(), ne00, this_nrc_x)) {
+                GGML_ABORT("Fatal error");
+            }
+            mm.mul_mat_NxM(ne00, f.data(), row_size_qx, this_info, this_nrc_x, Ny);
+        }
+
+        return true;
+
+    }
+
+    if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+        return false;
+    }
+    size_t row_size_qx = strideA;
+    size_t row_size_qy = strideB;
+    auto num_rows = MulMat::num_rows(ggml_type(typeA));
+    GGML_ASSERT(Nx%num_rows == 0);
+    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+    auto first_x = ith*nrc_x;
+    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+    first_x *= num_rows;
+    nrc_x *= num_rows;
+    DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float),
+        row_size_qy, 0, ne11, row_mapping, nb2/sizeof(float)};
+    mm.mul_mat_NxM(ne00, (const char *)A + row_size_qx*first_x, row_size_qx, info, nrc_x, Ny);
+    return true;
+}
+
+extern "C" IQK_API bool iqk_moe_fused_up_gate(long Nx, long Ny, long ne00, int ne11, int unary_op,
+        int typeA, const void * Aup, const void * Agate, long strideA,
+        int typeB, const void * B, long strideB,
+        const char * up_b_c, const char * gate_b_c,
+        float * C, long nb1, long nb2, const void * vrow_mapping, float limit, int ith, int nth) {
+
+    const mmid_row_mapping * row_mapping = (const mmid_row_mapping *)vrow_mapping;
+    //assert(row_mapping != nullptr);
+    size_t row_size_qx = strideA;
+    size_t row_size_qy = strideB;
+
+    MulMat mm;
+
+    auto etypeA = ggml_type(typeA);
+    if (auto dequant_type = MulMat::is_dequant_better(etypeA, Ny); dequant_type != etypeA) {
+        if (MulMat::prepare(dequant_type, typeB, ne00, mm, Ny)) {
+
+            constexpr int k_x_step = 64;
+
+            auto num_rows = MulMat::num_rows(ggml_type(dequant_type));
+            GGML_ASSERT(Nx%num_rows == 0);
+            auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+            auto first_x = ith*nrc_x;
+            if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+            first_x *= num_rows;
+            nrc_x   *= num_rows;
+
+            size_t row_size_qx = iqk_packed_row_size(dequant_type, ne00);
+            size_t row_size_qy = strideB;
+
+            DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float), row_size_qy, 0, ne11, row_mapping, nb2/sizeof(float)};
+
+            auto& f = thread_local_work_buffer();
+
+            for (int ix = 0; ix < nrc_x; ix += k_x_step) {
+                auto this_info = info;
+                this_info.s += ix;
+                int this_nrc_x = ix + k_x_step <= nrc_x ? k_x_step : nrc_x - ix;
+                if (f.size() < 2*row_size_qx*this_nrc_x) f.resize(2*row_size_qx*this_nrc_x);
+                auto Xu = f.data();
+                auto Xg = f.data() + row_size_qx*this_nrc_x;
+                if (!iqk_convert_repack(typeA, ne00, (const char *)Aup   + (first_x + ix)*strideA, strideA, Xu, ne00, this_nrc_x)) {
+                    GGML_ABORT("Fatal error");
+                }
+                if (!iqk_convert_repack(typeA, ne00, (const char *)Agate + (first_x + ix)*strideA, strideA, Xg, ne00, this_nrc_x)) {
+                    GGML_ABORT("Fatal error");
+                }
+                auto up_b   = up_b_c   ? (const float *)up_b_c + first_x + ix : nullptr;
+                auto gate_b = gate_b_c ? (const float *)gate_b_c + first_x + ix : nullptr;
+                mm.mul_mat_up_gate_NxM(ne00, Xu, Xg, row_size_qx, up_b, gate_b, this_info, this_nrc_x, Ny, unary_op, limit);
+            }
+
+            return true;
+        }
+
+    }
+
+    if (!MulMat::prepare(typeA, typeB, ne00, mm, Ny)) {
+        return false;
+    }
+    auto num_rows = MulMat::num_rows(ggml_type(typeA));
+    GGML_ASSERT(Nx%num_rows == 0);
+    auto nrc_x = (Nx/num_rows + nth - 1)/nth;
+    auto first_x = ith*nrc_x;
+    if (first_x + nrc_x > Nx/num_rows) nrc_x = Nx/num_rows - first_x;
+    first_x *= num_rows;
+    nrc_x *= num_rows;
+    DataInfo info{C + first_x, (const char *)B, nb1/sizeof(float),
+        row_size_qy, 0, ne11, row_mapping, nb2/sizeof(float)};
+    auto up_b   = up_b_c   ? (const float *)up_b_c + first_x : nullptr;
+    auto gate_b = gate_b_c ? (const float *)gate_b_c + first_x : nullptr;
+    mm.mul_mat_up_gate_NxM(ne00, (const char *)Aup + row_size_qx*first_x, (const char *)Agate + row_size_qx*first_x, row_size_qx,
+            up_b, gate_b, info, nrc_x, Ny, unary_op, limit);
+    return true;
+}
+
+namespace {
+
+bool MulMat::prepare(int typeA, int typeB, int ne00, MulMat& mm, int Ny) {
+
+    (void)Ny;
+
+    switch (typeA) {
+        case GGML_TYPE_IQ4_XS:
+        case GGML_TYPE_Q8_K_R8:
+        case GGML_TYPE_Q8_K_R16:
+            return iqk_set_kernels_kquants(ne00, typeA, typeB, mm.funcs, mm.func16);
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+            return iqk_set_kernels_iquants(ne00, typeA, typeB, mm.funcs, mm.func16);
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ2_K:
+        case GGML_TYPE_IQ2_KL:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ3_K:
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ4_K:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ5_K:
+        case GGML_TYPE_IQ6_K:
+            return iqk_set_kernels_iqk_quants(ne00, typeA, typeB, mm.funcs, mm.func16);
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
+            return iqk_set_kernels_ktquants(ne00, typeA, typeB, mm.funcs, mm.func16);
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_Q8_0_R8:
+            return iqk_set_kernels_legacy_quants(ne00, typeA, typeB, mm.funcs, mm.func16);
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ1_M:
+            return iqk_set_kernels_1bit(ne00, typeA, typeB, mm.funcs, mm.func16);
+
+        default:
+            return false;
+    }
+
+    return false;
+}
+
+} // namespace
+
+
+namespace {
+
+// TODO: these swiglu_oai constants shouldn't be hard coded
+constexpr float k_swiglu_oai_alpha = 1.702f;
+constexpr float k_swiglu_oai_limit = 7.f;
+
+void MulMat::swiglu_oai(int n, const float * x, float * y) {
+//    int i = 0;
+//#if defined __AVX512F__ && defined __AVX512DQ__
+//    {
+//        auto max = _mm512_set1_ps(k_swiglu_oai_limit);
+//        auto alpha = _mm512_set1_ps(-k_swiglu_oai_alpha);
+//        for (; i + 15 < n; i += 16) {
+//            auto xc = v_clamp_max(_mm512_loadu_ps(x + i), max);
+//            _mm512_storeu_ps(y + i, v_silu_oai(xc, alpha));
+//        }
+//    }
+//#endif
+//#if defined __AVX2__ && defined __FMA__
+//    if (i + 7 < n) {
+//        auto max = _mm256_set1_ps(k_swiglu_oai_limit);
+//        auto alpha = _mm256_set1_ps(-k_swiglu_oai_alpha);
+//        for (; i + 7 < n; i += 8) {
+//            auto xc = v_clamp_max(_mm256_loadu_ps(x + i), max);
+//            _mm256_storeu_ps(y + i, v_silu_oai(xc, alpha));
+//        }
+//    }
+//#endif
+//    for (; i < n; ++i) {
+//        auto xi = std::min(x[i], k_swiglu_oai_limit);
+//        y[i] = xi / (1.0f + expf(-xi * k_swiglu_oai_alpha));
+//    }
+    for (int i = 0; i < n; ++i) {
+        auto xi = std::min(x[i], k_swiglu_oai_limit);
+        y[i] = xi / (1.0f + expf(-xi * k_swiglu_oai_alpha));
+    }
+}
+
+void MulMat::clamp_oai(int n, float * x) {
+    for (int i = 0; i < n; ++i) x[i] = 1.f + std::max(std::min(x[i], k_swiglu_oai_limit), -k_swiglu_oai_limit);
+}
+
+#if defined(__ARM_NEON) && defined(__aarch64__)
+void MulMat::gelu(int n, const float * x, float * y) {
+    constexpr float GELU_COEF_A = 0.044715f;
+    constexpr float SQRT_2_OVER_PI  = 0.79788456080286535587989211986876f;
+    int i = 0;
+    auto c1 = vdupq_n_f32(GELU_COEF_A);
+    auto c2 = vdupq_n_f32(2.f*SQRT_2_OVER_PI);
+    for (; i + 3 < n; i += 4) {
+        vst1q_f32(y + i, v_gelu(vld1q_f32(x + i), c1, c2));
+    }
+    for (; i < n; ++i) y[i] = 0.5f*x[i]*(1.0f + tanhf(SQRT_2_OVER_PI*x[i]*(1.0f + GELU_COEF_A*x[i]*x[i])));
+}
+void MulMat::silu(int n, const float * x, float * y) {
+    int i = 0;
+    for (; i + 3 < n; i += 4) vst1q_f32(y + i, v_silu(vld1q_f32(x + i)));
+    for (; i < n; ++i) y[i] = x[i]/(1.0f + expf(-x[i]));
+}
+void MulMat::relu(int n, const float * x, float * y) {
+    for (int j = 0; j < n; ++j) y[j] = x[j] > 0 ? x[j] : 0;
+}
+#endif
+
+#if defined(__AVX2__)
+
+void MulMat::gelu(int n, const float * x, float * y) {
+    constexpr float GELU_COEF_A = 0.044715f;
+    constexpr float SQRT_2_OVER_PI  = 0.79788456080286535587989211986876f;
+    //GGML_ASSERT(n%8 == 0);
+    int i = 0;
+#if defined __AVX512F__ && defined __AVX512DQ__
+    {
+        __m512 c1 = _mm512_set1_ps(GELU_COEF_A);
+        __m512 c2 = _mm512_set1_ps(2.f*SQRT_2_OVER_PI);
+        for (; i + 15 < n; i += 16) _mm512_storeu_ps(y + i, v_gelu(_mm512_loadu_ps(x + i), c1, c2));
+    }
+#endif
+#if defined __AVX2__
+    if (i + 7 < n) {
+        __m256 c1 = _mm256_set1_ps(GELU_COEF_A);
+        __m256 c2 = _mm256_set1_ps(2.f*SQRT_2_OVER_PI);
+        for (; i + 7 < n; i += 8) _mm256_storeu_ps(y + i, v_gelu(_mm256_loadu_ps(x + i), c1, c2));
+
+    }
+#endif
+    for (; i < n; ++i) y[i] = 0.5f*x[i]*(1.0f + tanhf(SQRT_2_OVER_PI*x[i]*(1.0f + GELU_COEF_A*x[i]*x[i])));
+}
+
+void MulMat::silu(int n, const float * x, float * y) {
+    int i = 0;
+#if defined __AVX512F__ && defined __AVX512DQ__
+    for (; i + 15 < n; i += 16) _mm512_storeu_ps(y + i, v_silu(_mm512_loadu_ps(x + i)));
+#endif
+#if defined __AVX2__
+    for (; i + 7 < n; i += 8) _mm256_storeu_ps(y + i, v_silu(_mm256_loadu_ps(x + i)));
+#endif
+    for (; i < n; ++i) y[i] = x[i]/(1.0f + expf(-x[i]));
+}
+
+void MulMat::relu(int n, const float * x, float * y) {
+    for (int j = 0; j < n; ++j) y[j] = x[j] > 0 ? x[j] : 0;
+}
+
+#endif
+} // namespace
+
+static inline void iqk_mul_f32(int n, const float * x, const float * y, float * dst) {
+    int i = 0;
+#if defined(__AVX512F__)
+    for (; i + 15 < n; i += 16) {
+        _mm512_storeu_ps(dst + i, _mm512_mul_ps(_mm512_loadu_ps(x + i), _mm512_loadu_ps(y + i)));
+    }
+#elif defined(__AVX2__)
+    for (; i + 7 < n; i += 8) {
+        _mm256_storeu_ps(dst + i, _mm256_mul_ps(_mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i)));
+    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+    for (; i + 3 < n; i += 4) {
+        vst1q_f32(dst + i, vmulq_f32(vld1q_f32(x + i), vld1q_f32(y + i)));
+    }
+#endif
+    for (; i < n; ++i) {
+        dst[i] = x[i]*y[i];
+    }
+}
+
+extern "C" IQK_API bool iqk_compute_glu(long nc, long nr, int glu_op, float alpha, float limit,
+        const float * gate, long gate_stride, const float * up, long up_stride,
+        float * dst, long dst_stride, int ith, int nth) {
+    if (nc <= 0 || nr <= 0 || gate == nullptr || up == nullptr || dst == nullptr || nth <= 0) {
+        return false;
+    }
+
+    const long dr = (nr + nth - 1)/nth;
+    const long ir0 = dr*ith;
+    const long ir1 = std::min<long>(ir0 + dr, nr);
+
+    for (long ir = ir0; ir < ir1; ++ir) {
+        const float * gate_row = (const float *) ((const char *) gate + ir*gate_stride);
+        const float * up_row   = (const float *) ((const char *) up + ir*up_stride);
+        float * dst_row        = (float *) ((char *) dst + ir*dst_stride);
+
+        switch (glu_op) {
+            case GGML_GLU_OP_REGLU:
+                MulMat::relu((int) nc, gate_row, dst_row);
+                iqk_mul_f32((int) nc, dst_row, up_row, dst_row);
+                break;
+            case GGML_GLU_OP_GEGLU:
+                MulMat::gelu((int) nc, gate_row, dst_row);
+                iqk_mul_f32((int) nc, dst_row, up_row, dst_row);
+                break;
+            case GGML_GLU_OP_SWIGLU:
+                MulMat::silu((int) nc, gate_row, dst_row);
+                iqk_mul_f32((int) nc, dst_row, up_row, dst_row);
+                break;
+            case GGML_GLU_OP_SWIGLU_OAI:
+                for (long i = 0; i < nc; ++i) {
+                    const float x = std::min(gate_row[i], limit);
+                    const float y = std::max(-limit, std::min(limit, up_row[i]));
+                    dst_row[i] = x/(1.0f + std::exp(alpha*(-x)))*(y + 1.0f);
+                }
+                break;
+            default:
+                return false;
+        }
+    }
+
+    return true;
+}
+#else
+
+extern "C" IQK_API bool iqk_mul_mat(long, long, long, int, const void *, long, int, const void *, long, float *, long, int, int) {
+    return false;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_4d(long, long, long, long, long, long, long, long, long, long, long, long, long,
+        int, const void *, long, int, const void *, long, float *, long, int, int) {
+    return false;
+}
+
+extern "C" IQK_API bool iqk_mul_mat_moe(long, long, long, int, int, const void *, long, int, const void *, long,
+        float *, long, long, const void *, int, int) {
+    return false;
+}
+
+extern "C" IQK_API bool iqk_moe_fused_up_gate(long, long, long, int, int, int, const void *, const void *, long,
+        int, const void *, long, const char *, const char *, float *, long, long, const void *, float, int, int) {
+    return false;
+}
+
+extern "C" IQK_API bool iqk_compute_glu(long, long, int, float, float,
+        const float *, long, const float *, long, float *, long, int, int) {
+    return false;
+}
+
+#endif

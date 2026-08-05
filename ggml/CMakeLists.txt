@@ -273,6 +273,7 @@ set   (GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "" CACHE FILEPATH "ggml: toolchain file
 
 option(GGML_ZENDNN                          "ggml: use ZenDNN"                                OFF)
 option(ZENDNN_ROOT                          "ggml: path to ZenDNN installation"               "")
+option(GGML_IQK                             "ggml: use IQK CPU backend"                        OFF)
 
 # extra artifacts
 option(GGML_BUILD_TESTS    "ggml: build tests"    ${GGML_STANDALONE})
@@ -337,6 +338,7 @@ set(GGML_PUBLIC_HEADERS
     include/ggml-vulkan.h
     include/ggml-webgpu.h
     include/ggml-zendnn.h
+    include/ggml-iqk.h
     include/ggml-openvino.h
     include/gguf.h)
 

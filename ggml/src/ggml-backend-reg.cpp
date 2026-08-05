@@ -82,6 +82,10 @@
 #include "ggml-zendnn.h"
 #endif
 
+#ifdef GGML_USE_IQK
+#include "ggml-iqk.h"
+#endif
+
 #ifdef GGML_USE_OPENVINO
 #include "ggml-openvino.h"
 #endif
@@ -149,6 +153,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_ZENDNN
         register_backend(ggml_backend_zendnn_reg());
+#endif
+#ifdef GGML_USE_IQK
+        register_backend(ggml_backend_iqk_reg());
 #endif
 #ifdef GGML_USE_HEXAGON
         register_backend(ggml_backend_hexagon_reg());
@@ -572,6 +579,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
 
     ggml_backend_load_best("blas", silent, dir_path);
     ggml_backend_load_best("zendnn", silent, dir_path);
+    ggml_backend_load_best("iqk", silent, dir_path);
     ggml_backend_load_best("cann", silent, dir_path);
     ggml_backend_load_best("cuda", silent, dir_path);
     ggml_backend_load_best("hip", silent, dir_path);
