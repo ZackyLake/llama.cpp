@@ -499,9 +499,25 @@ function(ggml_add_cpu_backend_variant tag_name)
     endif()
 
     ggml_add_cpu_backend_variant_impl(${tag_name})
+
+    if (GGML_IQK AND GGML_SYSTEM_ARCH STREQUAL "x86")
+        ggml_add_iqk_backend_variant("${tag_name}")
+    endif()
 endfunction()
 
+if (GGML_IQK)
+    if (NOT GGML_CPU)
+        message(FATAL_ERROR "GGML_IQK requires GGML_CPU=ON")
+    endif()
+    add_subdirectory(ggml-iqk)
+    message(STATUS "Including IQK backend")
+endif()
+
 ggml_add_backend(CPU)
+
+if (GGML_IQK AND NOT GGML_BACKEND_DL)
+    target_compile_definitions(ggml PUBLIC GGML_USE_IQK)
+endif()
 
 if (GGML_CPU_ALL_VARIANTS)
     if (NOT GGML_BACKEND_DL)
@@ -603,6 +619,9 @@ if (GGML_CPU_ALL_VARIANTS)
     endif()
 elseif (GGML_CPU)
     ggml_add_cpu_backend_variant_impl("")
+    if (GGML_IQK AND GGML_SYSTEM_ARCH STREQUAL "x86")
+        ggml_add_iqk_backend_variant("")
+    endif()
 endif()
 
 ggml_add_backend(BLAS)
