@@ -640,6 +640,15 @@ struct ggml_threadpool {
     enum ggml_status ec;
 };
 
+struct ggml_threadpool_external_api {
+    ggml_mutex_t mutex;
+    struct ggml_threadpool dummy_threadpool;
+    ggml_threadpool_set_n_threads_t  set_n_threads;
+    ggml_threadpool_barrier_t        barrier;
+    ggml_threadpool_run_task_t       run_task;
+    int n_threads;
+};
+
 // Per-thread state
 struct ggml_compute_state {
 #ifndef GGML_USE_OPENMP
@@ -708,8 +717,53 @@ struct ggml_state {
 };
 
 static struct ggml_state g_state = {0};
+static struct ggml_threadpool_external_api g_external_threadpool_api = {
+    .mutex = GGML_MUTEX_INITIALIZER,
+};
+
+static bool ggml_threadpool_external_api_configured(void) {
+    const bool configured = g_external_threadpool_api.set_n_threads != NULL;
+    return configured;
+}
+
+bool ggml_threadpool_set_external(
+        ggml_threadpool_set_n_threads_t set_n_threads,
+        ggml_threadpool_barrier_t        barrier,
+        ggml_threadpool_run_task_t       run_task) {
+    ggml_mutex_lock(&g_external_threadpool_api.mutex);
+
+    if (set_n_threads == NULL && barrier == NULL && run_task == NULL) {
+        g_external_threadpool_api.n_threads     = 0;
+        g_external_threadpool_api.set_n_threads = NULL;
+        g_external_threadpool_api.barrier        = NULL;
+        g_external_threadpool_api.run_task       = NULL;
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
+        return true;
+    }
+
+    if (set_n_threads == NULL || barrier == NULL || run_task == NULL) {
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
+        return false;
+    }
+
+    g_external_threadpool_api.n_threads     = 0;
+    g_external_threadpool_api.set_n_threads = set_n_threads;
+    g_external_threadpool_api.barrier        = barrier;
+    g_external_threadpool_api.run_task       = run_task;
+
+    ggml_mutex_unlock(&g_external_threadpool_api.mutex);
+    return true;
+}
 
 void ggml_barrier(struct ggml_threadpool * tp) {
+    if (ggml_threadpool_external_api_configured()) {
+        GGML_ASSERT(tp == &g_external_threadpool_api.dummy_threadpool);
+        if (g_external_threadpool_api.n_threads > 1) {
+            g_external_threadpool_api.barrier();
+        }
+        return;
+    }
+
     int n_threads = atomic_load_explicit(&tp->n_graph, memory_order_relaxed) & GGML_THREADPOOL_N_THREADS_MASK;
     if (n_threads == 1) {
         return;
@@ -733,10 +787,24 @@ void ggml_barrier(struct ggml_threadpool * tp) {
     }
 
     // wait for other threads
+    const int n_spin_before_sleep = 100000;
     while (atomic_load_explicit(&tp->n_barrier_passed, memory_order_relaxed) == n_passed) {
-        ggml_thread_cpu_relax();
+        for (int i = 0; i < n_spin_before_sleep; ++i) {
+            if (atomic_load_explicit(&tp->n_barrier_passed, memory_order_relaxed) != n_passed) {
+                goto done;
+            }
+            ggml_thread_cpu_relax();
+            ggml_thread_cpu_relax();
+            ggml_thread_cpu_relax();
+            ggml_thread_cpu_relax();
+        }
+#    if defined(_WIN32)
+        SwitchToThread();
+#    else
+        sched_yield();
+#    endif
     }
-
+    done:
     // exit barrier (full seq-cst fence)
     // TSAN doesn't support standalone fence yet, we use a dummy read-modify-write instead
     #ifdef GGML_TSAN_ENABLED
@@ -3165,15 +3233,18 @@ static int ggml_cpu_try_fuse_ops(
 static thread_ret_t ggml_graph_compute_thread(void * data) {
     struct ggml_compute_state * state = (struct ggml_compute_state *) data;
     struct ggml_threadpool    * tp    = state->threadpool;
+    const bool use_external = ggml_threadpool_external_api_configured();
 
     const struct ggml_cgraph * cgraph = tp->cgraph;
     const struct ggml_cplan  * cplan  = tp->cplan;
 
+    if (!use_external) {
 #ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-    ggml_backend_cpu_riscv64_spacemit_set_numa_thread_affinity(state->ith);
+        ggml_backend_cpu_riscv64_spacemit_set_numa_thread_affinity(state->ith);
 #else
-    set_numa_thread_affinity(state->ith);
+        set_numa_thread_affinity(state->ith);
 #endif
+    }
 
     struct ggml_compute_params params = {
         /*.ith        =*/ state->ith,
@@ -3230,11 +3301,26 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
 
     ggml_barrier(state->threadpool);
 
+    if (!use_external) {
 #ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-    ggml_backend_cpu_riscv64_spacemit_clear_numa_thread_affinity_threaded(state->ith);
+        ggml_backend_cpu_riscv64_spacemit_clear_numa_thread_affinity_threaded(state->ith);
 #endif
+    }
 
     return 0;
+}
+
+static void ggml_graph_compute_external_task(int ith, int nth) {
+    struct ggml_threadpool * threadpool = &g_external_threadpool_api.dummy_threadpool;
+
+    GGML_ASSERT(ith >= 0 && ith < nth);
+    GGML_ASSERT((uint32_t)nth == (atomic_load_explicit(&threadpool->n_graph, memory_order_relaxed) & GGML_THREADPOOL_N_THREADS_MASK));
+
+    struct ggml_compute_state state = {
+        .threadpool = threadpool,
+        .ith        = ith,
+    };
+    ggml_graph_compute_thread(&state);
 }
 
 #ifndef GGML_USE_OPENMP
@@ -3422,11 +3508,13 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
     #pragma omp parallel num_threads(tpp->n_threads)
     {
         const int ith = omp_get_thread_num();
-
-        ggml_thread_apply_priority(threadpool->prio);
-        if (ggml_thread_cpumask_is_valid(workers[ith].cpumask)) {
-            ggml_thread_apply_affinity(workers[ith].cpumask);
+        if (!ggml_threadpool_external_api_configured() || ith != 0) {
+            ggml_thread_apply_priority(threadpool->prio);
+            if (ggml_thread_cpumask_is_valid(workers[ith].cpumask)) {
+                ggml_thread_apply_affinity(workers[ith].cpumask);
+            }
         }
+
     }
 #else // GGML_USE_OPENMP
     ggml_mutex_init(&threadpool->mutex);
@@ -3446,7 +3534,7 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
 
     ggml_thread_cpumask_next(tpp->cpumask, workers[0].cpumask, tpp->strict_cpu, &cpumask_iter);
 
-    if (!threadpool->pause) {
+    if (!threadpool->pause && !ggml_threadpool_external_api_configured()) {
         // Update main thread prio and affinity at the start, otherwise we'll do it in resume
         ggml_thread_apply_priority(threadpool->prio);
         if (ggml_thread_cpumask_is_valid(threadpool->workers[0].cpumask)) {
@@ -3469,6 +3557,31 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     GGML_ASSERT(cplan->n_threads > 0);
     GGML_ASSERT(cplan->work_size == 0 || cplan->work_data != NULL);
 
+    if (ggml_threadpool_external_api_configured()) {
+        ggml_mutex_lock(&g_external_threadpool_api.mutex);
+        struct ggml_threadpool * threadpool = &g_external_threadpool_api.dummy_threadpool;
+        struct ggml_cplan external_cplan = *cplan;
+        external_cplan.threadpool = threadpool;
+
+        threadpool->cgraph = cgraph;
+        threadpool->cplan  = &external_cplan;
+        atomic_store_explicit(&threadpool->current_chunk, 0, memory_order_relaxed);
+        atomic_store_explicit(&threadpool->abort, -1, memory_order_relaxed);
+        threadpool->ec = GGML_STATUS_SUCCESS;
+
+        const int n_threads = g_external_threadpool_api.set_n_threads(cplan->n_threads);
+        g_external_threadpool_api.n_threads = n_threads;
+        external_cplan.n_threads = n_threads;
+
+        atomic_store_explicit(&threadpool->n_graph, n_threads & GGML_THREADPOOL_N_THREADS_MASK, memory_order_relaxed);
+
+        g_external_threadpool_api.run_task(ggml_graph_compute_external_task);
+
+        enum ggml_status ret = threadpool->ec;
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
+        return ret;
+    }
+    
     int n_threads                               = cplan->n_threads;
     struct ggml_threadpool * threadpool = cplan->threadpool;
 

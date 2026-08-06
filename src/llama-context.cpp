@@ -1130,11 +1130,15 @@ size_t llama_context::get_sampled_probs_count(int32_t idx) {
 
 void llama_context::attach_threadpool(
            ggml_threadpool_t threadpool,
-           ggml_threadpool_t threadpool_batch) {
+           ggml_threadpool_t threadpool_batch,
+           const ggml_threadpool_params * threadpool_params) {
     LLAMA_LOG_DEBUG("%s: call\n", __func__);
 
     this->threadpool       = threadpool;
     this->threadpool_batch = threadpool_batch ? threadpool_batch : threadpool;
+    if (threadpool_params) {
+        this->threadpool_params = *threadpool_params;
+    }
 }
 
 void llama_context::detach_threadpool() {
@@ -2511,6 +2515,20 @@ ggml_status llama_context::graph_compute(
         }
     }
 
+    // forward the CPU threadpool params to the IQK backend, if present
+    // temporary signature, resolved via proc address (no ggml-iqk.h dependency)
+    using set_threadpool_params_fn = void (*)(ggml_backend_t, const ggml_threadpool_params *);
+    for (const auto & set_n_threads_fn : set_n_threads_fns) {
+        if (std::strcmp(ggml_backend_name(set_n_threads_fn.first), "IQK") != 0) {
+            continue;
+        }
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(set_n_threads_fn.first));
+        auto * set_iqk_params_fn = (set_threadpool_params_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_iqk_set_threadpool_params");
+        if (set_iqk_params_fn) {
+            set_iqk_params_fn(set_n_threads_fn.first, &threadpool_params);
+        }
+    }
+
     // set the number of threads for all the backends
     for (const auto & set_n_threads_fn : set_n_threads_fns) {
         set_n_threads_fn.second(set_n_threads_fn.first, n_threads);
@@ -3806,8 +3824,9 @@ enum llama_pooling_type llama_pooling_type(const llama_context * ctx) {
 void llama_attach_threadpool(
             llama_context * ctx,
         ggml_threadpool_t   threadpool,
-        ggml_threadpool_t   threadpool_batch) {
-    ctx->attach_threadpool(threadpool, threadpool_batch);
+        ggml_threadpool_t   threadpool_batch,
+        const ggml_threadpool_params * threadpool_params) {
+    ctx->attach_threadpool(threadpool, threadpool_batch, threadpool_params);
 }
 
 void llama_detach_threadpool(llama_context * ctx) {

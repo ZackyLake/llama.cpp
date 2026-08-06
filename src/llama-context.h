@@ -104,7 +104,8 @@ struct llama_context {
 
     void attach_threadpool(
             ggml_threadpool_t threadpool,
-            ggml_threadpool_t threadpool_batch);
+            ggml_threadpool_t threadpool_batch,
+            const ggml_threadpool_params * threadpool_params);
 
     void detach_threadpool();
 
@@ -353,6 +354,9 @@ private:
 
     ggml_threadpool_t threadpool       = nullptr;
     ggml_threadpool_t threadpool_batch = nullptr;
+
+    // CPU threadpool params, forwarded to backends that need them (e.g. IQK)
+    ggml_threadpool_params threadpool_params = {};
 
     ggml_abort_callback abort_callback      = nullptr;
     void *              abort_callback_data = nullptr;

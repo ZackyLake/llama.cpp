@@ -2406,7 +2406,7 @@ int llama_bench(int argc, char ** argv) {
             exit(1);
         }
 
-        llama_attach_threadpool(ctx, threadpool, NULL);
+        llama_attach_threadpool(ctx, threadpool, NULL, &tpp);
 
         // warmup run
         if (!params.no_warmup) {
