@@ -1776,7 +1776,7 @@ void common_threadpools::init(llama_context * ctx, const common_params & params)
         return;
     }
 
-    llama_attach_threadpool(ctx, threadpool, threadpool_batch);
+    llama_attach_threadpool(ctx, threadpool, threadpool_batch, &tpp);
 }
 
 //
