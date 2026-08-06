@@ -10,6 +10,9 @@ extern "C" {
 
     #define GGML_BACKEND_API_VERSION 2
 
+    GGML_API bool ggml_thread_apply_affinity(const bool * mask);
+    GGML_API bool ggml_thread_apply_priority(int32_t prio);
+
     //
     // Backend buffer type
     //

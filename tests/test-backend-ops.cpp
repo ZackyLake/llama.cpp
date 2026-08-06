@@ -11482,6 +11482,12 @@ int main(int argc, char ** argv) {
             ggml_backend_set_n_threads_fn(backend.get(), n_threads);
         }
 
+        using set_threadpool_params_fn = void (*)(ggml_backend_t, const ggml_threadpool_params *);
+        auto set_threadpool_params = (set_threadpool_params_fn) ggml_backend_reg_get_proc_address(reg, "ggml_backend_iqk_set_threadpool_params");
+        if (set_threadpool_params) {
+            set_threadpool_params(backend.get(), &threadpool_params);
+        }
+
         size_t free, total;  // NOLINT
         ggml_backend_dev_memory(dev, &free, &total);
         output_printer->print_backend_init(backend_init_info(i, ggml_backend_dev_count(), ggml_backend_dev_name(dev),

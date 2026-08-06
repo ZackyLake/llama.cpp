@@ -504,7 +504,8 @@ extern "C" {
     LLAMA_API void llama_attach_threadpool(
             struct llama_context * ctx,
                ggml_threadpool_t   threadpool,
-               ggml_threadpool_t   threadpool_batch);
+               ggml_threadpool_t   threadpool_batch,
+               const struct ggml_threadpool_params * threadpool_params);
 
     LLAMA_API void llama_detach_threadpool(struct llama_context * ctx);
 
