@@ -137,14 +137,13 @@ struct ScaleIQ4XS {
     inline __m128i make_scales(const uint32_t scales_l, const uint16_t scales_h) {
         uint32_t tmp32 = scales_h | (scales_h << 14);
         const __m128i sh = _mm_slli_epi16(_mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32(tmp32), hshift), hmask), 4);
-        const __m128i sl = _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32(scales_l), lshift), lmask);
-        return _mm_add_epi16(_mm_or_si128(sh, _mm_cvtepi8_epi16(_mm_shuffle_epi8(sl, lshuffle))), m32);
+        const __m128i sl = _mm_cvtepu8_epi16(_mm_cvtsi32_si128(scales_l));
+        const __m128i scl = _mm_unpacklo_epi16(_mm_and_si128(sl, lmask), _mm_srli_epi16(sl, 4));
+        return _mm_add_epi16(_mm_or_si128(sh, scl), m32);
     }
     const __m128i hshift = _mm_set_epi32(12, 8, 4, 0);
-    const __m128i lshift = _mm_set_epi32(4, 0, 4, 0);
     const __m128i hmask  = _mm_set1_epi16(0x03);
-    const __m128i lmask  = _mm_set1_epi8(0xf);
-    const __m128i lshuffle = _mm_set_epi32(0x07030602, 0x05010400, 0x07030602, 0x05010400);
+    const __m128i lmask  = _mm_set1_epi16(0x0f);
     const __m128i m32 = _mm_set1_epi16(-32);
 };
 
