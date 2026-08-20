@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <vector>
 #include <cstdint>
+#include <array>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -204,7 +205,7 @@ static inline void make_q4_scales(const uint8_t * scales8, uint32_t * aux32) {
     aux32[0] = a0 & 0x3f3f3f3f;
 }
 
-const uint64_t keven_signs[128] = {
+inline constexpr uint64_t keven_signs[128] = {
     0x0101010101010101, 0xff010101010101ff, 0xff0101010101ff01, 0x010101010101ffff,
     0xff01010101ff0101, 0x0101010101ff01ff, 0x0101010101ffff01, 0xff01010101ffffff,
     0xff010101ff010101, 0x01010101ff0101ff, 0x01010101ff01ff01, 0xff010101ff01ffff,
@@ -238,6 +239,19 @@ const uint64_t keven_signs[128] = {
     0x01ffffffff010101, 0xffffffffff0101ff, 0xffffffffff01ff01, 0x01ffffffff01ffff,
     0xffffffffffff0101, 0x01ffffffffff01ff, 0x01ffffffffffff01, 0xffffffffffffffff,
 };
+
+alignas(64) inline static constexpr std::array<uint8_t, 128> keven_signs_bits = [](){
+    std::array<uint8_t, 128> result = {};
+    for (int i = 0; i < 128; ++i) {
+        const uint64_t signs = keven_signs[i];
+        uint8_t bits = 0;
+        for (int j = 0; j < 8; ++j) {
+            bits |= ((signs >> (8*j + 7)) & 1) << j;
+        }
+        result[i] = bits;
+    }
+    return result;
+}();
 
 #ifdef __AVX2__
 
@@ -393,7 +407,10 @@ struct Scales8KBase {
         }
     }
     inline __m256i shuffle(__m128i mins) const {
-        return MM256_SET_M128I(_mm_shuffle_epi8(mins, shuffles[1]), _mm_shuffle_epi8(mins, shuffles[0]));
+        __m128i lo = _mm_unpacklo_epi16(mins, mins);
+        __m128i hi = _mm_unpackhi_epi16(mins, mins);
+        return MM256_SET_M128I(hi, lo);
+        //return MM256_SET_M128I(_mm_shuffle_epi8(mins, shuffles[1]), _mm_shuffle_epi8(mins, shuffles[0]));
     }
     const __m128i shuffles[2] = {_mm_set_epi32(0x07060706, 0x05040504, 0x03020302, 0x01000100),
                                  _mm_set_epi32(0x0f0e0f0e, 0x0d0c0d0c, 0x0b0a0b0a, 0x09080908)};
@@ -544,12 +561,18 @@ struct Q2Bits {
         auto q2bits = _mm512_loadu_si512((const __m512i*)q2);
         auto tmp = _mm512_srli_epi16(q2bits, 2);
 
-        values[0] = _mm512_permutex2var_epi64(q2bits, perm.permute1, tmp);
-        values[2] = _mm512_permutex2var_epi64(q2bits, perm.permute2, tmp);
-        values[1] = _mm512_and_si512(_mm512_srli_epi16(values[0], 4), ml);
-        values[3] = _mm512_and_si512(_mm512_srli_epi16(values[2], 4), ml);
-        values[0] = _mm512_and_si512(values[0], ml);
-        values[2] = _mm512_and_si512(values[2], ml);
+        const auto p0 = _mm512_shuffle_i64x2(q2bits, tmp, _MM_SHUFFLE(1, 0, 1, 0));
+        const auto p2 = _mm512_shuffle_i64x2(q2bits, tmp, _MM_SHUFFLE(3, 2, 3, 2));
+        values[0] = _mm512_and_si512(p0, ml);
+        values[1] = _mm512_and_si512(_mm512_srli_epi16(p0, 4), ml);
+        values[2] = _mm512_and_si512(p2, ml);
+        values[3] = _mm512_and_si512(_mm512_srli_epi16(p2, 4), ml);
+        // values[0] = _mm512_permutex2var_epi64(q2bits, perm.permute1, tmp);
+        // values[2] = _mm512_permutex2var_epi64(q2bits, perm.permute2, tmp);
+        // values[1] = _mm512_and_si512(_mm512_srli_epi16(values[0], 4), ml);
+        // values[3] = _mm512_and_si512(_mm512_srli_epi16(values[2], 4), ml);
+        // values[0] = _mm512_and_si512(values[0], ml);
+        // values[2] = _mm512_and_si512(values[2], ml);
     }
     __m512i values[4];
     const __m512i ml = _mm512_set1_epi8(0x03);
