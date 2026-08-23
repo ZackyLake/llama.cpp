@@ -35,21 +35,68 @@
 #include <sched.h>
 #endif
 
+struct ggml_backend_iqk_context;
+
+struct mmid_row_mapping {
+    int32_t i1;
+    int32_t i2;
+};
+
+struct ggml_iqk_node_state {
+    std::vector<std::vector<mmid_row_mapping>> matrix_rows;
+};
+
+static constexpr int GGML_IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
+
+struct ggml_iqk_fusion_plan {
+    int start_index = -1;
+    int gate_index  = -1;
+    int up_index    = -1;
+    int gate_view_index = -1;
+    int up_view_index   = -1;
+    int glu_index   = -1;
+    int gate_clamp_index = -1;
+    int up_clamp_index   = -1;
+
+    const ggml_tensor * gate_mat = nullptr;
+    const ggml_tensor * up_mat   = nullptr;
+    const ggml_tensor * input    = nullptr;
+    const ggml_tensor * ids      = nullptr;
+    const ggml_tensor * gate_weight = nullptr;
+    const ggml_tensor * up_weight   = nullptr;
+    ggml_tensor *       glu      = nullptr;
+
+    int   unary_op = 0;
+    float limit    = 0.0f;
+    bool  merged   = false;
+    bool  use_id   = false;
+    bool  gate_clamped = false;
+    bool  up_clamped   = false;
+};
+
+struct ggml_iqk_compute_task {
+    bool is_fused = false;
+    size_t index = 0;
+    ggml_iqk_node_state node_state;
+};
+
 struct iqk_compute_state_shared;
 
-using iqk_compute_callback = bool (*)(void *, int, int, int, iqk_compute_state_shared *);
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, int ith);
 
 struct iqk_compute_state_shared {
-    int n_threads;
-    int n_nodes;
-    iqk_compute_callback callback;
-    void * user_data;
-    ggml_from_float_t quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
-    ggml_from_float_t quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
-    ggml_from_float_t quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
+    ggml_backend_iqk_context * backend = nullptr;
+    ggml_cgraph * cgraph = nullptr;
+    std::vector<ggml_iqk_compute_task> compute_tasks;
+    std::vector<ggml_iqk_fusion_plan> fusion_plans;
+    char * work_data = nullptr;
+
+    int n_threads = 0;
     std::atomic<int> n_barrier{0};
     std::atomic<int> n_barrier_passed{0};
     std::atomic<int> ec{0};
+
+    void barrier();
 };
 
 static void iqk_thread_cpu_relax(void) {
@@ -72,34 +119,26 @@ static void iqk_thread_yield(void) {
 #endif
 }
 
-// bitmask covering bits [begin, end); handles end == 64 where 1ULL << 64 is UB
-static uint64_t iqk_mask_bits(uint32_t begin, uint32_t end) {
-    if (end == 64) {
-        return ~0ULL << begin;
-    }
-    return (1ULL << end) - (1ULL << begin);
-}
-
-static void iqk_barrier(iqk_compute_state_shared * shared) {
-    if (shared->n_threads == 1) {
+void iqk_compute_state_shared::barrier() {
+    if (n_threads == 1) {
         return;
     }
 
-    const int n_passed = shared->n_barrier_passed.load(std::memory_order_relaxed);
-    const int n_barrier = shared->n_barrier.fetch_add(1, std::memory_order_seq_cst);
+    const int n_passed = n_barrier_passed.load(std::memory_order_relaxed);
+    const int n_barrier_count = n_barrier.fetch_add(1, std::memory_order_seq_cst);
 
-    if (n_barrier == shared->n_threads - 1) {
-        shared->n_barrier.store(0, std::memory_order_relaxed);
-        shared->n_barrier_passed.fetch_add(1, std::memory_order_seq_cst);
+    if (n_barrier_count == n_threads - 1) {
+        n_barrier.store(0, std::memory_order_relaxed);
+        n_barrier_passed.fetch_add(1, std::memory_order_seq_cst);
         return;
     }
 
     // spin a bounded number of times before yielding, so the last thread is
     // not starved by the scheduler while the others spin
     const int n_spin_before_sleep = 100000;
-    while (shared->n_barrier_passed.load(std::memory_order_relaxed) == n_passed) {
+    while (n_barrier_passed.load(std::memory_order_relaxed) == n_passed) {
         for (int i = 0; i < n_spin_before_sleep; ++i) {
-            if (shared->n_barrier_passed.load(std::memory_order_relaxed) != n_passed) {
+            if (n_barrier_passed.load(std::memory_order_relaxed) != n_passed) {
                 goto done;
             }
             iqk_thread_cpu_relax();
@@ -111,10 +150,18 @@ done:
     // exit barrier (full seq-cst fence)
     // TSAN doesn't support standalone fence yet, we use a dummy read-modify-write instead
 #ifdef GGML_TSAN_ENABLED
-    shared->n_barrier_passed.fetch_add(0, std::memory_order_seq_cst);
+    n_barrier_passed.fetch_add(0, std::memory_order_seq_cst);
 #else
     std::atomic_thread_fence(std::memory_order_seq_cst);
 #endif
+}
+
+// bitmask covering bits [begin, end); handles end == 64 where 1ULL << 64 is UB
+static uint64_t iqk_mask_bits(uint32_t begin, uint32_t end) {
+    if (end == 64) {
+        return ~0ULL << begin;
+    }
+    return (1ULL << end) - (1ULL << begin);
 }
 
 enum class iqk_threadpool_state {
@@ -168,19 +215,6 @@ struct iqk_threadpool {
         dispatch_locked(threads.size(), iqk_threadpool_state::config);
     }
 
-    void graph_worker(uint32_t ith) {
-        for (int i = 0; i < shared->n_nodes; ++i) {
-            if (!shared->callback(shared->user_data, i, (int) ith, shared->n_threads, shared)) {
-                shared->ec.store(1, std::memory_order_relaxed);
-            }
-            // the last node needs no barrier: returning from graph_worker
-            // syncs all workers via act_mask in dispatch()
-            if (i + 1 < shared->n_nodes) {
-                iqk_barrier(shared);
-            }
-        }
-    }
-
     // apply priority and affinity for worker ith; thread ith binds to cpu_ids[ith]
     void apply_thread_config(uint32_t ith) {
         ggml_thread_apply_priority(params.prio);
@@ -229,7 +263,7 @@ struct iqk_threadpool {
                     apply_thread_config(ith);
                     break;
                 case iqk_threadpool_state::compute:
-                    graph_worker(ith);
+                    ggml_iqk_compute_node(shared, (int) ith);
                     break;
                 default:
                     break;
@@ -306,53 +340,6 @@ struct ggml_backend_iqk_context {
     ggml_from_float_t cpu_quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
     ggml_from_float_t cpu_quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
     ggml_from_float_t cpu_quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
-};
-
-struct mmid_row_mapping {
-    int32_t i1;
-    int32_t i2;
-};
-
-struct ggml_iqk_node_state {
-    std::vector<std::vector<mmid_row_mapping>> matrix_rows;
-};
-
-static constexpr int GGML_IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
-
-struct ggml_iqk_fusion_plan {
-    int start_index = -1;
-    int gate_index  = -1;
-    int up_index    = -1;
-    int gate_view_index = -1;
-    int up_view_index   = -1;
-    int glu_index   = -1;
-    int gate_clamp_index = -1;
-    int up_clamp_index   = -1;
-
-    const ggml_tensor * gate_mat = nullptr;
-    const ggml_tensor * up_mat   = nullptr;
-    const ggml_tensor * input    = nullptr;
-    const ggml_tensor * ids      = nullptr;
-    const ggml_tensor * gate_weight = nullptr;
-    const ggml_tensor * up_weight   = nullptr;
-    ggml_tensor *       glu      = nullptr;
-
-    int   unary_op = 0;
-    float limit    = 0.0f;
-    bool  merged   = false;
-    bool  use_id   = false;
-    bool  gate_clamped = false;
-    bool  up_clamped   = false;
-};
-
-struct ggml_iqk_compute_context {
-    ggml_backend_iqk_context * backend;
-    ggml_cgraph * cgraph;
-    std::vector<ggml_iqk_node_state> * node_states;
-    std::vector<ggml_iqk_fusion_plan> fusion_plans;
-    std::vector<int> fusion_start_plan;
-    std::vector<uint8_t> fusion_skip;
-    char * work_data = nullptr;
 };
 
 static bool ggml_iqk_glu_enabled() {
@@ -695,7 +682,8 @@ static int ggml_iqk_find_node_index(const ggml_cgraph * cgraph, const ggml_tenso
 
 static bool ggml_iqk_make_fusion_plan(const ggml_cgraph * cgraph, int glu_index, ggml_iqk_fusion_plan * plan) {
     ggml_tensor * glu = cgraph->nodes[glu_index];
-    if (!ggml_iqk_can_fuse_glu(glu) || !ggml_iqk_glu_activation(glu, &plan->unary_op, &plan->limit)) {
+    if ((glu->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+        !ggml_iqk_can_fuse_glu(glu) || !ggml_iqk_glu_activation(glu, &plan->unary_op, &plan->limit)) {
         return false;
     }
 
@@ -765,6 +753,11 @@ static bool ggml_iqk_make_fusion_plan(const ggml_cgraph * cgraph, int glu_index,
         return false;
     }
 
+    if ((plan->gate_mat->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 ||
+        (plan->up_mat->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+        return false;
+    }
+
     if (plan->merged) {
         return ggml_node_get_use_count(cgraph, plan->start_index) == 2 &&
                ggml_node_get_use_count(cgraph, plan->gate_view_index) == 1 &&
@@ -787,13 +780,11 @@ static void ggml_iqk_log_fused_node(const ggml_tensor * node) {
 }
 
 static size_t ggml_iqk_src1_work_size(const ggml_tensor * src1, enum ggml_type type);
-static void ggml_iqk_quantize_src1(char * work_data, const ggml_tensor * src1,
+static void ggml_iqk_quantize_src1(const ggml_tensor * src1,
     enum ggml_type type, iqk_compute_state_shared * shared,
     int ith, int nth, size_t * row_size, const void ** data);
-static size_t ggml_iqk_graph_work_size(const ggml_cgraph * cgraph);
 
 static bool ggml_iqk_compute_forward_fused(
-        char * work_data,
         const ggml_iqk_fusion_plan & plan,
         ggml_iqk_node_state * state,
         int ith,
@@ -810,10 +801,10 @@ static bool ggml_iqk_compute_forward_fused(
     const void * input_data = nullptr;
     size_t input_row_size = 0;
 
-    ggml_iqk_quantize_src1(work_data, input, typeB, shared,
+    ggml_iqk_quantize_src1(input, typeB, shared,
             ith, nth, &input_row_size, &input_data);
 
-    iqk_barrier(shared);
+    shared->barrier();
 
     const int64_t nx = plan.merged ? gate_mat->ne[0]/2 : gate_mat->ne[0];
     const size_t up_stride = up_weight->nb[1];
@@ -878,7 +869,7 @@ static bool ggml_iqk_compute_forward_fused(
             }
         }
     }
-    iqk_barrier(shared);
+    shared->barrier();
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t n_rows = state->matrix_rows[cur_a].size();
@@ -941,18 +932,21 @@ static bool ggml_iqk_compute_forward_clamp(const ggml_tensor * dst, int ith, int
     return true;
 }
 
-static void ggml_iqk_build_fusion_plans(ggml_iqk_compute_context * compute_ctx) {
-    const int n_nodes = compute_ctx->cgraph->n_nodes;
-    compute_ctx->fusion_start_plan.assign(n_nodes, -1);
-    compute_ctx->fusion_skip.assign(n_nodes, 0);
+static size_t ggml_iqk_build_compute_tasks(iqk_compute_state_shared * shared) {
+    const int n_nodes = shared->cgraph->n_nodes;
+    std::vector<int> fusion_start_plan(n_nodes, -1);
+    std::vector<uint8_t> fusion_skip(n_nodes, 0);
+    size_t work_size = 0;
+    shared->fusion_plans.clear();
 
     for (int i = 0; i < n_nodes; ++i) {
-        if (compute_ctx->cgraph->nodes[i]->op != GGML_OP_GLU) {
+        const ggml_tensor * node = shared->cgraph->nodes[i];
+        if (node->op != GGML_OP_GLU) {
             continue;
         }
 
         ggml_iqk_fusion_plan plan;
-        if (!ggml_iqk_make_fusion_plan(compute_ctx->cgraph, i, &plan)) {
+        if (!ggml_iqk_make_fusion_plan(shared->cgraph, i, &plan)) {
             continue;
         }
 
@@ -962,25 +956,64 @@ static void ggml_iqk_build_fusion_plans(ggml_iqk_compute_context * compute_ctx) 
         };
         bool conflict = false;
         for (int node_index : plan_nodes) {
-            if (node_index >= 0 && (compute_ctx->fusion_skip[node_index] ||
-                    compute_ctx->fusion_start_plan[node_index] >= 0)) {
+            if (node_index >= 0 && (fusion_skip[node_index] ||
+                    fusion_start_plan[node_index] >= 0)) {
                 conflict = true;
                 break;
             }
         }
-        if (conflict || compute_ctx->fusion_start_plan[plan.start_index] >= 0) {
+        if (conflict || fusion_start_plan[plan.start_index] >= 0) {
             continue;
         }
 
-        const int plan_index = (int) compute_ctx->fusion_plans.size();
-        compute_ctx->fusion_plans.push_back(plan);
-        compute_ctx->fusion_start_plan[plan.start_index] = plan_index;
+        const int plan_index = (int) shared->fusion_plans.size();
+        shared->fusion_plans.push_back(plan);
+        fusion_start_plan[plan.start_index] = plan_index;
         for (int node_index : plan_nodes) {
             if (node_index >= 0 && node_index != plan.start_index) {
-                compute_ctx->fusion_skip[node_index] = 1;
+                fusion_skip[node_index] = 1;
             }
         }
     }
+
+    shared->compute_tasks.clear();
+    shared->compute_tasks.reserve(n_nodes);
+    for (int node_index = 0; node_index < n_nodes; ++node_index) {
+        if (fusion_skip[node_index]) {
+            continue;
+        }
+
+        const ggml_tensor * node = shared->cgraph->nodes[node_index];
+        const int plan_index = fusion_start_plan[node_index];
+        if (plan_index >= 0) {
+            ggml_iqk_compute_task task;
+            task.is_fused = true;
+            task.index = plan_index;
+            shared->compute_tasks.push_back(task);
+
+            const ggml_iqk_fusion_plan & plan = shared->fusion_plans[plan_index];
+            if (plan.input != nullptr && plan.input->type == GGML_TYPE_F32) {
+                work_size = std::max(work_size,
+                        ggml_iqk_src1_work_size(plan.input, ggml_iqk_vec_dot_type(plan.gate_weight->type)));
+            }
+        } else if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) != 0 &&
+            (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID ||
+             node->op == GGML_OP_GLU || node->op == GGML_OP_CLAMP)) {
+            ggml_iqk_compute_task task;
+            task.index = node_index;
+            shared->compute_tasks.push_back(task);
+
+            if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
+                const ggml_tensor * src1 = node->src[1];
+                if (src1 != nullptr && src1->type == GGML_TYPE_F32) {
+                    work_size = std::max(work_size,
+                            ggml_iqk_src1_work_size(src1, ggml_iqk_vec_dot_type(node->src[0]->type)));
+                }
+            }
+        }
+    }
+
+    return work_size;
 }
 
 static size_t ggml_iqk_src1_work_size(const ggml_tensor * src1, enum ggml_type type) {
@@ -990,19 +1023,19 @@ static size_t ggml_iqk_src1_work_size(const ggml_tensor * src1, enum ggml_type t
     return row_size * src1->ne[1] * src1->ne[2] * src1->ne[3];
 }
 
-static void ggml_iqk_quantize_src1(char * work_data, const ggml_tensor * src1,
+static void ggml_iqk_quantize_src1(const ggml_tensor * src1,
     enum ggml_type type, iqk_compute_state_shared * shared,
     int ith, int nth, size_t * row_size, const void ** data) {
     ggml_from_float_t quantize_row = nullptr;
     switch (type) {
         case GGML_TYPE_Q8_2_X4:
-            quantize_row = shared->quantize_row_q8_2_x4;
+            quantize_row = shared->backend->cpu_quantize_row_q8_2_x4;
             break;
         case GGML_TYPE_Q8_K128:
-            quantize_row = shared->quantize_row_q8_K128;
+            quantize_row = shared->backend->cpu_quantize_row_q8_K128;
             break;
         case GGML_TYPE_Q8_K:
-            quantize_row = shared->quantize_row_q8_K;
+            quantize_row = shared->backend->cpu_quantize_row_q8_K;
             break;
         default:
             GGML_ABORT("%s: unsupported type %s\n", __func__, ggml_type_name(type));
@@ -1018,17 +1051,16 @@ static void ggml_iqk_quantize_src1(char * work_data, const ggml_tensor * src1,
         for (int64_t i12 = 0; i12 < src1->ne[2]; ++i12) {
             for (int64_t i11 = ith; i11 < src1->ne[1]; i11 += nth) {
                 const float * src = (const float *)((const char *) src1->data + i13*src1->nb[3] + i12*src1->nb[2] + i11*src1->nb[1]);
-                void * dst = work_data + i13*volume_size + i12*plane_size + i11*(*row_size);
+                void * dst = shared->work_data + i13*volume_size + i12*plane_size + i11*(*row_size);
                 quantize_row(src, dst, src1->ne[0]);
             }
         }
     }
 
-    *data = work_data;
+    *data = shared->work_data;
 }
 
 static bool ggml_iqk_compute_forward_mul_mat(
-        char * work_data,
     ggml_tensor * dst,
     int ith,
     int nth,
@@ -1042,10 +1074,10 @@ static bool ggml_iqk_compute_forward_mul_mat(
     const void * src1_data;
     size_t src1_row_size;
 
-    ggml_iqk_quantize_src1(work_data, src1, typeB, shared,
+    ggml_iqk_quantize_src1(src1, typeB, shared,
             ith, nth, &src1_row_size, &src1_data);
 
-    iqk_barrier(shared);
+    shared->barrier();
 
     return iqk_mul_mat_4d(ne01, ne11, ne00,
                 ne02, ne03, ne12, ne13, nb02, nb03,
@@ -1057,7 +1089,6 @@ static bool ggml_iqk_compute_forward_mul_mat(
 }
 
 static bool ggml_iqk_compute_forward_mul_mat_id(
-        char * work_data,
             ggml_tensor * dst,
             ggml_iqk_node_state * state,
             int ith,
@@ -1076,7 +1107,7 @@ static bool ggml_iqk_compute_forward_mul_mat_id(
     const enum ggml_type typeB = ggml_iqk_vec_dot_type(src0->type);
     const void * src1_data;
     size_t src1_row_size;
-    ggml_iqk_quantize_src1(work_data, src1, typeB, shared,
+    ggml_iqk_quantize_src1(src1, typeB, shared,
             ith, nth, &src1_row_size, &src1_data);
 
     const int n_ids = ids->ne[0];
@@ -1105,7 +1136,7 @@ static bool ggml_iqk_compute_forward_mul_mat_id(
         }
     }
 
-    iqk_barrier(shared);
+    shared->barrier();
 
     for (int cur_a = 0; cur_a < n_as; ++cur_a) {
         const int64_t n_rows = state->matrix_rows[cur_a].size();
@@ -1139,68 +1170,67 @@ static void ggml_backend_iqk_free(ggml_backend_t backend) {
     delete backend;
 }
 
-static bool ggml_iqk_compute_node(void * user_data, int node_index, int ith, int nth,
-        iqk_compute_state_shared * shared) {
-    ggml_iqk_compute_context * compute_ctx = (ggml_iqk_compute_context *) user_data;
-    struct ggml_tensor * node = compute_ctx->cgraph->nodes[node_index];
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, int ith) {
+    const int nth = shared->n_threads;
 
-    if (compute_ctx->fusion_skip[node_index]) {
-        return true;
-    }
-
-    const int plan_index = compute_ctx->fusion_start_plan[node_index];
-    if (plan_index >= 0) {
-        const ggml_iqk_fusion_plan & plan = compute_ctx->fusion_plans[plan_index];
-        const bool fused = ggml_iqk_compute_forward_fused(compute_ctx->work_data, plan,
-                &(*compute_ctx->node_states)[node_index], ith, nth, shared);
-        if (fused) {
-            // ggml_iqk_log_fused_node(plan.glu);
+    for (size_t index = 0; index < shared->compute_tasks.size(); ++index) {
+        if (index != 0) {
+            shared->barrier();
         }
-        return fused;
-    }
 
-    if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
-        return true;
-    }
+        ggml_iqk_compute_task & task = shared->compute_tasks[index];
+        bool success = true;
 
-    ggml_iqk_node_state * state = &(*compute_ctx->node_states)[node_index];
-    switch (node->op) {
-        case GGML_OP_MUL_MAT:
-            return ggml_iqk_compute_forward_mul_mat(compute_ctx->work_data, node, ith, nth, shared);
-        case GGML_OP_MUL_MAT_ID:
-            return ggml_iqk_compute_forward_mul_mat_id(compute_ctx->work_data, node, state, ith, nth, shared);
-        case GGML_OP_GLU:
-            return ggml_iqk_compute_forward_glu(node, ith, nth);
-        case GGML_OP_CLAMP:
-            return ggml_iqk_compute_forward_clamp(node, ith, nth);
-        case GGML_OP_NONE:
-        case GGML_OP_RESHAPE:
-        case GGML_OP_VIEW:
-        case GGML_OP_PERMUTE:
-        case GGML_OP_TRANSPOSE:
-            return true;
-        default:
-            GGML_ABORT("%s: unsupported op %s\n", __func__, ggml_op_desc(node));
+        if (task.is_fused) {
+            const ggml_iqk_fusion_plan & plan = shared->fusion_plans[task.index];
+            success = ggml_iqk_compute_forward_fused(plan,
+                    &task.node_state, ith, nth, shared);
+        } else {
+            ggml_tensor * node = shared->cgraph->nodes[task.index];
+            ggml_iqk_node_state * state = &task.node_state;
+            switch (node->op) {
+                case GGML_OP_MUL_MAT:
+                    success = ggml_iqk_compute_forward_mul_mat(node, ith, nth, shared);
+                    break;
+                case GGML_OP_MUL_MAT_ID:
+                    success = ggml_iqk_compute_forward_mul_mat_id(node, state, ith, nth, shared);
+                    break;
+                case GGML_OP_GLU:
+                    success = ggml_iqk_compute_forward_glu(node, ith, nth);
+                    break;
+                case GGML_OP_CLAMP:
+                    success = ggml_iqk_compute_forward_clamp(node, ith, nth);
+                    break;
+                default:
+                    GGML_ABORT("%s: unsupported op %s\n", __func__, ggml_op_desc(node));
+            }
+        }
+
+        if (!success) {
+            shared->ec.store(1, std::memory_order_relaxed);
+        }
     }
 }
 
-static ggml_status ggml_iqk_graph_compute_impl(ggml_backend_t backend, ggml_cgraph * cgraph, char * work_data) {
+static ggml_status ggml_backend_iqk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend->context;
 
-    std::vector<ggml_iqk_node_state> node_states(cgraph->n_nodes);
-    ggml_iqk_compute_context compute_ctx = { ctx, cgraph, &node_states };
-    compute_ctx.work_data = work_data;
-    ggml_iqk_build_fusion_plans(&compute_ctx);
+    iqk_compute_state_shared shared = {};
+    shared.backend = ctx;
+    shared.cgraph = cgraph;
 
     GGML_ASSERT(ctx->n_threads > 0 && !ctx->threadpool.threads.empty());
-    iqk_compute_state_shared shared;
     shared.n_threads = std::min(ctx->n_threads, (int) ctx->threadpool.threads.size());
-    shared.n_nodes = cgraph->n_nodes;
-    shared.callback = ggml_iqk_compute_node;
-    shared.user_data = &compute_ctx;
-    shared.quantize_row_q8_K = ctx->cpu_quantize_row_q8_K;
-    shared.quantize_row_q8_K128 = ctx->cpu_quantize_row_q8_K128;
-    shared.quantize_row_q8_2_x4 = ctx->cpu_quantize_row_q8_2_x4;
+    const size_t work_size = ggml_iqk_build_compute_tasks(&shared);
+
+    // allocate the work buffer on demand
+    if (ctx->work_size < work_size) {
+        GGML_LOG_INFO("IQK: compute enlarge word data [%zu] -> [%zu]\n", ctx->work_size, work_size);
+        ctx->work_data.reset(new char[work_size]);
+        ctx->work_size = work_size;
+    }
+
+    shared.work_data = ctx->work_data.get();
 
     if (!ctx->threadpool.compute(shared)) {
         GGML_LOG_ERROR("%s: IQK kernel rejected graph\n", __func__);
@@ -1208,73 +1238,6 @@ static ggml_status ggml_iqk_graph_compute_impl(ggml_backend_t backend, ggml_cgra
     }
 
     return GGML_STATUS_SUCCESS;
-}
-
-static ggml_status ggml_backend_iqk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
-    ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend->context;
-
-    // fallback when graph_plan is not used: allocate the work buffer on demand
-    const size_t work_size = ggml_iqk_graph_work_size(cgraph);
-    if (ctx->work_size < work_size) {
-        GGML_LOG_INFO("IQK: compute enlarge word data [%zu] -> [%zu]\n", ctx->work_size, work_size);
-        ctx->work_data.reset(new char[work_size]);
-        ctx->work_size = work_size;
-    }
-
-    return ggml_iqk_graph_compute_impl(backend, cgraph, ctx->work_data.get());
-}
-
-// total work buffer needed to quantize src1 for every matmul node in the graph
-static size_t ggml_iqk_graph_work_size(const ggml_cgraph * cgraph) {
-    size_t work_size = 0;
-    for (int i = 0; i < cgraph->n_nodes; ++i) {
-        const ggml_tensor * node = cgraph->nodes[i];
-        if (node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_MUL_MAT_ID) {
-            continue;
-        }
-        const ggml_tensor * src1 = node->src[1];
-        if (src1 == nullptr || src1->type != GGML_TYPE_F32) {
-            continue;
-        }
-        const enum ggml_type typeB = ggml_iqk_vec_dot_type(node->src[0]->type);
-        work_size = std::max(work_size, ggml_iqk_src1_work_size(src1, typeB));
-    }
-    return work_size;
-}
-
-struct ggml_backend_plan_iqk {
-    ggml_backend_iqk_context * ctx;
-    ggml_cgraph * cgraph;
-    std::unique_ptr<char[]> work_data;
-    size_t work_size;
-};
-
-static ggml_backend_graph_plan_t ggml_backend_iqk_graph_plan_create(ggml_backend_t backend, const struct ggml_cgraph * cgraph) {
-    ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend->context;
-
-    ggml_backend_plan_iqk * plan = new ggml_backend_plan_iqk;
-    plan->ctx = ctx;
-    plan->cgraph = (ggml_cgraph *) cgraph;
-    plan->work_size = ggml_iqk_graph_work_size(cgraph);
-    if (plan->work_size > 0) {
-        plan->work_data.reset(new char[plan->work_size]);
-    }
-    GGML_LOG_INFO("IQK: create plan [%p] with [%zu] word data\n", (void*)plan, plan->work_size);
-
-    return plan;
-}
-
-static void ggml_backend_iqk_graph_plan_free(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
-    ggml_backend_plan_iqk * iqk_plan = (ggml_backend_plan_iqk *) plan;
-    GGML_LOG_INFO("IQK: free plan [%p]\n", (void*)plan);
-    delete iqk_plan;
-
-    GGML_UNUSED(backend);
-}
-
-static enum ggml_status ggml_backend_iqk_graph_plan_compute(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
-    ggml_backend_plan_iqk * iqk_plan = (ggml_backend_plan_iqk *) plan;
-    return ggml_iqk_graph_compute_impl(backend, iqk_plan->cgraph, iqk_plan->work_data.get());
 }
 
 static struct ggml_backend_i ggml_backend_iqk_i = {
@@ -1286,10 +1249,10 @@ static struct ggml_backend_i ggml_backend_iqk_i = {
     /* .get_tensor_2d_async     = */ NULL,
     /* .cpy_tensor_async        = */ NULL,
     /* .synchronize             = */ NULL,
-    /* .graph_plan_create       = */ ggml_backend_iqk_graph_plan_create,
-    /* .graph_plan_free         = */ ggml_backend_iqk_graph_plan_free,
+    /* .graph_plan_create       = */ NULL,
+    /* .graph_plan_free         = */ NULL,
     /* .graph_plan_update       = */ NULL,
-    /* .graph_plan_compute      = */ ggml_backend_iqk_graph_plan_compute,
+    /* .graph_plan_compute      = */ NULL,
     /* .graph_compute           = */ ggml_backend_iqk_graph_compute,
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
