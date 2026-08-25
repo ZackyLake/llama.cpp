@@ -654,7 +654,7 @@ struct ggml_compute_state {
 static inline void ggml_thread_cpu_relax(void) {
     __asm__ volatile("yield" ::: "memory");
 }
-#elif defined(__x86_64__)
+#elif defined(__x86_64__) || (defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64)))
 static inline void ggml_thread_cpu_relax(void) {
     _mm_pause();
 }
@@ -730,10 +730,21 @@ void ggml_barrier(struct ggml_threadpool * tp) {
     }
 
     // wait for other threads
+    const int n_spin_before_sleep = 100000;
     while (atomic_load_explicit(&tp->n_barrier_passed, memory_order_relaxed) == n_passed) {
-        ggml_thread_cpu_relax();
+        for (int i = 0; i < n_spin_before_sleep; ++i) {
+            if (atomic_load_explicit(&tp->n_barrier_passed, memory_order_relaxed) != n_passed) {
+                goto done;
+            }
+            ggml_thread_cpu_relax();
+        }
+#    if defined(_WIN32)
+        SwitchToThread();
+#    else
+        sched_yield();
+#    endif
     }
-
+    done:
     // exit barrier (full seq-cst fence)
     // TSAN doesn't support standalone fence yet, we use a dummy read-modify-write instead
     #ifdef GGML_TSAN_ENABLED
@@ -2398,9 +2409,12 @@ static void clear_numa_thread_affinity(void) {
 // (the linux implementation may also work on BSD, someone should test)
 static void set_numa_thread_affinity(int thread_n) 
 {
+    if (!ggml_is_numa()) {
+        return;
+    }
     SYSTEM_INFO info;
     GetSystemInfo(&info);
-    const char *thr = getenv("ggmlthr");
+    const char * const thr = getenv("ggmlthr");
     unsigned tid = 0;
     if (thr == NULL)
     {
