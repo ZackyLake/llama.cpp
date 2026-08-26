@@ -225,7 +225,7 @@ struct ggml_iqk_compute_task {
 
 struct iqk_compute_state_shared;
 
-static void ggml_iqk_compute_node(iqk_compute_state_shared * shared);
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, uint32_t ith);
 
 struct iqk_compute_state_shared {
     ggml_backend_iqk_context * backend = nullptr;
@@ -233,6 +233,7 @@ struct iqk_compute_state_shared {
     std::vector<ggml_iqk_compute_task> compute_tasks;
     std::vector<ggml_iqk_fusion_plan> fusion_plans;
     std::unique_ptr<char[]> work_data;
+    std::vector<uint32_t> tasks_per_thread;
 
     int n_threads = 0;
     std::atomic<int> n_barrier{0};
@@ -362,6 +363,25 @@ struct iqk_threadpool {
         }
     }
 
+    void check_task_distribution() {
+        if (!shared || shared->tasks_per_thread.empty()) {
+            return;
+        }
+
+        uint64_t total = 0;
+        for (uint32_t count : shared->tasks_per_thread) {
+            total += count;
+        }
+        const double average = (double) total / shared->tasks_per_thread.size();
+        for (size_t ith = 0; ith < shared->tasks_per_thread.size(); ++ith) {
+            const uint32_t count = shared->tasks_per_thread[ith];
+            if (count > 0 && (double) count < average*0.2) {
+                GGML_LOG_WARN("IQK: worker %zu completed %u tasks, below 20%% of average %.1f (total tasks: %llu)\n",
+                        ith, count, average, (unsigned long long) total);
+            }
+        }
+    }
+
     uint32_t get_n_threads() {
         std::lock_guard<std::mutex> lock(mutex);
         return std::min<uint32_t>(n_threads, (uint32_t) threads.size());
@@ -392,7 +412,8 @@ struct iqk_threadpool {
                     apply_thread_config(ith);
                     break;
                 case iqk_threadpool_state::compute:
-                    ggml_iqk_compute_node(shared.get());
+                    GGML_ASSERT(ith < shared->tasks_per_thread.size());
+                    ggml_iqk_compute_node(shared.get(), ith);
                     break;
                 default:
                     break;
@@ -401,8 +422,8 @@ struct iqk_threadpool {
         }
     }
 
-    // Drain the previous state, then dispatch a new state. Compute returns after
-    // the first worker finishes; config and stop wait for all workers.
+    // Drain the previous state, then dispatch a new state. Compute, config and
+    // stop wait for all workers.
     // `count` is the number of worker threads; workers cover bits 0..count-1.
     void dispatch_locked(size_t count, iqk_threadpool_state st) {
         wait_for_workers();
@@ -417,6 +438,7 @@ struct iqk_threadpool {
 
         if (st == iqk_threadpool_state::compute) {
             act_mask.wait(initial_mask, std::memory_order_acquire);
+            wait_for_workers();
             state.store(iqk_threadpool_state::idle, std::memory_order_relaxed);
             return;
         }
@@ -463,6 +485,7 @@ struct iqk_threadpool {
     bool compute(std::unique_ptr<iqk_compute_state_shared> next_shared) {
         std::lock_guard<std::mutex> lock(mutex);
         wait_for_workers();
+        check_task_distribution();
         GGML_ASSERT(next_shared != nullptr);
         this->shared = std::move(next_shared);
         dispatch_locked((size_t) shared->n_threads, iqk_threadpool_state::compute);
@@ -1063,7 +1086,8 @@ static void ggml_iqk_quantize_src1(const ggml_tensor * src1,
 static void ggml_iqk_compute_forward_mul_mat_fused(
         const ggml_iqk_fusion_plan & plan,
         ggml_iqk_node_state * state,
-        iqk_compute_state_shared * shared) {
+    iqk_compute_state_shared * shared,
+    uint32_t ith) {
     const ggml_tensor * gate_weight = plan.gate_weight;
     const ggml_tensor * up_weight   = plan.up_weight;
     const ggml_tensor * input       = plan.input;
@@ -1073,6 +1097,7 @@ static void ggml_iqk_compute_forward_mul_mat_fused(
     const enum ggml_type typeB = ggml_iqk_vec_dot_type(gate_weight->type);
     const void * input_data = shared->work_data.get();
     const size_t input_row_size = ggml_row_size(typeB, input->ne[0]);
+    uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
     const int quantize_nth = (int) state->latches[0].get_count();
@@ -1094,6 +1119,7 @@ static void ggml_iqk_compute_forward_mul_mat_fused(
 
     const int mul_mat_nth = (int) state->latches[1].get_count();
     while (const auto task = state->latches[1].next(completed)) {
+        ++task_count;
         for (int64_t i13 = 0; i13 < input->ne[3]; ++i13) {
             for (int64_t i12 = 0; i12 < input->ne[2]; ++i12) {
                 const int64_t gate_i12 = i12/r2;
@@ -1119,12 +1145,19 @@ static void ggml_iqk_compute_forward_mul_mat_fused(
         completed = task;
     }
 
+    const uint32_t total_tasks = state->latches[1].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op MUL_MAT_FUSE (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
 static void ggml_iqk_compute_forward_mul_mat_id_fused(
         const ggml_iqk_fusion_plan & plan,
         ggml_iqk_node_state * state,
-        iqk_compute_state_shared * shared) {
+        iqk_compute_state_shared * shared,
+        uint32_t ith) {
     const ggml_tensor * gate_weight = plan.gate_weight;
     const ggml_tensor * up_weight   = plan.up_weight;
     const ggml_tensor * input       = plan.input;
@@ -1134,6 +1167,7 @@ static void ggml_iqk_compute_forward_mul_mat_id_fused(
 
     const int n_ids = ids->ne[0];
     const int n_as = gate_weight->ne[2];
+    uint32_t task_count = 0;
     if (input->ne[3] != 1 || gate_weight->ne[3] != 1 || glu->ne[3] != 1) {
         shared->ec.store(1, std::memory_order_release);
         return;
@@ -1188,6 +1222,7 @@ static void ggml_iqk_compute_forward_mul_mat_id_fused(
     const size_t up_stride = up_weight->nb[1];
 
     while (const auto task = state->latches[1].next(completed)) {
+        ++task_count;
         const int cur_a = state->active_experts[*task/state->chunks_per_expert];
         const int chunk = *task%state->chunks_per_expert;
         const int64_t n_rows = state->matrix_rows[cur_a].size();
@@ -1207,12 +1242,20 @@ static void ggml_iqk_compute_forward_mul_mat_id_fused(
         completed = task;
     }
 
+    const uint32_t total_tasks = state->latches[1].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op MUL_MAT_ID_FUSE (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
 static void ggml_iqk_compute_forward_glu(const ggml_tensor * dst,
-        ggml_iqk_node_state * state, iqk_compute_state_shared * shared) {
+    ggml_iqk_node_state * state, iqk_compute_state_shared * shared,
+    uint32_t ith) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
+    uint32_t task_count = 0;
     if (src0 == nullptr || src1 == nullptr || src0->type != GGML_TYPE_F32 ||
         src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
         ggml_get_op_params_i32(dst, 1) != 0) {
@@ -1227,6 +1270,7 @@ static void ggml_iqk_compute_forward_glu(const ggml_tensor * dst,
     std::optional<uint32_t> completed;
     const int nth = (int) state->latches[0].get_count();
     while (const auto task = state->latches[0].next(completed)) {
+        ++task_count;
         if (!iqk_compute_glu(src0->ne[0], ggml_nrows(src0), op, alpha, limit,
                 (const float *) src0->data, src0->nb[1],
                 (const float *) src1->data, src1->nb[1],
@@ -1235,16 +1279,27 @@ static void ggml_iqk_compute_forward_glu(const ggml_tensor * dst,
         }
         completed = task;
     }
+
+    const uint32_t total_tasks = state->latches[0].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op GLU (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
-static void ggml_iqk_compute_forward_clamp(const ggml_tensor * dst, ggml_iqk_node_state * state) {
+static void ggml_iqk_compute_forward_clamp(const ggml_tensor * dst,
+        ggml_iqk_node_state * state, iqk_compute_state_shared * shared,
+        uint32_t ith) {
     const float min = ggml_get_op_params_f32(dst, 0);
     const float max = ggml_get_op_params_f32(dst, 1);
     float * data = (float *) dst->data;
     const int64_t n = ggml_nelements(dst);
+    uint32_t task_count = 0;
     std::optional<uint32_t> completed;
     const int nth = (int) state->latches[0].get_count();
     while (const auto task = state->latches[0].next(completed)) {
+        ++task_count;
         const int64_t dr = (n + nth - 1)/nth;
         const int64_t i0 = dr*(*task);
         const int64_t i1 = std::min<int64_t>(i0 + dr, n);
@@ -1253,12 +1308,20 @@ static void ggml_iqk_compute_forward_clamp(const ggml_tensor * dst, ggml_iqk_nod
         }
         completed = task;
     }
+
+    const uint32_t total_tasks = state->latches[0].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op CLAMP (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
 static void ggml_iqk_compute_forward_mul_mat(
     ggml_tensor * dst,
     ggml_iqk_node_state * state,
-    iqk_compute_state_shared * shared) {
+        iqk_compute_state_shared * shared,
+        uint32_t ith) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
@@ -1267,6 +1330,7 @@ static void ggml_iqk_compute_forward_mul_mat(
     const enum ggml_type typeB = ggml_iqk_vec_dot_type(src0->type);
     const void * src1_data = shared->work_data.get();
     const size_t src1_row_size = ggml_row_size(typeB, src1->ne[0]);
+    uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
     const int quantize_nth = (int) state->latches[0].get_count();
@@ -1278,6 +1342,7 @@ static void ggml_iqk_compute_forward_mul_mat(
 
     const int mul_mat_nth = (int) state->latches[1].get_count();
     while (const auto task = state->latches[1].next(completed)) {
+        ++task_count;
         if (!iqk_mul_mat_4d(ne01, ne11, ne00,
                 ne02, ne03, ne12, ne13, nb02, nb03,
                 src1_row_size*ne11, src1_row_size*ne11*ne12,
@@ -1290,18 +1355,26 @@ static void ggml_iqk_compute_forward_mul_mat(
         completed = task;
     }
 
+    const uint32_t total_tasks = state->latches[1].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op MUL_MAT (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
 static void ggml_iqk_compute_forward_mul_mat_id(
             ggml_tensor * dst,
             ggml_iqk_node_state * state,
-            iqk_compute_state_shared * shared) {
+            iqk_compute_state_shared * shared,
+            uint32_t ith) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
     const ggml_tensor * ids  = dst->src[2];
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
+    uint32_t task_count = 0;
     if (ne2 == 0 || ne11 == 0) {
         return;
     }
@@ -1355,6 +1428,7 @@ static void ggml_iqk_compute_forward_mul_mat_id(
     completed.reset();
 
     while (const auto task = state->latches[1].next(completed)) {
+        ++task_count;
         const int cur_a = state->active_experts[*task/state->chunks_per_expert];
         const int chunk = *task%state->chunks_per_expert;
         const int64_t n_rows = state->matrix_rows[cur_a].size();
@@ -1370,6 +1444,12 @@ static void ggml_iqk_compute_forward_mul_mat_id(
         completed = task;
     }
 
+    const uint32_t total_tasks = state->latches[1].get_count();
+    if (task_count == 0) {
+        GGML_LOG_WARN("IQK: worker %u completed zero tasks for op MUL_MAT_ID (total tasks: %u)\n",
+            ith, total_tasks);
+    }
+    shared->tasks_per_thread[ith] += task_count;
 }
 
 
@@ -1386,32 +1466,32 @@ static void ggml_backend_iqk_free(ggml_backend_t backend) {
     delete backend;
 }
 
-static void ggml_iqk_compute_node(iqk_compute_state_shared * shared) {
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, uint32_t ith) {
     for (size_t index = 0; index < shared->compute_tasks.size(); ++index) {
         ggml_iqk_compute_task & task = shared->compute_tasks[index];
 
         if (task.is_fused) {
             const ggml_iqk_fusion_plan & plan = shared->fusion_plans[task.index];
             if (plan.use_id) {
-                ggml_iqk_compute_forward_mul_mat_id_fused(plan, &task.node_state, shared);
+                ggml_iqk_compute_forward_mul_mat_id_fused(plan, &task.node_state, shared, ith);
             } else {
-                ggml_iqk_compute_forward_mul_mat_fused(plan, &task.node_state, shared);
+                ggml_iqk_compute_forward_mul_mat_fused(plan, &task.node_state, shared, ith);
             }
         } else {
             ggml_tensor * node = shared->cgraph->nodes[task.index];
             ggml_iqk_node_state * state = &task.node_state;
             switch (node->op) {
                 case GGML_OP_MUL_MAT:
-                    ggml_iqk_compute_forward_mul_mat(node, state, shared);
+                    ggml_iqk_compute_forward_mul_mat(node, state, shared, ith);
                     break;
                 case GGML_OP_MUL_MAT_ID:
-                    ggml_iqk_compute_forward_mul_mat_id(node, state, shared);
+                    ggml_iqk_compute_forward_mul_mat_id(node, state, shared, ith);
                     break;
                 case GGML_OP_GLU:
-                    ggml_iqk_compute_forward_glu(node, state, shared);
+                    ggml_iqk_compute_forward_glu(node, state, shared, ith);
                     break;
                 case GGML_OP_CLAMP:
-                    ggml_iqk_compute_forward_clamp(node, state);
+                    ggml_iqk_compute_forward_clamp(node, state, shared, ith);
                     break;
                 default:
                     GGML_ABORT("%s: unsupported op %s\n", __func__, ggml_op_desc(node));
@@ -1429,6 +1509,7 @@ static ggml_status ggml_backend_iqk_graph_compute(ggml_backend_t backend, ggml_c
 
     shared->n_threads = (int) ctx->threadpool.get_n_threads();
     GGML_ASSERT(shared->n_threads > 0);
+    shared->tasks_per_thread.resize((size_t) shared->n_threads, 0);
     const size_t work_size = ggml_iqk_build_compute_tasks(shared.get());
 
     if (work_size > 0) {
