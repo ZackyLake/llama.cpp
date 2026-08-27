@@ -158,6 +158,21 @@ struct ggml_iqk_node_state {
     int chunks_per_expert = 1;
 };
 
+struct local_statistics {
+    uint32_t ith = 0;
+    uint32_t executed_nodes = 0;
+    uint32_t missed_nodes = 0;
+    uint32_t done_work = 0;
+    uint32_t total_work = 0;
+
+    void accumulate(uint32_t task_count, uint32_t total_tasks) {
+        ++executed_nodes;
+        missed_nodes += task_count == 0;
+        done_work += task_count;
+        total_work += total_tasks;
+    }
+};
+
 static constexpr int GGML_IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
 static constexpr int GGML_IQK_EXPERT_CHUNK_MIN_NX = 32;
 static constexpr int GGML_IQK_DENSE_CHUNK_NX = 64;
@@ -227,7 +242,7 @@ struct ggml_iqk_compute_task {
 
 struct iqk_compute_state_shared;
 
-static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, uint32_t ith);
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, local_statistics & local);
 
 struct iqk_compute_state_shared {
     ggml_backend_iqk_context * backend = nullptr;
@@ -308,6 +323,11 @@ enum class iqk_threadpool_state {
     stop,
 };
 
+struct alignas(64) thread_statistic {
+    std::atomic<uint64_t> nodes{0};
+    std::atomic<uint64_t> work{0};
+};
+
 // Persistent threadpool. Worker threads are spawned on demand and reused
 // across graphs. The main thread only dispatches and waits.
 struct iqk_threadpool {
@@ -322,6 +342,8 @@ struct iqk_threadpool {
 
     std::vector<std::thread> threads;
     uint32_t n_threads = 1;
+    std::array<thread_statistic, 64> thread_stats;
+    uint64_t last_statistic_seq = 0;
 
     // CPU placement params, forwarded from the CPU backend via private API
     ggml_threadpool_params params = {};
@@ -382,6 +404,52 @@ struct iqk_threadpool {
         }
     }
 
+    void statistic() {
+        std::array<uint32_t, 64> executed_nodes = {};
+        std::array<uint32_t, 64> missed_nodes = {};
+        std::array<uint32_t, 64> done_work = {};
+        uint64_t done_work_sum = 0;
+
+        for (uint32_t ith = 0; ith < threads.size(); ++ith) {
+            const uint64_t nodes = thread_stats[ith].nodes.exchange(0, std::memory_order_relaxed);
+            const uint64_t work = thread_stats[ith].work.exchange(0, std::memory_order_relaxed);
+            executed_nodes[ith] = (uint32_t) nodes;
+            missed_nodes[ith] = (uint32_t) (nodes >> 32);
+            done_work[ith] = (uint32_t) work;
+            done_work_sum += done_work[ith];
+        }
+
+        if (done_work_sum == 0) {
+            return;
+        }
+
+        auto append_percentage = [](std::string & line, float value) {
+            char buffer[16];
+            if (value >= 100.0f) {
+                std::snprintf(buffer, sizeof(buffer), "%5.1f", value);
+            } else if (value >= 10.0f) {
+                std::snprintf(buffer, sizeof(buffer), "%5.2f", value);
+            } else {
+                std::snprintf(buffer, sizeof(buffer), "%5.3f", value);
+            }
+            line += " ";
+            line += buffer;
+        };
+
+        std::string statistics = "IQK statistics:";
+        for (uint32_t ith = 0; ith < threads.size(); ++ith) {
+            std::string thread_work;
+            append_percentage(thread_work, 100.0f * done_work[ith] / done_work_sum);
+            statistics += thread_work;
+            statistics += "(";
+            statistics += std::to_string(missed_nodes[ith]);
+            statistics += "/";
+            statistics += std::to_string(executed_nodes[ith]);
+            statistics += ")";
+        }
+        GGML_LOG_INFO("%s\n", statistics.c_str());
+    }
+
     uint32_t get_n_threads() {
         std::lock_guard<std::mutex> lock(mutex);
         return std::min<uint32_t>(n_threads, (uint32_t) threads.size());
@@ -412,8 +480,14 @@ struct iqk_threadpool {
                 if ((local_shared->act_mask.load(std::memory_order_acquire) & bit) == 0) {
                     continue;
                 }
-                ggml_iqk_compute_node(local_shared.get(), ith);
+                local_statistics local = {};
+                local.ith = ith;
+                ggml_iqk_compute_node(local_shared.get(), local);
                 local_shared->complete(bit);
+                const uint64_t nodes = (uint64_t) local.executed_nodes | ((uint64_t) local.missed_nodes << 32);
+                const uint64_t work = (uint64_t) local.done_work | ((uint64_t) local.total_work << 32);
+                thread_stats[ith].nodes.fetch_add(nodes, std::memory_order_relaxed);
+                thread_stats[ith].work.fetch_add(work, std::memory_order_relaxed);
                 continue;
             }
 
@@ -490,6 +564,10 @@ struct iqk_threadpool {
         next_shared->initial_mask = iqk_mask_bits(0, (uint32_t) next_shared->n_threads);
         shared.store(next_shared, std::memory_order_release);
         dispatch(next_shared->initial_mask, iqk_threadpool_state::compute, next_shared->act_mask);
+        if (next_shared->seq - last_statistic_seq > 10000) {
+            last_statistic_seq = next_shared->seq;
+            statistic();
+        }
         next_shared->wait_any_finished();
 
         return next_shared->ec.load(std::memory_order_acquire) == 0;
@@ -1107,7 +1185,7 @@ static void ggml_iqk_compute_forward_mul_mat_fused(
         const ggml_iqk_fusion_plan & plan,
         ggml_iqk_node_state * state,
     iqk_compute_state_shared * shared,
-    uint32_t ith) {
+    local_statistics & local) {
     uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
@@ -1166,17 +1244,14 @@ static void ggml_iqk_compute_forward_mul_mat_fused(
     }
 
     const uint32_t total_tasks = state->latches[1].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op MUL_MAT_FUSE (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 static void ggml_iqk_compute_forward_mul_mat_id_fused(
         const ggml_iqk_fusion_plan & plan,
         ggml_iqk_node_state * state,
         iqk_compute_state_shared * shared,
-        uint32_t ith) {
+    local_statistics & local) {
     uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
@@ -1261,15 +1336,12 @@ static void ggml_iqk_compute_forward_mul_mat_id_fused(
     }
 
     const uint32_t total_tasks = state->latches[1].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op MUL_MAT_ID_FUSE (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 static void ggml_iqk_compute_forward_glu(const ggml_tensor * dst,
     ggml_iqk_node_state * state, iqk_compute_state_shared * shared,
-    uint32_t ith) {
+    local_statistics & local) {
     uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
@@ -1292,15 +1364,12 @@ static void ggml_iqk_compute_forward_glu(const ggml_tensor * dst,
     }
 
     const uint32_t total_tasks = state->latches[0].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op GLU (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 static void ggml_iqk_compute_forward_clamp(const ggml_tensor * dst,
         ggml_iqk_node_state * state, iqk_compute_state_shared * shared,
-        uint32_t ith) {
+    local_statistics & local) {
     uint32_t task_count = 0;
     std::optional<uint32_t> completed;
     const int nth = (int) state->latches[0].get_count();
@@ -1321,17 +1390,14 @@ static void ggml_iqk_compute_forward_clamp(const ggml_tensor * dst,
     }
 
     const uint32_t total_tasks = state->latches[0].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op CLAMP (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 static void ggml_iqk_compute_forward_mul_mat(
     ggml_tensor * dst,
     ggml_iqk_node_state * state,
         iqk_compute_state_shared * shared,
-        uint32_t ith) {
+        local_statistics & local) {
     uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
@@ -1369,17 +1435,14 @@ static void ggml_iqk_compute_forward_mul_mat(
     }
 
     const uint32_t total_tasks = state->latches[1].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op MUL_MAT (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 static void ggml_iqk_compute_forward_mul_mat_id(
             ggml_tensor * dst,
             ggml_iqk_node_state * state,
             iqk_compute_state_shared * shared,
-            uint32_t ith) {
+            local_statistics & local) {
     uint32_t task_count = 0;
 
     std::optional<uint32_t> completed;
@@ -1461,10 +1524,7 @@ static void ggml_iqk_compute_forward_mul_mat_id(
     }
 
     const uint32_t total_tasks = state->latches[1].get_count();
-    if (task_count == 0) {
-        GGML_LOG_DEBUG("IQK: worker %u completed zero tasks for op MUL_MAT_ID (total tasks: %u)\n",
-            ith, total_tasks);
-    }
+    local.accumulate(task_count, total_tasks);
 }
 
 
@@ -1481,31 +1541,31 @@ static void ggml_backend_iqk_free(ggml_backend_t backend) {
     delete backend;
 }
 
-static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, uint32_t ith) {
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, local_statistics & local) {
     for (size_t index = 0; index < shared->compute_tasks.size(); ++index) {
         ggml_iqk_compute_task & task = shared->compute_tasks[index];
 
         if (task.is_fused) {
             const ggml_iqk_fusion_plan & plan = shared->fusion_plans[task.index];
             if (plan.use_id) {
-                ggml_iqk_compute_forward_mul_mat_id_fused(plan, &task.node_state, shared, ith);
+                ggml_iqk_compute_forward_mul_mat_id_fused(plan, &task.node_state, shared, local);
             } else {
-                ggml_iqk_compute_forward_mul_mat_fused(plan, &task.node_state, shared, ith);
+                ggml_iqk_compute_forward_mul_mat_fused(plan, &task.node_state, shared, local);
             }
         } else {
             ggml_iqk_node_state * state = &task.node_state;
             switch (task.op) {
                 case GGML_OP_MUL_MAT:
-                    ggml_iqk_compute_forward_mul_mat(task.node, state, shared, ith);
+                    ggml_iqk_compute_forward_mul_mat(task.node, state, shared, local);
                     break;
                 case GGML_OP_MUL_MAT_ID:
-                    ggml_iqk_compute_forward_mul_mat_id(task.node, state, shared, ith);
+                    ggml_iqk_compute_forward_mul_mat_id(task.node, state, shared, local);
                     break;
                 case GGML_OP_GLU:
-                    ggml_iqk_compute_forward_glu(task.node, state, shared, ith);
+                    ggml_iqk_compute_forward_glu(task.node, state, shared, local);
                     break;
                 case GGML_OP_CLAMP:
-                    ggml_iqk_compute_forward_clamp(task.node, state, shared, ith);
+                    ggml_iqk_compute_forward_clamp(task.node, state, shared, local);
                     break;
                 default:
                     GGML_ABORT("%s: unsupported op %s\n", __func__, ggml_op_name(task.op));
