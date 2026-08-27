@@ -601,8 +601,7 @@ static bool ggml_iqk_glu_debug_enabled() {
     return enabled;
 }
 
-static std::set<uintptr_t> ggml_iqk_fused_node_ids;
-static std::mutex ggml_iqk_fused_nodes_mutex;
+static std::set<uintptr_t> ggml_iqk_task_node_ids;
 
 static bool ggml_iqk_is_supported_type(enum ggml_type type) {
     switch (type) {
@@ -1019,12 +1018,9 @@ static bool ggml_iqk_make_fusion_plan(const ggml_cgraph * cgraph, int glu_index,
            (plan->up_mat->flags & GGML_TENSOR_FLAG_OUTPUT) == 0;
 }
 
-static void ggml_iqk_log_fused_node(const ggml_tensor * node) {
+static bool ggml_iqk_task_node_is_new(const ggml_tensor * node) {
     const uintptr_t node_id = reinterpret_cast<uintptr_t>(node);
-    std::lock_guard<std::mutex> lock(ggml_iqk_fused_nodes_mutex);
-    if (ggml_iqk_fused_node_ids.insert(node_id).second) {
-        GGML_LOG_INFO("IQK: fused GLU node %p (%s)\n", (const void *) node_id, ggml_get_name(node));
-    }
+    return ggml_iqk_task_node_ids.insert(node_id).second;
 }
 
 static size_t ggml_iqk_src1_work_size(const ggml_tensor * src1, enum ggml_type type) {
@@ -1038,8 +1034,21 @@ static size_t ggml_iqk_build_compute_tasks(iqk_compute_state_shared * shared) {
     const int n_nodes = shared->cgraph->n_nodes;
     std::vector<int> fusion_start_plan(n_nodes, -1);
     std::vector<uint8_t> fusion_skip(n_nodes, 0);
+    std::string node_logs;
+    std::string task_logs;
     size_t work_size = 0;
     shared->fusion_plans.clear();
+
+    for (int i = 0; i < n_nodes; ++i) {
+        const ggml_tensor * node = shared->cgraph->nodes[i];
+        if (!node_logs.empty()) {
+            node_logs += " ";
+        }
+        node_logs += ggml_get_name(node);
+        node_logs += "(";
+        node_logs += ggml_op_name(node->op);
+        node_logs += ")";
+    }
 
     for (int i = 0; i < n_nodes; ++i) {
         const ggml_tensor * node = shared->cgraph->nodes[i];
@@ -1096,6 +1105,15 @@ static size_t ggml_iqk_build_compute_tasks(iqk_compute_state_shared * shared) {
                 n_threads, ggml_iqk_task_count(op, shared->n_threads, nx), n_threads, n_threads,
             };
             shared->compute_tasks.emplace_back(true, plan_index, nullptr, latch_sizes);
+            if (ggml_iqk_task_node_is_new(plan.glu)) {
+                if (!task_logs.empty()) {
+                    task_logs += " ";
+                }
+                task_logs += ggml_get_name(plan.glu);
+                task_logs += "(";
+                task_logs += plan.use_id ? "fused mulmatid" : "fused mulmat";
+                task_logs += ")";
+            }
 
             if (plan.use_id) {
                 shared->compute_tasks.back().node_state.chunks_per_expert =
@@ -1126,6 +1144,15 @@ static size_t ggml_iqk_build_compute_tasks(iqk_compute_state_shared * shared) {
                 n_threads, ggml_iqk_task_count(node->op, shared->n_threads, nx), n_threads, n_threads,
             };
             shared->compute_tasks.emplace_back(false, node_index, node, latch_sizes);
+            if (ggml_iqk_task_node_is_new(node)) {
+                if (!task_logs.empty()) {
+                    task_logs += " ";
+                }
+                task_logs += ggml_get_name(node);
+                task_logs += "(";
+                task_logs += ggml_op_name(node->op);
+                task_logs += ")";
+            }
 
             if (node->op == GGML_OP_MUL_MAT_ID) {
                 shared->compute_tasks.back().node_state.chunks_per_expert =
@@ -1140,6 +1167,11 @@ static size_t ggml_iqk_build_compute_tasks(iqk_compute_state_shared * shared) {
                 }
             }
         }
+    }
+
+    if (!task_logs.empty()) {
+        GGML_LOG_DEBUG("IQK: create %zu tasks: [%s] -> [%s]\n",
+                shared->compute_tasks.size(), node_logs.c_str(), task_logs.c_str());
     }
 
     return work_size;
