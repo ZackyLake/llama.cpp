@@ -61,6 +61,16 @@ extern "C" {
     GGML_BACKEND_API void                          ggml_threadpool_pause         (struct ggml_threadpool * threadpool);
     GGML_BACKEND_API void                          ggml_threadpool_resume        (struct ggml_threadpool * threadpool);
 
+    typedef void (*ggml_threadpool_task_t)          (int ith, int nth);
+    typedef int  (*ggml_threadpool_set_n_threads_t) (int n_threads);
+    typedef void (*ggml_threadpool_barrier_t)       (void);
+    typedef void (*ggml_threadpool_run_task_t)      (ggml_threadpool_task_t task);
+
+    GGML_BACKEND_API bool ggml_threadpool_set_external(
+            ggml_threadpool_set_n_threads_t set_n_threads,
+            ggml_threadpool_barrier_t        barrier,
+            ggml_threadpool_run_task_t       run_task);
+
     // ggml_graph_plan() has to be called before ggml_graph_compute()
     // when plan.work_size > 0, caller must allocate memory for plan.work_data
     GGML_BACKEND_API struct ggml_cplan ggml_graph_plan(

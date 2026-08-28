@@ -686,6 +686,9 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "ggml_backend_cpu_set_threadpool") == 0) {
         return (void *)ggml_backend_cpu_set_threadpool;
     }
+    if (strcmp(name, "ggml_threadpool_set_external") == 0) {
+        return (void *)ggml_threadpool_set_external;
+    }
 
     return NULL;
 
