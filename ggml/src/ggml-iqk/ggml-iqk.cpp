@@ -307,18 +307,11 @@ struct iqk_compute_state_shared {
 
     int n_threads = 0;
     uint64_t seq = 0;
-    uint64_t initial_mask = 0;
     std::atomic<uint64_t> act_mask{0};
     std::atomic<int> ec{0};
 
     void complete(uint64_t bit) {
         act_mask.fetch_and(~bit, std::memory_order_acq_rel);
-        act_mask.notify_one();
-    }
-
-    void wait_any_finished() {
-        GGML_ASSERT(initial_mask != 0);
-        act_mask.wait(initial_mask, std::memory_order_acquire);
     }
 
 };
@@ -345,15 +338,15 @@ struct alignas(64) thread_statistic {
     std::atomic<uint64_t> work{0};
 };
 
-// Persistent threadpool. Worker threads are spawned on demand and reused
-// across graphs. The main thread only dispatches and waits.
+// Persistent threadpool. The calling thread is thread 0 and worker threads
+// are spawned on demand and reused across graphs.
 struct iqk_threadpool {
     std::mutex mutex;
 
     // current graph (set before kickoff, read by workers)
     std::atomic<std::shared_ptr<iqk_compute_state_shared>> shared{nullptr};
 
-    std::atomic<uint64_t> act_mask{0}; // bitmask of workers still to act on the current state
+    std::atomic<uint64_t> act_mask{0}; // bit 0 is reserved for the calling thread
     std::atomic<uint64_t> dispatch_seq{0};
     std::atomic<iqk_threadpool_state> state{iqk_threadpool_state::idle};
     iqk_barrier barrier;
@@ -388,16 +381,17 @@ struct iqk_threadpool {
         }
         GGML_LOG_INFO("IQK: threadpool cpu mask: %s\n", ids.c_str());
 
+        apply_thread_config(0);
         if (threads.empty()) {
             return;
         }
 
         // trigger all workers to re-apply the config
-        const uint64_t mask = iqk_mask_bits(0, (uint32_t) threads.size());
+        const uint64_t mask = iqk_mask_bits(1, (uint32_t) threads.size() + 1);
         dispatch(mask, iqk_threadpool_state::config, act_mask);
     }
 
-    // apply priority and affinity for worker ith; thread ith binds to cpu_ids[ith]
+    // apply priority and affinity for thread ith; thread ith binds to cpu_ids[ith]
     void apply_thread_config(uint32_t ith) {
         ggml_thread_apply_priority(params.prio);
         if (ith < cpu_ids.size()) {
@@ -427,7 +421,7 @@ struct iqk_threadpool {
         std::array<uint32_t, 64> done_work = {};
         uint64_t done_work_sum = 0;
 
-        for (uint32_t ith = 0; ith < threads.size(); ++ith) {
+        for (uint32_t ith = 0; ith <= threads.size(); ++ith) {
             const uint64_t nodes = thread_stats[ith].nodes.exchange(0, std::memory_order_relaxed);
             const uint64_t work = thread_stats[ith].work.exchange(0, std::memory_order_relaxed);
             executed_nodes[ith] = (uint32_t) nodes;
@@ -454,7 +448,7 @@ struct iqk_threadpool {
         };
 
         std::string statistics = "IQK statistics:";
-        for (uint32_t ith = 0; ith < threads.size(); ++ith) {
+        for (uint32_t ith = 0; ith <= threads.size(); ++ith) {
             std::string thread_work;
             append_percentage(thread_work, 100.0f * done_work[ith] / done_work_sum);
             statistics += thread_work;
@@ -469,7 +463,19 @@ struct iqk_threadpool {
 
     uint32_t get_n_threads() {
         std::lock_guard<std::mutex> lock(mutex);
-        return std::min<uint32_t>(n_threads, (uint32_t) threads.size());
+        return std::min<uint32_t>(n_threads, (uint32_t) threads.size() + 1);
+    }
+
+    void run_compute(iqk_compute_state_shared * current_shared, uint32_t ith) {
+        const uint64_t bit = 1ULL << ith;
+        local_statistics local = {};
+        local.ith = ith;
+        ggml_iqk_compute_node(current_shared, local);
+        current_shared->complete(bit);
+        const uint64_t nodes = (uint64_t) local.executed_nodes | ((uint64_t) local.missed_nodes << 32);
+        const uint64_t work = (uint64_t) local.done_work | ((uint64_t) local.total_work << 32);
+        thread_stats[ith].nodes.fetch_add(nodes, std::memory_order_relaxed);
+        thread_stats[ith].work.fetch_add(work, std::memory_order_relaxed);
     }
 
     void worker(uint32_t ith) {
@@ -497,14 +503,7 @@ struct iqk_threadpool {
                 if ((local_shared->act_mask.load(std::memory_order_acquire) & bit) == 0) {
                     continue;
                 }
-                local_statistics local = {};
-                local.ith = ith;
-                ggml_iqk_compute_node(local_shared.get(), local);
-                local_shared->complete(bit);
-                const uint64_t nodes = (uint64_t) local.executed_nodes | ((uint64_t) local.missed_nodes << 32);
-                const uint64_t work = (uint64_t) local.done_work | ((uint64_t) local.total_work << 32);
-                thread_stats[ith].nodes.fetch_add(nodes, std::memory_order_relaxed);
-                thread_stats[ith].work.fetch_add(work, std::memory_order_relaxed);
+                run_compute(local_shared.get(), ith);
                 continue;
             }
 
@@ -515,7 +514,7 @@ struct iqk_threadpool {
             switch (current_state) {
                 case iqk_threadpool_state::external:
                     GGML_ASSERT(external_task != nullptr);
-                    external_task((int) ith + 1, barrier.get_n_threads());
+                    external_task((int) ith, barrier.get_n_threads());
                     complete(bit);
                     break;
                 case iqk_threadpool_state::stop:
@@ -544,20 +543,22 @@ struct iqk_threadpool {
     // Grow the pool after draining any active global dispatch.
     void resize(uint32_t requested_threads) {
         std::lock_guard<std::mutex> lock(mutex);
-        // act_mask is a uint64_t, so at most 64 workers
+        GGML_ASSERT(requested_threads > 0);
+        // act_mask is a uint64_t, so at most 64 threads including the caller
         requested_threads = std::min(requested_threads, 64u);
         n_threads = requested_threads;
+        const uint32_t requested_workers = requested_threads - 1;
         const uint32_t old = (uint32_t) threads.size();
-        if (requested_threads <= old) {
+        if (requested_workers <= old) {
             return;
         }
-        GGML_LOG_INFO("IQK: threadpool resize %u -> %u\n", old, requested_threads);
+        GGML_LOG_INFO("IQK: threadpool resize %u -> %u\n", old + 1, requested_threads);
         wait_all_pending();
-        threads.reserve(requested_threads);
+        threads.reserve(requested_workers);
         // set the bits for the new workers before spawning them
-        act_mask.store(iqk_mask_bits(old, requested_threads), std::memory_order_relaxed);
-        for (uint32_t i = old; i < requested_threads; ++i) {
-            threads.emplace_back(&iqk_threadpool::worker, this, i);
+        act_mask.store(iqk_mask_bits(old + 1, requested_threads), std::memory_order_relaxed);
+        for (uint32_t i = old; i < requested_workers; ++i) {
+            threads.emplace_back(&iqk_threadpool::worker, this, i + 1);
         }
     }
 
@@ -567,7 +568,7 @@ struct iqk_threadpool {
             return;
         }
         wait_all_pending();
-        const uint64_t mask = iqk_mask_bits(0, (uint32_t) threads.size());
+        const uint64_t mask = iqk_mask_bits(1, (uint32_t) threads.size() + 1);
         dispatch(mask, iqk_threadpool_state::stop, act_mask);
         wait_all_pending();
         shared.store(nullptr, std::memory_order_release);
@@ -582,14 +583,14 @@ struct iqk_threadpool {
         GGML_ASSERT(next_shared != nullptr);
         wait_all_pending();
         next_shared->seq = dispatch_seq.load(std::memory_order_relaxed) + 1;
-        next_shared->initial_mask = iqk_mask_bits(0, (uint32_t) next_shared->n_threads);
         shared.store(next_shared, std::memory_order_release);
-        dispatch(next_shared->initial_mask, iqk_threadpool_state::compute, next_shared->act_mask);
+        dispatch(iqk_mask_bits(0, (uint32_t) next_shared->n_threads),
+            iqk_threadpool_state::compute, next_shared->act_mask);
         if (next_shared->seq - last_statistic_seq > 10000) {
             last_statistic_seq = next_shared->seq;
             statistic();
         }
-        next_shared->wait_any_finished();
+        run_compute(next_shared.get(), 0);
 
         return next_shared->ec.load(std::memory_order_acquire) == 0;
     }
@@ -625,7 +626,7 @@ static void ggml_iqk_external_run_task(ggml_threadpool_task_t task) {
     std::lock_guard<std::mutex> lock(threadpool.mutex);
     threadpool.wait_all_pending();
     threadpool.external_task = task;
-    threadpool.dispatch(iqk_mask_bits(0, (uint32_t) n_threads - 1), iqk_threadpool_state::external, threadpool.act_mask);
+    threadpool.dispatch(iqk_mask_bits(1, (uint32_t) n_threads), iqk_threadpool_state::external, threadpool.act_mask);
     task(0, n_threads);
     threadpool.external_task = nullptr;
 }
