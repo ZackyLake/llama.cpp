@@ -41,6 +41,9 @@
 #endif
 
 struct ggml_backend_iqk_context;
+struct iqk_threadpool;
+
+static iqk_threadpool * g_iqk_external_threadpool = nullptr;
 
 static inline void iqk_thread_cpu_relax(void) {
 #if defined(_WIN32)
@@ -240,36 +243,22 @@ struct ggml_iqk_compute_task {
     ggml_iqk_node_state node_state;
 };
 
-struct iqk_compute_state_shared;
-
-static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, local_statistics & local);
-
-struct iqk_compute_state_shared {
-    ggml_backend_iqk_context * backend = nullptr;
-    ggml_cgraph * cgraph = nullptr;
-    std::vector<ggml_iqk_compute_task> compute_tasks;
-    std::vector<ggml_iqk_fusion_plan> fusion_plans;
-    std::unique_ptr<char[]> work_data;
-
-    int n_threads = 0;
-    uint64_t seq = 0;
-    uint64_t initial_mask = 0;
-    std::atomic<uint64_t> act_mask{0};
+struct iqk_barrier {
+    std::atomic<int> n_threads{1};
     std::atomic<int> n_barrier{0};
     std::atomic<int> n_barrier_passed{0};
-    std::atomic<int> ec{0};
 
-    void complete(uint64_t bit) {
-        act_mask.fetch_and(~bit, std::memory_order_acq_rel);
-        act_mask.notify_one();
+    void set_n_threads(int value) {
+        GGML_ASSERT(value > 0);
+        n_threads.store(value, std::memory_order_relaxed);
     }
 
-    void wait_any_finished() {
-        GGML_ASSERT(initial_mask != 0);
-        act_mask.wait(initial_mask, std::memory_order_acquire);
+    int get_n_threads() const {
+        return n_threads.load(std::memory_order_relaxed);
     }
 
-    void barrier(){
+    void wait() {
+        const int n_threads = get_n_threads();
         if (n_threads == 1) {
             return;
         }
@@ -283,11 +272,9 @@ struct iqk_compute_state_shared {
             return;
         }
 
-        // spin a bounded number of times before yielding, so the last thread is
-        // not starved by the scheduler while the others spin
-        const int n_spin_before_sleep = 100000;
+        const int n_spin_before_yield = 100000;
         while (n_barrier_passed.load(std::memory_order_relaxed) == n_passed) {
-            for (int i = 0; i < n_spin_before_sleep; ++i) {
+            for (int i = 0; i < n_spin_before_yield; ++i) {
                 if (n_barrier_passed.load(std::memory_order_relaxed) != n_passed) {
                     goto done;
                 }
@@ -307,6 +294,35 @@ struct iqk_compute_state_shared {
     }
 };
 
+struct iqk_compute_state_shared;
+
+static void ggml_iqk_compute_node(iqk_compute_state_shared * shared, local_statistics & local);
+
+struct iqk_compute_state_shared {
+    ggml_backend_iqk_context * backend = nullptr;
+    ggml_cgraph * cgraph = nullptr;
+    std::vector<ggml_iqk_compute_task> compute_tasks;
+    std::vector<ggml_iqk_fusion_plan> fusion_plans;
+    std::unique_ptr<char[]> work_data;
+
+    int n_threads = 0;
+    uint64_t seq = 0;
+    uint64_t initial_mask = 0;
+    std::atomic<uint64_t> act_mask{0};
+    std::atomic<int> ec{0};
+
+    void complete(uint64_t bit) {
+        act_mask.fetch_and(~bit, std::memory_order_acq_rel);
+        act_mask.notify_one();
+    }
+
+    void wait_any_finished() {
+        GGML_ASSERT(initial_mask != 0);
+        act_mask.wait(initial_mask, std::memory_order_acquire);
+    }
+
+};
+
 
 // bitmask covering bits [begin, end); handles end == 64 where 1ULL << 64 is UB
 static uint64_t iqk_mask_bits(uint32_t begin, uint32_t end) {
@@ -320,6 +336,7 @@ enum class iqk_threadpool_state {
     idle,
     config,
     compute,
+    external,
     stop,
 };
 
@@ -339,6 +356,8 @@ struct iqk_threadpool {
     std::atomic<uint64_t> act_mask{0}; // bitmask of workers still to act on the current state
     std::atomic<uint64_t> dispatch_seq{0};
     std::atomic<iqk_threadpool_state> state{iqk_threadpool_state::idle};
+    iqk_barrier barrier;
+    ggml_threadpool_task_t external_task = nullptr;
 
     std::vector<std::thread> threads;
     uint32_t n_threads = 1;
@@ -352,6 +371,7 @@ struct iqk_threadpool {
     // store the CPU placement params; only update when they actually changed
     void set_params(const ggml_threadpool_params & tpp) {
         std::lock_guard<std::mutex> lock(mutex);
+        wait_all_pending();
         params = tpp;
 
         // collect the CPU indices allowed by the mask and build the log string
@@ -372,12 +392,9 @@ struct iqk_threadpool {
             return;
         }
 
-        // trigger all workers to re-apply the config and wait for them to finish
+        // trigger all workers to re-apply the config
         const uint64_t mask = iqk_mask_bits(0, (uint32_t) threads.size());
         dispatch(mask, iqk_threadpool_state::config, act_mask);
-        wait_all_pending();
-        shared.store(nullptr, std::memory_order_release);
-        state.store(iqk_threadpool_state::idle, std::memory_order_release);
     }
 
     // apply priority and affinity for worker ith; thread ith binds to cpu_ids[ith]
@@ -496,6 +513,11 @@ struct iqk_threadpool {
             }
 
             switch (current_state) {
+                case iqk_threadpool_state::external:
+                    GGML_ASSERT(external_task != nullptr);
+                    external_task((int) ith + 1, barrier.get_n_threads());
+                    complete(bit);
+                    break;
                 case iqk_threadpool_state::stop:
                     complete(bit);
                     return;
@@ -519,7 +541,7 @@ struct iqk_threadpool {
         dispatch_seq.notify_all();
     }
 
-    // Grow the pool after draining any active dispatch.
+    // Grow the pool after draining any active global dispatch.
     void resize(uint32_t requested_threads) {
         std::lock_guard<std::mutex> lock(mutex);
         // act_mask is a uint64_t, so at most 64 workers
@@ -531,15 +553,12 @@ struct iqk_threadpool {
         }
         GGML_LOG_INFO("IQK: threadpool resize %u -> %u\n", old, requested_threads);
         wait_all_pending();
-        shared.store(nullptr, std::memory_order_release);
         threads.reserve(requested_threads);
         // set the bits for the new workers before spawning them
         act_mask.store(iqk_mask_bits(old, requested_threads), std::memory_order_relaxed);
         for (uint32_t i = old; i < requested_threads; ++i) {
             threads.emplace_back(&iqk_threadpool::worker, this, i);
         }
-        // wait for all new workers to clear their bits before returning
-        wait_all_pending();
     }
 
     void stop() {
@@ -547,6 +566,7 @@ struct iqk_threadpool {
         if (threads.empty()) {
             return;
         }
+        wait_all_pending();
         const uint64_t mask = iqk_mask_bits(0, (uint32_t) threads.size());
         dispatch(mask, iqk_threadpool_state::stop, act_mask);
         wait_all_pending();
@@ -560,6 +580,7 @@ struct iqk_threadpool {
     bool compute(const std::shared_ptr<iqk_compute_state_shared> & next_shared) {
         std::lock_guard<std::mutex> lock(mutex);
         GGML_ASSERT(next_shared != nullptr);
+        wait_all_pending();
         next_shared->seq = dispatch_seq.load(std::memory_order_relaxed) + 1;
         next_shared->initial_mask = iqk_mask_bits(0, (uint32_t) next_shared->n_threads);
         shared.store(next_shared, std::memory_order_release);
@@ -574,12 +595,52 @@ struct iqk_threadpool {
     }
 };
 
+static int ggml_iqk_external_set_n_threads(int requested_threads) {
+    GGML_ASSERT(requested_threads > 0);
+
+    int n_threads = (int) g_iqk_external_threadpool->get_n_threads();
+    if (requested_threads > n_threads) {
+        g_iqk_external_threadpool->resize((uint32_t) requested_threads);
+        n_threads = (int) g_iqk_external_threadpool->get_n_threads();
+    }
+    n_threads = std::min(requested_threads, n_threads);
+    g_iqk_external_threadpool->barrier.set_n_threads(n_threads);
+    return n_threads;
+}
+
+static void ggml_iqk_external_barrier() {
+    g_iqk_external_threadpool->barrier.wait();
+}
+
+static void ggml_iqk_external_run_task(ggml_threadpool_task_t task) {
+    GGML_ASSERT(task != nullptr);
+
+    iqk_threadpool & threadpool = *g_iqk_external_threadpool;
+    const int n_threads = threadpool.barrier.get_n_threads();
+    if (n_threads == 1) {
+        task(0, 1);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(threadpool.mutex);
+    threadpool.wait_all_pending();
+    threadpool.external_task = task;
+    threadpool.dispatch(iqk_mask_bits(0, (uint32_t) n_threads - 1), iqk_threadpool_state::external, threadpool.act_mask);
+    task(0, n_threads);
+    threadpool.external_task = nullptr;
+}
+
 using ggml_backend_cpu_get_type_traits_t = const struct ggml_type_traits_cpu * (*)(enum ggml_type type);
+using ggml_threadpool_set_external_t = bool (*)(
+        ggml_threadpool_set_n_threads_t set_n_threads,
+        ggml_threadpool_barrier_t        barrier,
+        ggml_threadpool_run_task_t       run_task);
 
 struct ggml_backend_iqk_context {
     iqk_threadpool threadpool;
     ggml_backend_reg_t cpu_reg = nullptr;
     ggml_backend_cpu_get_type_traits_t cpu_get_type_traits = nullptr;
+    ggml_threadpool_set_external_t cpu_set_external_threadpool = nullptr;
     ggml_from_float_t cpu_quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
     ggml_from_float_t cpu_quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
     ggml_from_float_t cpu_quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
@@ -1568,6 +1629,10 @@ static const char * ggml_backend_iqk_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_iqk_free(ggml_backend_t backend) {
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend->context;
+    if (ctx->cpu_set_external_threadpool) {
+        GGML_ASSERT(ctx->cpu_set_external_threadpool(nullptr, nullptr, nullptr));
+    }
+    g_iqk_external_threadpool = nullptr;
     ctx->threadpool.stop();
     delete ctx;
     delete backend;
@@ -1655,6 +1720,7 @@ static ggml_guid_t ggml_backend_iqk_guid(void) {
 
 ggml_backend_t ggml_backend_iqk_init(void) {
     ggml_backend_iqk_context * ctx = new ggml_backend_iqk_context;
+    g_iqk_external_threadpool = &ctx->threadpool;
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid    = */ ggml_backend_iqk_guid(),
@@ -1841,12 +1907,24 @@ static void ggml_backend_iqk_assign_cpu_reg(ggml_backend_t backend_iqk, ggml_bac
     GGML_ASSERT(ggml_backend_is_iqk(backend_iqk));
 
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend_iqk->context;
+    if (ctx->cpu_set_external_threadpool) {
+        GGML_ASSERT(ctx->cpu_set_external_threadpool(nullptr, nullptr, nullptr));
+    }
     ctx->cpu_reg = cpu_reg;
     ctx->cpu_get_type_traits = nullptr;
+    ctx->cpu_set_external_threadpool = nullptr;
     ctx->cpu_quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
     ctx->cpu_quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
     ctx->cpu_quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
     if (cpu_reg) {
+        ctx->cpu_set_external_threadpool = (ggml_threadpool_set_external_t)
+            ggml_backend_reg_get_proc_address(cpu_reg, "ggml_threadpool_set_external");
+        if (ctx->cpu_set_external_threadpool) {
+            GGML_ASSERT(ctx->cpu_set_external_threadpool(
+                    ggml_iqk_external_set_n_threads,
+                    ggml_iqk_external_barrier,
+                    ggml_iqk_external_run_task));
+        }
         ctx->cpu_get_type_traits = (ggml_backend_cpu_get_type_traits_t)
             ggml_backend_reg_get_proc_address(cpu_reg, "ggml_get_type_traits_cpu");
         if (!ctx->cpu_get_type_traits) {
