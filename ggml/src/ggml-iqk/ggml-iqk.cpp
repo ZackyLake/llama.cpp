@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -43,7 +44,15 @@
 struct ggml_backend_iqk_context;
 struct iqk_threadpool;
 
-static iqk_threadpool * g_iqk_external_threadpool = nullptr;
+using ggml_threadpool_set_external_t = bool (*)(
+        ggml_threadpool_set_n_threads_t set_n_threads,
+        ggml_threadpool_barrier_t        barrier,
+        ggml_threadpool_run_task_t       run_task);
+
+static std::shared_mutex                             g_iqk_threadpool_mutex;
+static std::unique_ptr<iqk_threadpool>               g_iqk_threadpool;
+static uint32_t                                      g_iqk_threadpool_ref_count = 0;
+static std::multiset<ggml_threadpool_set_external_t> g_iqk_cpu_set_external_threadpools;
 
 static inline void iqk_thread_cpu_relax(void) {
 #if defined(_WIN32)
@@ -381,7 +390,6 @@ struct iqk_threadpool {
     ggml_threadpool_task_t external_task = nullptr;
 
     std::vector<std::thread> threads;
-    uint32_t n_threads = 1;
     std::array<thread_statistic, 64> thread_stats;
     uint64_t last_statistic_seq = 0;
 
@@ -392,6 +400,9 @@ struct iqk_threadpool {
     // store the CPU placement params; only update when they actually changed
     void set_params(const ggml_threadpool_params & tpp) {
         std::lock_guard<std::mutex> lock(mutex);
+        if (ggml_threadpool_params_match(&params, &tpp)) {
+            return;
+        }
         wait_all_pending();
         params = tpp;
 
@@ -489,11 +500,6 @@ struct iqk_threadpool {
         GGML_LOG_INFO("%s\n", statistics.c_str());
     }
 
-    uint32_t get_n_threads() {
-        std::lock_guard<std::mutex> lock(mutex);
-        return std::min<uint32_t>(n_threads, (uint32_t) threads.size() + 1);
-    }
-
     void run_compute(iqk_compute_state_shared * current_shared, uint32_t ith) {
         const uint64_t bit = 1ULL << ith;
         local_statistics local = {};
@@ -571,16 +577,15 @@ struct iqk_threadpool {
     }
 
     // Grow the pool after draining any active global dispatch.
-    void resize(uint32_t requested_threads) {
+    uint32_t resize(uint32_t requested_threads) {
         std::lock_guard<std::mutex> lock(mutex);
         GGML_ASSERT(requested_threads > 0);
         // act_mask is a uint64_t, so at most 64 threads including the caller
         requested_threads = std::min(requested_threads, 64u);
-        n_threads = requested_threads;
         const uint32_t requested_workers = requested_threads - 1;
         const uint32_t old = (uint32_t) threads.size();
         if (requested_workers <= old) {
-            return;
+            return requested_threads;
         }
         GGML_LOG_INFO("IQK: threadpool resize %u -> %u\n", old + 1, requested_threads);
         wait_all_pending();
@@ -590,6 +595,7 @@ struct iqk_threadpool {
         for (uint32_t i = old; i < requested_workers; ++i) {
             threads.emplace_back(&iqk_threadpool::worker, this, i + 1);
         }
+        return (uint32_t) threads.size() + 1;
     }
 
     void stop() {
@@ -630,33 +636,40 @@ struct iqk_threadpool {
 static int ggml_iqk_external_set_n_threads(int requested_threads) {
     GGML_ASSERT(requested_threads > 0);
 
-    int n_threads = (int) g_iqk_external_threadpool->get_n_threads();
-    if (requested_threads > n_threads) {
-        g_iqk_external_threadpool->resize((uint32_t) requested_threads);
-        n_threads = (int) g_iqk_external_threadpool->get_n_threads();
-    }
-    n_threads = std::min(requested_threads, n_threads);
-    g_iqk_external_threadpool->barrier.set_n_threads(n_threads);
+    std::shared_lock<std::shared_mutex> lock(g_iqk_threadpool_mutex);
+    GGML_ASSERT(g_iqk_threadpool != nullptr);
+    const int n_threads = (int) g_iqk_threadpool->resize((uint32_t) requested_threads);
+    g_iqk_threadpool->barrier.set_n_threads(n_threads);
     return n_threads;
 }
 
 static void ggml_iqk_external_barrier() {
-    g_iqk_external_threadpool->barrier.wait();
+    std::shared_lock<std::shared_mutex> lock(g_iqk_threadpool_mutex);
+    GGML_ASSERT(g_iqk_threadpool != nullptr);
+    g_iqk_threadpool->barrier.wait();
 }
 
 static void ggml_iqk_external_run_task(ggml_threadpool_task_t task) {
     GGML_ASSERT(task != nullptr);
 
-    iqk_threadpool & threadpool = *g_iqk_external_threadpool;
+    iqk_threadpool * shared_threadpool;
+    std::unique_lock<std::mutex> threadpool_lock;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_iqk_threadpool_mutex);
+        GGML_ASSERT(g_iqk_threadpool != nullptr);
+        shared_threadpool = g_iqk_threadpool.get();
+        threadpool_lock = std::unique_lock<std::mutex>(shared_threadpool->mutex);
+    }
+    iqk_threadpool & threadpool = *shared_threadpool;
     const int n_threads = threadpool.barrier.get_n_threads();
+
+    thread_affinity_scope affinity_scope(threadpool.cpu_ids.empty() ? -1 : threadpool.cpu_ids[0]);
+    threadpool.wait_all_pending();
     if (n_threads == 1) {
         task(0, 1);
         return;
     }
 
-    std::lock_guard<std::mutex> lock(threadpool.mutex);
-    thread_affinity_scope affinity_scope(threadpool.cpu_ids.empty() ? -1 : threadpool.cpu_ids[0]);
-    threadpool.wait_all_pending();
     threadpool.external_task = task;
     threadpool.dispatch(iqk_mask_bits(1, (uint32_t) n_threads), iqk_threadpool_state::external, threadpool.act_mask);
     task(0, n_threads);
@@ -664,19 +677,33 @@ static void ggml_iqk_external_run_task(ggml_threadpool_task_t task) {
 }
 
 using ggml_backend_cpu_get_type_traits_t = const struct ggml_type_traits_cpu * (*)(enum ggml_type type);
-using ggml_threadpool_set_external_t = bool (*)(
-        ggml_threadpool_set_n_threads_t set_n_threads,
-        ggml_threadpool_barrier_t        barrier,
-        ggml_threadpool_run_task_t       run_task);
 
 struct ggml_backend_iqk_context {
-    iqk_threadpool threadpool;
+    iqk_threadpool * threadpool = nullptr;
+    uint32_t n_threads = 1;
     ggml_backend_reg_t cpu_reg = nullptr;
     ggml_backend_cpu_get_type_traits_t cpu_get_type_traits = nullptr;
     ggml_threadpool_set_external_t cpu_set_external_threadpool = nullptr;
     ggml_from_float_t cpu_quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
     ggml_from_float_t cpu_quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
     ggml_from_float_t cpu_quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
+    void unregister_external() {
+        const auto it = g_iqk_cpu_set_external_threadpools.find(cpu_set_external_threadpool);
+        GGML_ASSERT(it != g_iqk_cpu_set_external_threadpools.end());
+        g_iqk_cpu_set_external_threadpools.erase(it);
+        if (g_iqk_cpu_set_external_threadpools.find(cpu_set_external_threadpool) == g_iqk_cpu_set_external_threadpools.end()) {
+            GGML_ASSERT(cpu_set_external_threadpool(nullptr, nullptr, nullptr));
+        }
+    }
+    void register_external() {
+        if (g_iqk_cpu_set_external_threadpools.find(cpu_set_external_threadpool) == g_iqk_cpu_set_external_threadpools.end()) {
+            GGML_ASSERT(cpu_set_external_threadpool(
+                ggml_iqk_external_set_n_threads,
+                ggml_iqk_external_barrier,
+                ggml_iqk_external_run_task));
+        }
+        g_iqk_cpu_set_external_threadpools.insert(cpu_set_external_threadpool);
+    }
 };
 
 static bool ggml_iqk_glu_enabled() {
@@ -1662,11 +1689,17 @@ static const char * ggml_backend_iqk_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_iqk_free(ggml_backend_t backend) {
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend->context;
-    if (ctx->cpu_set_external_threadpool) {
-        GGML_ASSERT(ctx->cpu_set_external_threadpool(nullptr, nullptr, nullptr));
+    {
+        std::unique_lock<std::shared_mutex> lock(g_iqk_threadpool_mutex);
+        if (ctx->cpu_set_external_threadpool) {
+            ctx->unregister_external();
+        }
+        GGML_ASSERT(g_iqk_threadpool_ref_count > 0);
+        if (--g_iqk_threadpool_ref_count == 0) {
+            g_iqk_threadpool->stop();
+            g_iqk_threadpool.reset();
+        }
     }
-    g_iqk_external_threadpool = nullptr;
-    ctx->threadpool.stop();
     delete ctx;
     delete backend;
 }
@@ -1711,7 +1744,7 @@ static ggml_status ggml_backend_iqk_graph_compute(ggml_backend_t backend, ggml_c
     shared->backend = ctx;
     shared->cgraph = cgraph;
 
-    shared->n_threads = (int) ctx->threadpool.get_n_threads();
+    shared->n_threads = (int) ctx->n_threads;
     GGML_ASSERT(shared->n_threads > 0);
     const size_t work_size = ggml_iqk_build_compute_tasks(shared.get());
 
@@ -1719,7 +1752,7 @@ static ggml_status ggml_backend_iqk_graph_compute(ggml_backend_t backend, ggml_c
         shared->work_data.reset(new char[work_size]);
     }
 
-    if (!ctx->threadpool.compute(shared)) {
+    if (!ctx->threadpool->compute(shared)) {
         GGML_LOG_ERROR("%s: IQK kernel rejected graph\n", __func__);
         return GGML_STATUS_FAILED;
     }
@@ -1753,7 +1786,14 @@ static ggml_guid_t ggml_backend_iqk_guid(void) {
 
 ggml_backend_t ggml_backend_iqk_init(void) {
     ggml_backend_iqk_context * ctx = new ggml_backend_iqk_context;
-    g_iqk_external_threadpool = &ctx->threadpool;
+    {
+        std::unique_lock<std::shared_mutex> lock(g_iqk_threadpool_mutex);
+        if (!g_iqk_threadpool) {
+            g_iqk_threadpool = std::make_unique<iqk_threadpool>();
+        }
+        ctx->threadpool = g_iqk_threadpool.get();
+        ++g_iqk_threadpool_ref_count;
+    }
 
     ggml_backend_t backend = new ggml_backend {
         /* .guid    = */ ggml_backend_iqk_guid(),
@@ -1776,16 +1816,14 @@ void ggml_backend_iqk_set_n_threads(ggml_backend_t backend_iqk, int n_threads) {
 
     GGML_ASSERT(n_threads > 0);
     // grow the persistent threadpool on demand
-    ctx->threadpool.resize((uint32_t) n_threads);
+    ctx->n_threads = ctx->threadpool->resize((uint32_t) n_threads);
 }
 
 static void ggml_backend_iqk_set_threadpool_params(ggml_backend_t backend_iqk, const ggml_threadpool_params * params) {
     GGML_ASSERT(ggml_backend_is_iqk(backend_iqk));
 
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend_iqk->context;
-    if (!ggml_threadpool_params_match(&ctx->threadpool.params, params)) {
-        ctx->threadpool.set_params(*params);
-    }
+    ctx->threadpool->set_params(*params);
 }
 
 static const char * ggml_backend_iqk_device_get_name(ggml_backend_dev_t dev) {
@@ -1940,24 +1978,15 @@ static void ggml_backend_iqk_assign_cpu_reg(ggml_backend_t backend_iqk, ggml_bac
     GGML_ASSERT(ggml_backend_is_iqk(backend_iqk));
 
     ggml_backend_iqk_context * ctx = (ggml_backend_iqk_context *)backend_iqk->context;
-    if (ctx->cpu_set_external_threadpool) {
-        GGML_ASSERT(ctx->cpu_set_external_threadpool(nullptr, nullptr, nullptr));
-    }
+    ggml_threadpool_set_external_t cpu_set_external_threadpool = nullptr;
     ctx->cpu_reg = cpu_reg;
     ctx->cpu_get_type_traits = nullptr;
-    ctx->cpu_set_external_threadpool = nullptr;
     ctx->cpu_quantize_row_q8_K = (ggml_from_float_t) quantize_row_q8_K_ref;
     ctx->cpu_quantize_row_q8_K128 = (ggml_from_float_t) quantize_row_q8_K128_ref;
     ctx->cpu_quantize_row_q8_2_x4 = quantize_row_q8_2_x4_ref;
     if (cpu_reg) {
-        ctx->cpu_set_external_threadpool = (ggml_threadpool_set_external_t)
+        cpu_set_external_threadpool = (ggml_threadpool_set_external_t)
             ggml_backend_reg_get_proc_address(cpu_reg, "ggml_threadpool_set_external");
-        if (ctx->cpu_set_external_threadpool) {
-            GGML_ASSERT(ctx->cpu_set_external_threadpool(
-                    ggml_iqk_external_set_n_threads,
-                    ggml_iqk_external_barrier,
-                    ggml_iqk_external_run_task));
-        }
         ctx->cpu_get_type_traits = (ggml_backend_cpu_get_type_traits_t)
             ggml_backend_reg_get_proc_address(cpu_reg, "ggml_get_type_traits_cpu");
         if (!ctx->cpu_get_type_traits) {
@@ -1984,6 +2013,18 @@ static void ggml_backend_iqk_assign_cpu_reg(ggml_backend_t backend_iqk, ggml_bac
             if (!names.empty()) {
                 GGML_LOG_INFO("IQK: registed cpu_path:%s\n", names.c_str());
             }
+        }
+    }
+
+    if (cpu_set_external_threadpool != ctx->cpu_set_external_threadpool) {
+        GGML_ASSERT(g_iqk_threadpool != nullptr);
+        std::unique_lock<std::shared_mutex> threadpool_lock(g_iqk_threadpool_mutex);
+        if (ctx->cpu_set_external_threadpool) {
+            ctx->unregister_external();
+        }
+        ctx->cpu_set_external_threadpool = cpu_set_external_threadpool;
+        if (ctx->cpu_set_external_threadpool) {
+            ctx->register_external();
         }
     }
 }

@@ -569,6 +569,7 @@ typedef SRWLOCK            ggml_mutex_t;
 #define ggml_mutex_unlock(m) ReleaseSRWLockExclusive(m)
 #define ggml_mutex_lock_shared(m)   AcquireSRWLockShared(m)
 #define ggml_mutex_unlock_shared(m) ReleaseSRWLockShared(m)
+#define GGML_MUTEX_INITIALIZER       SRWLOCK_INIT
 
 #define ggml_cond_init(c)    InitializeConditionVariable(c)
 #define ggml_cond_destroy(c)
@@ -589,6 +590,7 @@ typedef pthread_mutex_t    ggml_mutex_t;
 #define ggml_mutex_unlock(m)        pthread_mutex_unlock(m)
 #define ggml_mutex_lock_shared(m)   pthread_mutex_lock(m)
 #define ggml_mutex_unlock_shared(m) pthread_mutex_unlock(m)
+#define GGML_MUTEX_INITIALIZER       PTHREAD_MUTEX_INITIALIZER
 
 #define ggml_lock_init(x)    UNUSED(x)
 #define ggml_lock_destroy(x) UNUSED(x)
@@ -638,6 +640,7 @@ struct ggml_threadpool {
 };
 
 struct ggml_threadpool_external_api {
+    ggml_mutex_t mutex;
     struct ggml_threadpool dummy_threadpool;
     ggml_threadpool_set_n_threads_t  set_n_threads;
     ggml_threadpool_barrier_t        barrier;
@@ -713,25 +716,32 @@ struct ggml_state {
 };
 
 static struct ggml_state g_state = {0};
-static struct ggml_threadpool_external_api g_external_threadpool_api = {0};
+static struct ggml_threadpool_external_api g_external_threadpool_api = {
+    .mutex = GGML_MUTEX_INITIALIZER,
+};
 
 static bool ggml_threadpool_external_api_configured(void) {
-    return g_external_threadpool_api.set_n_threads != NULL;
+    const bool configured = g_external_threadpool_api.set_n_threads != NULL;
+    return configured;
 }
 
 bool ggml_threadpool_set_external(
         ggml_threadpool_set_n_threads_t set_n_threads,
         ggml_threadpool_barrier_t        barrier,
         ggml_threadpool_run_task_t       run_task) {
+    ggml_mutex_lock(&g_external_threadpool_api.mutex);
+
     if (set_n_threads == NULL && barrier == NULL && run_task == NULL) {
         g_external_threadpool_api.n_threads     = 0;
         g_external_threadpool_api.set_n_threads = NULL;
         g_external_threadpool_api.barrier        = NULL;
         g_external_threadpool_api.run_task       = NULL;
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
         return true;
     }
 
     if (set_n_threads == NULL || barrier == NULL || run_task == NULL) {
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
         return false;
     }
 
@@ -740,11 +750,13 @@ bool ggml_threadpool_set_external(
     g_external_threadpool_api.barrier        = barrier;
     g_external_threadpool_api.run_task       = run_task;
 
+    ggml_mutex_unlock(&g_external_threadpool_api.mutex);
     return true;
 }
 
 void ggml_barrier(struct ggml_threadpool * tp) {
     if (ggml_threadpool_external_api_configured()) {
+        GGML_ASSERT(tp == &g_external_threadpool_api.dummy_threadpool);
         if (g_external_threadpool_api.n_threads > 1) {
             g_external_threadpool_api.barrier();
         }
@@ -3510,6 +3522,7 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
     GGML_ASSERT(cplan->work_size == 0 || cplan->work_data != NULL);
 
     if (ggml_threadpool_external_api_configured()) {
+        ggml_mutex_lock(&g_external_threadpool_api.mutex);
         struct ggml_threadpool * threadpool = &g_external_threadpool_api.dummy_threadpool;
         struct ggml_cplan external_cplan = *cplan;
         external_cplan.threadpool = threadpool;
@@ -3528,7 +3541,9 @@ enum ggml_status ggml_graph_compute(struct ggml_cgraph * cgraph, struct ggml_cpl
 
         g_external_threadpool_api.run_task(ggml_graph_compute_external_task);
 
-        return threadpool->ec;
+        enum ggml_status ret = threadpool->ec;
+        ggml_mutex_unlock(&g_external_threadpool_api.mutex);
+        return ret;
     } else {
         int n_threads                               = cplan->n_threads;
         struct ggml_threadpool * threadpool = cplan->threadpool;
