@@ -143,6 +143,34 @@ private:
     std::atomic<uint64_t> state_{0};
 };
 
+struct thread_affinity_scope {
+    explicit thread_affinity_scope(int id) {
+        if (id < 0 || id >= GGML_MAX_N_THREADS) {
+            return;
+        }
+        if (!ggml_thread_get_affinity(previous_mask.data())) {
+            return;
+        }
+
+        std::array<bool, GGML_MAX_N_THREADS> mask = {};
+        mask[id] = true;
+        affinity_applied = ggml_thread_apply_affinity(mask.data());
+    }
+
+    ~thread_affinity_scope() {
+        if (affinity_applied) {
+            ggml_thread_apply_affinity(previous_mask.data());
+        }
+    }
+
+    thread_affinity_scope(const thread_affinity_scope &) = delete;
+    thread_affinity_scope & operator=(const thread_affinity_scope &) = delete;
+
+private:
+    std::array<bool, GGML_MAX_N_THREADS> previous_mask = {};
+    bool affinity_applied = false;
+};
+
 
 struct mmid_row_mapping {
     int32_t i1;
@@ -381,7 +409,8 @@ struct iqk_threadpool {
         }
         GGML_LOG_INFO("IQK: threadpool cpu mask: %s\n", ids.c_str());
 
-        apply_thread_config(0);
+        ggml_thread_apply_priority(params.prio);
+        //apply_thread_affinity(0);
         if (threads.empty()) {
             return;
         }
@@ -391,9 +420,8 @@ struct iqk_threadpool {
         dispatch(mask, iqk_threadpool_state::config, act_mask);
     }
 
-    // apply priority and affinity for thread ith; thread ith binds to cpu_ids[ith]
-    void apply_thread_config(uint32_t ith) {
-        ggml_thread_apply_priority(params.prio);
+    // apply affinity for thread ith; thread ith binds to cpu_ids[ith]
+    void apply_thread_affinity(uint32_t ith) {
         if (ith < cpu_ids.size()) {
             bool mask[GGML_MAX_N_THREADS] = {false};
             mask[cpu_ids[ith]] = true;
@@ -483,7 +511,8 @@ struct iqk_threadpool {
         const uint64_t bit = 1ULL << ith;
 
         iqk_thread_set_name(ith);
-        apply_thread_config(ith);
+        ggml_thread_apply_priority(params.prio);
+        apply_thread_affinity(ith);
         uint64_t dispatch = dispatch_seq.load(std::memory_order_acquire);
         complete(bit);
 
@@ -521,7 +550,8 @@ struct iqk_threadpool {
                     complete(bit);
                     return;
                 case iqk_threadpool_state::config:
-                    apply_thread_config(ith);
+                    ggml_thread_apply_priority(params.prio);
+                    apply_thread_affinity(ith);
                     complete(bit);
                     break;
                 default:
@@ -582,6 +612,7 @@ struct iqk_threadpool {
         std::lock_guard<std::mutex> lock(mutex);
         GGML_ASSERT(next_shared != nullptr);
         wait_all_pending();
+        thread_affinity_scope affinity_scope(cpu_ids.empty() ? -1 : cpu_ids[0]);
         next_shared->seq = dispatch_seq.load(std::memory_order_relaxed) + 1;
         shared.store(next_shared, std::memory_order_release);
         dispatch(iqk_mask_bits(0, (uint32_t) next_shared->n_threads),
@@ -624,6 +655,7 @@ static void ggml_iqk_external_run_task(ggml_threadpool_task_t task) {
     }
 
     std::lock_guard<std::mutex> lock(threadpool.mutex);
+    thread_affinity_scope affinity_scope(threadpool.cpu_ids.empty() ? -1 : threadpool.cpu_ids[0]);
     threadpool.wait_all_pending();
     threadpool.external_task = task;
     threadpool.dispatch(iqk_mask_bits(1, (uint32_t) n_threads), iqk_threadpool_state::external, threadpool.act_mask);

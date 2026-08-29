@@ -39,40 +39,70 @@
 #if defined(_WIN32)
 #include "windows.h"
 
-// TODO: support > 64 CPUs
+static constexpr uint32_t GGML_THREAD_GROUP_SIZE  = 64;
+static constexpr uint32_t GGML_THREAD_GROUP_COUNT = GGML_MAX_N_THREADS / GGML_THREAD_GROUP_SIZE;
+
+bool ggml_thread_get_affinity(bool * mask) {
+    GGML_ASSERT(mask);
+
+    GROUP_AFFINITY affinity = {};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &affinity)) {
+        fprintf(stderr, "warn: failed to get thread affinity: (%lu)\n", (unsigned long) GetLastError());
+        return false;
+    }
+
+    const uint32_t group = affinity.Group;
+    if (group >= GGML_THREAD_GROUP_COUNT) {
+        fprintf(stderr, "warn: thread affinity group %u is not supported\n", group);
+        return false;
+    }
+
+    memset(mask, 0, GGML_MAX_N_THREADS * sizeof(mask[0]));
+
+    const uint64_t bitmask = (uint64_t) affinity.Mask;
+    const uint32_t group_start = group * GGML_THREAD_GROUP_SIZE;
+    for (uint32_t i = 0; i < GGML_THREAD_GROUP_SIZE; i++) {
+        mask[group_start + i] = (bitmask & (1ULL << i)) != 0;
+    }
+
+    return true;
+}
+
 bool ggml_thread_apply_affinity(const bool * mask) {
     HANDLE    h = GetCurrentThread();
-    uint64_t  bitmask = 0ULL;
+    int32_t first_cpu = -1;
 
-    assert(GGML_MAX_N_THREADS >= 64);
-
-    for (int32_t i = 0; i < 8; i++) {
-        int32_t idx = i * 8;
-        uint8_t val = 0;
-        val |= mask[idx + 0] << 0;
-        val |= mask[idx + 1] << 1;
-        val |= mask[idx + 2] << 2;
-        val |= mask[idx + 3] << 3;
-        val |= mask[idx + 4] << 4;
-        val |= mask[idx + 5] << 5;
-        val |= mask[idx + 6] << 6;
-        val |= mask[idx + 7] << 7;
-        bitmask |= (uint64_t)val << idx;
-    }
-    printf("thread [%u] aff mask: [%zx]\n", GetThreadId(h), bitmask);
-
-    for (int32_t i = 64; i < GGML_MAX_N_THREADS; i++) {
+    for (int32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
         if (mask[i]) {
-            fprintf(stderr, "warn: setting thread-affinity for > 64 CPUs isn't supported on windows!\n");
+            first_cpu = i;
             break;
         }
     }
 
-    DWORD_PTR m = (DWORD_PTR)bitmask;
+    if (first_cpu < 0) {
+        fprintf(stderr, "warn: cannot set thread affinity with an empty mask\n");
+        return false;
+    }
 
-    m = SetThreadAffinityMask(h, m);
+    const uint32_t group = first_cpu / GGML_THREAD_GROUP_SIZE;
+    const uint32_t group_start = group * GGML_THREAD_GROUP_SIZE;
+    uint64_t bitmask = 0ULL;
+    for (uint32_t i = 0; i < GGML_THREAD_GROUP_SIZE && group_start + i < GGML_MAX_N_THREADS; i++) {
+        bitmask |= (uint64_t) mask[group_start + i] << i;
+    }
 
-    return m != 0;
+    GROUP_AFFINITY affinity = {};
+    affinity.Mask = (KAFFINITY) bitmask;
+    affinity.Group = (WORD) group;
+
+    //printf("thread [%u] group [%u] aff mask: [%llx]\n", GetThreadId(h), group, (unsigned long long) bitmask);
+
+    if (!SetThreadGroupAffinity(h, &affinity, NULL)) {
+        fprintf(stderr, "warn: failed to set thread affinity [%llx] for group %u: (%lu)\n", (unsigned long long) bitmask, group, (unsigned long) GetLastError());
+        return false;
+    }
+
+    return true;
 }
 
 bool ggml_thread_apply_priority(int32_t prio) {
@@ -122,6 +152,11 @@ bool ggml_thread_apply_priority(int32_t prio) {
 #elif defined(__APPLE__)
 #include <sys/types.h>
 #include <sys/resource.h>
+
+bool ggml_thread_get_affinity(bool * mask) {
+    UNUSED(mask);
+    return false;
+}
 
 bool ggml_thread_apply_affinity(const bool * mask) {
     // Not supported on Apple platforms
@@ -187,6 +222,34 @@ bool ggml_thread_apply_affinity(const bool * mask) {
     return true;
 }
 
+bool ggml_thread_get_affinity(bool * mask) {
+    GGML_ASSERT(mask);
+
+    cpu_set_t cpuset;
+    int err;
+
+    CPU_ZERO(&cpuset);
+
+#ifdef __ANDROID__
+    err = sched_getaffinity(0, sizeof(cpuset), &cpuset);
+    if (err < 0) {
+        err = errno;
+    }
+#else
+    err = pthread_getaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+#endif
+    if (err != 0) {
+        fprintf(stderr, "warn: failed to get thread affinity: %s (%d)\n", strerror(err), err);
+        return false;
+    }
+
+    for (uint32_t i = 0; i < GGML_MAX_N_THREADS; i++) {
+        mask[i] = CPU_ISSET(i, &cpuset) != 0;
+    }
+
+    return true;
+}
+
 bool ggml_thread_apply_priority(int32_t prio) {
     struct sched_param p;
     int32_t policy = SCHED_OTHER;
@@ -213,6 +276,11 @@ bool ggml_thread_apply_priority(int32_t prio) {
 }
 
 #else // unsupported platforms
+
+bool ggml_thread_get_affinity(bool * mask) {
+    UNUSED(mask);
+    return false;
+}
 
 bool ggml_thread_apply_affinity(const bool * mask) {
     UNUSED(mask);
