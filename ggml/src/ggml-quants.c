@@ -3719,7 +3719,7 @@ static void quantize_row_iq2_xxs_impl(const float * GGML_RESTRICT x, void * GGML
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/32; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -3897,7 +3897,7 @@ static void quantize_row_iq2_xs_impl(const float * GGML_RESTRICT x, void * GGML_
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/16; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -5877,7 +5877,7 @@ static void quantize_row_iq2_s_impl(const float * GGML_RESTRICT x, void * GGML_R
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d * 0.9875f);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/16; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
