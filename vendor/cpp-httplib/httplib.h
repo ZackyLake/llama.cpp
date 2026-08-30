@@ -1902,7 +1902,7 @@ public:
   void shutdown() override;
 
 private:
-  void worker(bool is_dynamic, uint32_t tid = UINT32_MAX);
+  void worker(bool is_dynamic);
   void move_to_finished(std::thread::id id);
   void cleanup_finished_threads();
 
@@ -1911,6 +1911,7 @@ private:
   size_t max_queued_requests_;
   time_t idle_timeout_sec_;
   size_t idle_thread_count_;
+  uint64_t cpumask_;
 
   bool shutdown_;
 
