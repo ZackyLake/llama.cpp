@@ -6342,7 +6342,7 @@ static void quantize_row_iq2_k_impl(const float * GGML_RESTRICT x, block_iq2_k *
                 }
             }
         }
-        y[ibl].d = GGML_FP32_TO_FP16(1.030f*(final_sumq2 > 0 ? final_sumqx/final_sumq2 : d));
+        y[ibl].d = GGML_FP32_TO_FP16(final_sumq2 > 0 ? final_sumqx/final_sumq2 : d); // fudge factor 1.030f removed
     }
 }
 
@@ -6562,7 +6562,7 @@ static void quantize_row_iq3_k_impl(const float * GGML_RESTRICT x, block_iq3_k *
                 }
             }
         }
-        y[ibl].d = GGML_FP32_TO_FP16(1.01f*(sumq2 > 0 ? sumqx/sumq2 : d));
+        y[ibl].d = GGML_FP32_TO_FP16(sumq2 > 0 ? sumqx/sumq2 : d); // fudge factor 1.01f removed
     }
 }
 
