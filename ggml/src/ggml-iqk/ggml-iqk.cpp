@@ -221,7 +221,8 @@ struct local_statistics {
     }
 };
 
-static constexpr int GGML_IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
+static constexpr int GGML_IQK_UNARY_OP_SWIGLU_OAI   = GGML_UNARY_OP_COUNT;
+static constexpr int GGML_IQK_UNARY_OP_SWIGLU_CLAMP = GGML_UNARY_OP_COUNT + 1;
 static constexpr int GGML_IQK_EXPERT_CHUNK_MIN_NX = 32;
 static constexpr int GGML_IQK_DENSE_CHUNK_NX = 64;
 static constexpr int GGML_IQK_MAX_TASKS_PER_THREAD = 8;
@@ -947,6 +948,10 @@ static bool ggml_iqk_glu_activation(const ggml_tensor * glu, int * unary_op, flo
         case GGML_GLU_OP_SWIGLU:
             *unary_op = GGML_UNARY_OP_SILU;
             return true;
+        case GGML_GLU_OP_SWIGLU_CLAMP:
+            *unary_op = GGML_IQK_UNARY_OP_SWIGLU_CLAMP;
+            *limit = ggml_get_op_params_f32(glu, 3);
+            return *limit >= 0.0f;
         case GGML_GLU_OP_SWIGLU_OAI:
             if (std::abs(ggml_get_op_params_f32(glu, 2) - 1.702f) > 1e-6f ||
                 std::abs(ggml_get_op_params_f32(glu, 3) - 7.0f) > 1e-6f) {

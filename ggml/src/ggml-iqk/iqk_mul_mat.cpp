@@ -42,7 +42,8 @@
 
 namespace {
 
-constexpr int IQK_UNARY_OP_SWIGLU_OAI = GGML_UNARY_OP_COUNT;
+constexpr int IQK_UNARY_OP_SWIGLU_OAI   = GGML_UNARY_OP_COUNT;
+constexpr int IQK_UNARY_OP_SWIGLU_CLAMP = GGML_UNARY_OP_COUNT + 1;
 
 struct MulMat {
     std::array<mul_mat_t, IQK_MAX_NY> funcs = {};
@@ -114,6 +115,7 @@ struct MulMat {
     inline static void gelu(int n, const float * src, float * dst);
     inline static void relu(int n, const float * src, float * dst);
     inline static void silu(int n, const float * src, float * dst);
+    inline static void swiglu_clamp(int n, const float * src, float * dst, float limit);
     inline static void swiglu_oai(int n, const float * src, float * dst);
     inline static void clamp_oai(int n, float *x);
     inline static void activate(ggml_unary_op op, int n, const float * src, float * dst) {
@@ -141,9 +143,13 @@ struct MulMat {
                     auto x = this_info.dst_row(ky);
                     for (int j = 0; j < this_nrc_x; ++j) x[j] += b[j];
                 }
-                activate(op, this_nrc_x, this_info.dst_row(ky), tmp + ky*xstep);
-                if (limit > 1e-6f) {
-                    for (int j = 0; j < this_nrc_x; ++j) tmp[ky*xstep + j] = std::min(tmp[ky*xstep + j], limit);
+                if (op == IQK_UNARY_OP_SWIGLU_CLAMP) {
+                    swiglu_clamp(this_nrc_x, this_info.dst_row(ky), tmp + ky*xstep, limit);
+                } else {
+                    activate(op, this_nrc_x, this_info.dst_row(ky), tmp + ky*xstep);
+                    if (limit > 1e-6f) {
+                        for (int j = 0; j < this_nrc_x; ++j) tmp[ky*xstep + j] = std::min(tmp[ky*xstep + j], limit);
+                    }
                 }
             }
             func(n, (const void *)((const char *)vx_up + ix*bx), bx, this_info, this_nrc_x);
@@ -155,7 +161,7 @@ struct MulMat {
                 }
                 if (op == IQK_UNARY_OP_SWIGLU_OAI) {
                     clamp_oai(this_nrc_x, result);
-                } else if (limit > 1e-6f) {
+                } else if (limit > 1e-6f || op == IQK_UNARY_OP_SWIGLU_CLAMP) {
                     for (int j = 0; j < this_nrc_x; ++j) result[j] = std::max(-limit, std::min(limit, result[j]));
                 }
                 for (int j = 0; j < this_nrc_x; ++j) result[j] *= tmp[ky*xstep + j];
@@ -856,6 +862,18 @@ void MulMat::silu(int n, const float * x, float * y) {
     for (; i + 3 < n; i += 4) vst1q_f32(y + i, v_silu(vld1q_f32(x + i)));
     for (; i < n; ++i) y[i] = x[i]/(1.0f + expf(-x[i]));
 }
+void MulMat::swiglu_clamp(int n, const float * x, float * y, float limit) {
+    int i = 0;
+    const float32x4_t max = vdupq_n_f32(limit);
+    for (; i + 3 < n; i += 4) {
+        const float32x4_t xc = vminq_f32(vld1q_f32(x + i), max);
+        vst1q_f32(y + i, v_silu(xc));
+    }
+    for (; i < n; ++i) {
+        const float xi = std::min(x[i], limit);
+        y[i] = xi/(1.0f + expf(-xi));
+    }
+}
 void MulMat::relu(int n, const float * x, float * y) {
     for (int j = 0; j < n; ++j) y[j] = x[j] > 0 ? x[j] : 0;
 }
@@ -895,6 +913,27 @@ void MulMat::silu(int n, const float * x, float * y) {
     for (; i + 7 < n; i += 8) _mm256_storeu_ps(y + i, v_silu(_mm256_loadu_ps(x + i)));
 #endif
     for (; i < n; ++i) y[i] = x[i]/(1.0f + expf(-x[i]));
+}
+void MulMat::swiglu_clamp(int n, const float * x, float * y, float limit) {
+    int i = 0;
+#if defined __AVX512F__ && defined __AVX512DQ__
+    const __m512 max = _mm512_set1_ps(limit);
+    for (; i + 15 < n; i += 16) {
+        const __m512 xc = v_clamp_max(_mm512_loadu_ps(x + i), max);
+        _mm512_storeu_ps(y + i, v_silu(xc));
+    }
+#endif
+#if defined __AVX2__
+    const __m256 max = _mm256_set1_ps(limit);
+    for (; i + 7 < n; i += 8) {
+        const __m256 xc = v_clamp_max(_mm256_loadu_ps(x + i), max);
+        _mm256_storeu_ps(y + i, v_silu(xc));
+    }
+#endif
+    for (; i < n; ++i) {
+        const float xi = std::min(x[i], limit);
+        y[i] = xi/(1.0f + expf(-xi));
+    }
 }
 
 void MulMat::relu(int n, const float * x, float * y) {
@@ -952,6 +991,12 @@ extern "C" IQK_API bool iqk_compute_glu(long nc, long nr, int glu_op, float alph
             case GGML_GLU_OP_SWIGLU:
                 MulMat::silu((int) nc, gate_row, dst_row);
                 iqk_mul_f32((int) nc, dst_row, up_row, dst_row);
+                break;
+            case GGML_GLU_OP_SWIGLU_CLAMP:
+                MulMat::swiglu_clamp((int) nc, gate_row, dst_row, limit);
+                for (long i = 0; i < nc; ++i) {
+                    dst_row[i] *= std::max(-limit, std::min(limit, up_row[i]));
+                }
                 break;
             case GGML_GLU_OP_SWIGLU_OAI:
                 for (long i = 0; i < nc; ++i) {
