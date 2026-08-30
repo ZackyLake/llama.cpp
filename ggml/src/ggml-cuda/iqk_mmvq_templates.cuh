@@ -202,6 +202,11 @@ static __device__ void iqk_fused_mul_mat_vec_q_kernel(
                         g = min(g, limit);
                         r = max(-limit, min(limit, u))*g;
                     } break;
+                case GGML_GLU_OP_SWIGLU_CLAMP:
+                    g = fminf(g, limit);
+                    u = fmaxf(fminf(u, limit), -limit);
+                    r = g / (1.0f + expf(-g)) * u;
+                    break;
                 case GGML_GLU_OP_REGLU: r = fmaxf(g, 0.0f) * u; break;
                 case GGML_GLU_OP_GEGLU: {
                     constexpr float GELU_COEF_A    = 0.044715f;
