@@ -1931,7 +1931,6 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     const int32_t hint = ggml_get_op_params_i32(dst, 1);
 
     if (hint == GGML_HINT_SRC0_IS_HADAMARD) {
-        
         GGML_ASSERT(src1->type == GGML_TYPE_F32);
         GGML_ASSERT(dst ->type == GGML_TYPE_F32);
         GGML_ASSERT(ggml_are_same_shape(src1, dst));
@@ -1941,14 +1940,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         GGML_ASSERT(nh > 1 && (nh & (nh - 1)) == 0);
         GGML_ASSERT(dst->ne[0] % nh == 0);
 
-        const auto success = hadamard_f32_cuda(nh, (const char *)src1->data, (char *)dst->data, src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
-            src1->nb[1], src1->nb[2], src1->nb[3], dst->nb[1], dst->nb[2], dst->nb[3], ctx.stream());
-        if (success) return;
-        
-    }
+        if (src1->ne[2] * src1->ne[3] <= 8 &&
+            hadamard_f32_cuda(nh, (const char *) src1->data, (char *) dst->data,
+                src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+                src1->nb[1], src1->nb[2], src1->nb[3], dst->nb[1], dst->nb[2], dst->nb[3], ctx.stream())) {
+            return;
+        }
 
-    if (hint == GGML_HINT_SRC0_IS_HADAMARD && ggml_cuda_op_fwht(ctx, src1, dst)) {
-        return;
+        if (ggml_cuda_op_fwht(ctx, src1, dst)) {
+            return;
+        }
     }
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
