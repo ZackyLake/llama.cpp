@@ -2699,7 +2699,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
 
         const float * dptr = (const float *)(x + i*stride);
-        const float d = dptr[0] * 1.05f;
+        const float d = dptr[0]; // fudge factor 1.05f removed
         const block_iq2_kt * bxi = (const block_iq2_kt *)(dptr + 1) + kbx0;
         int ib32 = threadIdx.x % 8;
         const int ls = iq4k_values[(bxi->scales[ib32%4] >> 4*(ib32/4)) & 0xf];
@@ -2780,7 +2780,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
 
         const float * dptr = (const float *)(x + i*stride);
-        const float d = dptr[0] * 1.01f;
+        const float d = dptr[0]; // fudge factor 1.01f removed
         const block_iq3_kt * bxi = (const block_iq3_kt *)(dptr + 1) + kbx0;
         int ib32 = threadIdx.x % 8;
         const int ls = (bxi->scales[ib32%4] >> 4*(ib32/4)) & 0xf;
