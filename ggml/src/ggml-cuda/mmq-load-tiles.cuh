@@ -2708,7 +2708,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
 
         const float * dptr = (const float *)(x + i*stride);
-        const float d = dptr[0] * 1.05f;
+        const float d = dptr[0]; // fudge factor 1.05f removed
         const block_iq2_kt * bxi = (const block_iq2_kt *)(dptr + 1) + kbx0;
         const int scale_lane = tid % (MMQ_TILE_NE_K/4);
         int ib32 = scale_lane;
@@ -2791,7 +2791,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         }
 
         const float * dptr = (const float *)(x + i*stride);
-        const float d = dptr[0] * 1.01f;
+        const float d = dptr[0]; // fudge factor 1.01f removed
         const block_iq3_kt * bxi = (const block_iq3_kt *)(dptr + 1) + kbx0;
         const int scale_lane = tid % (MMQ_TILE_NE_K/4);
         int ib32 = scale_lane;

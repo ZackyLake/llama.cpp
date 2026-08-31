@@ -2136,7 +2136,7 @@ void ggml_vec_dot_iq2_kt_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const v
         const int8_t * q8_h = y[ibl].qs + 128;  // next 128 elements
         const uint16_t * ql = (const uint16_t *)x[ibl].ql;
         const uint16_t * qh = ql + 16;  // kNg*kNblock/2 = 4*8/2 = 16
-        float db = d * y[ibl].d * 1.05f;
+        float db = d * y[ibl].d; // fudge factor 1.05f removed
         for (int ib = 0; ib < 4; ++ib) {  // kNblock/2=4
             int scale_l = iq4k_values[x[ibl].scales[ib] & 0xf];
             int scale_h = iq4k_values[x[ibl].scales[ib] >>  4];
@@ -2174,7 +2174,7 @@ void ggml_vec_dot_iq3_kt_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const v
         const int8_t * q8_h = y[ibl].qs + 128;
         const uint16_t * qll = (const uint16_t *)x[ibl].ql;
         const uint16_t * qlh = qll + 16;  // kNumGroups/2 = 32/2 = 16
-        float db = d * y[ibl].d * 1.01f;
+        float db = d * y[ibl].d; // fudge factor 1.01f removed
         int jj = 0;
         for (int ib = 0; ib < 4; ++ib) {  // kNblock/2=4
             int scale_l = x[ibl].scales[ib] & 0xf;
