@@ -3751,7 +3751,7 @@ static void quantize_row_iq2_xxs_impl(const float * GGML_RESTRICT x, void * GGML
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/32; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -3929,7 +3929,7 @@ static void quantize_row_iq2_xs_impl(const float * GGML_RESTRICT x, void * GGML_
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/16; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -4445,7 +4445,7 @@ static void quantize_row_iq3_xxs_impl(int grid_size, const float * GGML_RESTRICT
         }
 
         float d = max_scale/31;
-        dh[0] = GGML_FP32_TO_FP16(d * 1.0125f);  // small improvement via this fudge factor
+        dh[0] = GGML_FP32_TO_FP16(d); // fudge factor 1.0125f removed
         float id = 1/d;
         for (int ib = 0; ib < QK_K/32; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -4647,7 +4647,7 @@ static void quantize_row_iq3_s_impl(int block_size, const float * GGML_RESTRICT 
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d * 1.033f);
+        y[ibl].d = GGML_FP32_TO_FP16(d); // fudge factor 1.033f removed
         float id = 1/d;
         for (int ib = 0; ib < QK_K/block_size; ib += 2) {
             int l1 = nearest_int(0.5f*(id*scales[ib+0]-1));
@@ -5136,7 +5136,7 @@ static void quantize_row_iq1_s_impl(const float * GGML_RESTRICT x, void * GGML_R
         }
 
         float d = max_scale/15;
-        y[ibl].d = GGML_FP32_TO_FP16(d*1.125f); // 1.125f is another fudge factor. Don't ask me why it is needed.
+        y[ibl].d = GGML_FP32_TO_FP16(d); // fudge factor 1.125f removed
         float id = 1/d;
         for (int ib = 0; ib < QK_K/block_size; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -5296,7 +5296,7 @@ static void quantize_row_iq1_m_impl(const float * GGML_RESTRICT x, void * GGML_R
             }
         }
         if (sumq2_f > 0) d = sumqx_f/sumq2_f;
-        s.f16 = GGML_FP32_TO_FP16(d*1.085f); // 1.085f is another fudge factor. Don't ask me why it is needed.
+        s.f16 = GGML_FP32_TO_FP16(d); // fudge factor 1.085f removed
         sc[0] |= ((s.u16 & 0x000f) << 12);
         sc[1] |= ((s.u16 & 0x00f0) <<  8);
         sc[2] |= ((s.u16 & 0x0f00) <<  4);
@@ -5404,7 +5404,7 @@ size_t quantize_iq1_s_r4(const float * src, void * dst, int64_t nrows, int64_t n
             }
         }
         for (int k = 0; k < 4; ++k) {
-            dptr[k] = GGML_FP32_TO_FP16(1.0625f*max[k]/15);
+            dptr[k] = GGML_FP32_TO_FP16(max[k]/15); // fudge factor 1.0625f removed
             invd[k] = max[k] ? 15/max[k] : 0.f;
         }
         for (int ibl = 0; ibl < nblock; ++ibl) {
@@ -5525,7 +5525,7 @@ size_t quantize_iq1_m_r4(const float * src, void * dst, int64_t nrows, int64_t n
             }
         }
         for (int k = 0; k < 4; ++k) {
-            dptr[k] = GGML_FP32_TO_FP16(1.0625f*max[k]/15);
+            dptr[k] = GGML_FP32_TO_FP16(max[k]/15); // fudge factor 1.0625f removed
             invd[k] = max[k] ? 15/max[k] : 0.f;
         }
         for (int ibl = 0; ibl < nblock; ++ibl) {
@@ -5910,7 +5910,7 @@ static void quantize_row_iq2_s_impl(const float * GGML_RESTRICT x, void * GGML_R
         }
 
         float d = max_scale/31;
-        y[ibl].d = GGML_FP32_TO_FP16(d * 0.9875f);
+        y[ibl].d = GGML_FP32_TO_FP16(d * 0.947f); // average correction for inference codebook mismatch
         float id = 1/d;
         for (int ib = 0; ib < QK_K/16; ++ib) {
             int l = nearest_int(0.5f*(id*scales[ib]-1));
@@ -6375,7 +6375,7 @@ static void quantize_row_iq2_k_impl(const float * GGML_RESTRICT x, block_iq2_k *
                 }
             }
         }
-        y[ibl].d = GGML_FP32_TO_FP16(1.030f*(final_sumq2 > 0 ? final_sumqx/final_sumq2 : d));
+        y[ibl].d = GGML_FP32_TO_FP16(final_sumq2 > 0 ? final_sumqx/final_sumq2 : d); // fudge factor 1.030f removed
     }
 }
 
@@ -6595,7 +6595,7 @@ static void quantize_row_iq3_k_impl(const float * GGML_RESTRICT x, block_iq3_k *
                 }
             }
         }
-        y[ibl].d = GGML_FP32_TO_FP16(1.01f*(sumq2 > 0 ? sumqx/sumq2 : d));
+        y[ibl].d = GGML_FP32_TO_FP16(sumq2 > 0 ? sumqx/sumq2 : d); // fudge factor 1.01f removed
     }
 }
 
