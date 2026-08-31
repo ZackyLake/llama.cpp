@@ -369,7 +369,7 @@ void iqk_dequantize_iq2_kt(int n, const void * vx, size_t bx, float * y, size_t 
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d = _mm256_set1_ps(*dptr * 31.75f * 1.05f);
+        auto d = _mm256_set1_ps(*dptr * 31.75f); // fudge factor 1.05f removed
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
         for (int i = 0; i < nb; ++i) {
@@ -419,7 +419,7 @@ void iqk_dequantize_iq2_kt_q80_r8(int n, const void * vx, size_t bx, void * vy, 
             dkt[k] = dptr[0];
             x8[k] = (const block_iq2_kt *)(dptr + 1);
         }
-        auto vd = _mm256_mul_ps(_mm256_set1_ps(1.05f), _mm256_loadu_ps(dkt));
+        auto vd = _mm256_loadu_ps(dkt); // fudge factor 1.05f removed
 
         for (int i = 0; i < nb; ++i) {
             for (int k = 0; k < 8; ++k) {
@@ -468,7 +468,7 @@ void mul_mat_iq2_kt_F32_T(int n, const void * vx, size_t bx, const DataInfo& inf
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.05f;
+        const float d = *dptr * 31.75f; // fudge factor 1.05f removed
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = _mm256_setzero_ps();
@@ -700,7 +700,7 @@ void mul_mat_iq2_kt_q8_2_x4_T(int n, const void * vx, size_t bx, const DataInfo&
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d = _mm256_set1_ps(dptr[0] * 1.05f);
+        auto d = _mm256_set1_ps(dptr[0]); // fudge factor 1.05f removed
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = _mm256_setzero_ps();
@@ -758,7 +758,7 @@ void iqk_dequantize_iq3_kt_q80_r8(int n, const void * vx, size_t bx, void * vy, 
             dkt[k] = dptr[0];
             x8[k] = (const block_iq3_kt *)(dptr + 1);
         }
-        auto vd = _mm256_mul_ps(_mm256_set1_ps(1.01f), _mm256_loadu_ps(dkt));
+        auto vd = _mm256_loadu_ps(dkt); // fudge factor 1.01f removed
 
         for (int i = 0; i < nb; ++i) {
             for (int k = 0; k < 8; ++k) {
@@ -844,7 +844,7 @@ void mul_mat_iq3_kt_q8_2_x4_T(int n, const void * vx, size_t bx, const DataInfo&
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d = _mm256_set1_ps(dptr[0] * 1.01f);
+        auto d = _mm256_set1_ps(dptr[0]); // fudge factor 1.01f removed
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = _mm256_setzero_ps();
@@ -905,7 +905,7 @@ void iqk_dequantize_iq3_kt(int n, const void * vx, size_t bx, float * y, size_t 
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d  = _mm256_set1_ps(*dptr * 31.75f * 1.015f);
+        auto d  = _mm256_set1_ps(*dptr * 31.75f); // fudge factor 1.015f removed
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
         for (int i = 0; i < nb; ++i) {
@@ -959,7 +959,7 @@ void mul_mat_iq3_kt_F32_T(int n, const void * vx, size_t bx, const DataInfo& inf
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.015f;
+        const float d = *dptr * 31.75f; // fudge factor 1.015f removed
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
         for (int iy = 0; iy < nrc_y; ++iy) accd[iy] = _mm256_setzero_ps();
@@ -1440,7 +1440,7 @@ void iqk_dequantize_iq2_kt(int n, const void * vx, size_t bx, float16_t * y, siz
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.05f;
+        const float d = *dptr * 31.75f; // fudge factor 1.05f removed
         auto vd = vdupq_n_f32(d);
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
@@ -1490,7 +1490,7 @@ void mul_mat_iq2_kt_F16_T(int n, const void * vx, size_t bx, const DataInfo& inf
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.05f;
+        const float d = *dptr * 31.75f; // fudge factor 1.05f removed
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = vdupq_n_f16(0);
@@ -1549,7 +1549,7 @@ void iqk_dequantize_iq3_kt(int n, const void * vx, size_t bx, float16_t * y, siz
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.015f;
+        const float d = *dptr * 31.75f; // fudge factor 1.015f removed
         auto vd = vdupq_n_f32(d);
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
@@ -1607,7 +1607,7 @@ void mul_mat_iq3_kt_F16_T(int n, const void * vx, size_t bx, const DataInfo& inf
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        const float d = *dptr * 31.75f * 1.015f;
+        const float d = *dptr * 31.75f; // fudge factor 1.015f removed
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
         for (int iy = 0; iy < nrc_y; ++iy) accd[iy] = vdupq_n_f16(0);
@@ -2154,7 +2154,7 @@ void iqk_dequantize_iq2_kt_q80_r8(int n, const void * vx, size_t bx, void * vy, 
     for (int ix = 0; ix < nrc_x; ix += 8) {
         for (int k = 0; k < 8; ++k) {
             const float * dptr = (const float *)((const char*)vx + (ix+k)*bx);
-            dkt[k] = dptr[0] * 1.05f;
+            dkt[k] = dptr[0]; // fudge factor 1.05f removed
             x8[k] = (const block_iq2_kt *)(dptr + 1);
         }
         auto vd = vld1q_f32_x2(dkt);
@@ -2207,7 +2207,7 @@ void iqk_dequantize_iq3_kt_q80_r8(int n, const void * vx, size_t bx, void * vy, 
     for (int ix = 0; ix < nrc_x; ix += 8) {
         for (int k = 0; k < 8; ++k) {
             const float * dptr = (const float *)((const char*)vx + (ix+k)*bx);
-            dkt[k] = dptr[0] * 1.05f;
+            dkt[k] = dptr[0]; // fudge factor 1.05f removed
             x8[k] = (const block_iq3_kt *)(dptr + 1);
         }
         auto vd = vld1q_f32_x2(dkt);
@@ -2476,7 +2476,7 @@ void mul_mat_iq2_kt_q8_0_x4_T(int n, const void * vx, size_t bx, const DataInfo&
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d = vdupq_n_f32(dptr[0]*1.05f);
+        auto d = vdupq_n_f32(dptr[0]); // fudge factor 1.05f removed
         const block_iq2_kt * x = (const block_iq2_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = vdupq_n_f32(0);
@@ -2578,7 +2578,7 @@ void mul_mat_iq3_kt_q8_0_x4_T(int n, const void * vx, size_t bx, const DataInfo&
 
     for (int ix = 0; ix < nrc_x; ++ix) {
         const float * dptr = (const float *)((const char*)vx + ix*bx);
-        auto d = vdupq_n_f32(dptr[0]*1.05f);
+        auto d = vdupq_n_f32(dptr[0]); // fudge factor 1.05f removed
         const block_iq3_kt * x = (const block_iq3_kt *)(dptr + 1);
 
         for (int iy = 0; iy < k_acc; ++iy) accd[iy] = vdupq_n_f32(0);
