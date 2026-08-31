@@ -1245,7 +1245,7 @@ static void quantize_row_iq4_kss_impl(int n_per_row, const float * x, char * cy,
             }
         }
     }
-    if (sumq2 > 0) *dptr = sumqx/sumq2 * 1.01f;
+    if (sumq2 > 0) *dptr = sumqx/sumq2; // fudge factor 1.01f removed
 }
 
 
@@ -2399,7 +2399,7 @@ void quantize_row_iq2_kl_impl(const float * x, void * vy, int n_per_row, const f
     }
     if (sumq2 > 0) d = sumqx/sumq2;
 
-    dptr[0] = GGML_FP32_TO_FP16(1.025f * d);
+    dptr[0] = GGML_FP32_TO_FP16(d); // fudge factor 1.025f removed
 
 }
 }
@@ -2699,7 +2699,7 @@ void quantize_row_iq1_kt_impl(const float * x, void * vy, int n_per_row, const f
         }
         if (sumq2 > 0) {
             d = sumqx/sumq2;
-            *dptr = d * 1.07f;
+            *dptr = d; // fudge factor 1.07f removed
             if (!d) return;
         } else {
             break;

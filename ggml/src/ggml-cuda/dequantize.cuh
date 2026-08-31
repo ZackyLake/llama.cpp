@@ -942,7 +942,7 @@ static __device__ __forceinline__ void dequantize_iq2_kt(const void * vx, const 
     dst_t * y = yy + 8*ib;
     const uint16_t * ql = (const uint16_t *)x[i].ql;
     uint32_t idx = ql[ib] + 4096;
-    const float dl = scale * iq4k_values[((x[i].scales[(ib/4)%4] >> 4*(ib/16)) & 0xf)] * 1.05f;
+    const float dl = scale * iq4k_values[((x[i].scales[(ib/4)%4] >> 4*(ib/16)) & 0xf)]; // fudge factor 1.05f removed
     for (int j = 0; j < 8; ++j) {
         y[j] = dl * trellis_next_int(idx);
     }
@@ -961,7 +961,7 @@ static __device__ __forceinline__ void dequantize_iq3_kt(const void * vx, const 
     dst_t * y = yy + 8*ib;
     const uint16_t * ql = (const uint16_t *)x[i].ql;
     uint32_t idx = ql[ib] + 4096;
-    const float dl = scale * ((x[i].scales[(ib/4)%4] >> 4*(ib/16)) & 0xf) * 1.01f; //1.015f;
+    const float dl = scale * ((x[i].scales[(ib/4)%4] >> 4*(ib/16)) & 0xf); // fudge factor 1.01f removed
     uint8_t mask = 1 << (ib/4);
     for (int j = 0; j < 8; ++j) {
         y[j] = dl * std::abs(trellis_next_int(idx)) * (x[i].qh[(8*ib+j)%32] & mask ? -1.f : 1.f);
