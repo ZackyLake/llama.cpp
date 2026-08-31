@@ -2044,7 +2044,7 @@ static __device__ __forceinline__ float vec_dot_iq2_kt_q8_1(
     const int ib32 = iqs/4;
     const int32_t  * q8 = (const int *)bq8_1[ib32].qs;
     const int ls = iq4k_values[(bq2->scales[ib32%4] >> 4*(ib32/4)) & 0xf];
-    const float dl = scale * ls * 1.05f;
+    const float dl = scale * ls; // fudge factor 1.05f removed
     auto ql = (const uint16_t *)bq2->ql;
     int sumi = 0;
     for (int j = 0; j < 4; ++j) {
@@ -2078,7 +2078,7 @@ static __device__ __forceinline__ float vec_dot_iq3_kt_q8_1(
     const int ib32 = iqs/4;
     const int32_t  * q8 = (const int *)bq8_1[ib32].qs;
     const int ls = (bq3->scales[ib32%4] >> 4*(ib32/4)) & 0xf;
-    const float dl = scale * ls * 1.015f;
+    const float dl = scale * ls; // fudge factor 1.015f removed
     auto ql = (const uint16_t *)bq3->ql;
     uint32_t mask = 0x01010101 << ib32;
     const uint32_t * qh = (const uint32_t *)bq3->qh;
