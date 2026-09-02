@@ -15,6 +15,7 @@
 #include <mutex>
 #include <numeric>
 #include <regex>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 
@@ -1039,7 +1040,7 @@ static void init_quantize_state_counters(quantize_state_impl & qs, std::vector<t
 // main quantization driver
 //
 
-static void llama_model_quantize_impl(const std::string & fname_inp, const std::string & fname_out, const llama_model_quantize_params * params) {
+static void llama_model_quantize_impl(const std::string & fname_inp, const std::string & fname_out, const char * fname_ref, const llama_model_quantize_params * params) {
     llama_ftype ftype = params->ftype;
 
     int nthread = params->nthread;
@@ -1061,11 +1062,70 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     constexpr llama_load_mode load_mode = LLAMA_LOAD_MODE_NONE;
 #endif
 
+    static constexpr const char * chat_template_key = "tokenizer.chat_template";
     const llama_model_kv_override * kv_overrides = params->kv_overrides;
+    std::vector<llama_model_kv_override> loader_kv_overrides;
+    std::string chat_template;
+    bool has_chat_template = false;
+    if (params->kv_overrides) {
+        for (const llama_model_kv_override * o = params->kv_overrides; o->key[0] != 0; ++o) {
+            if (std::strcmp(o->key, chat_template_key) == 0) {
+                if (o->tag != LLAMA_KV_OVERRIDE_TYPE_STR) {
+                    throw std::runtime_error("tokenizer.chat_template override must be a file path");
+                }
+
+                std::ifstream file(o->val_str, std::ios::binary);
+                if (!file) {
+                    throw std::runtime_error(format("failed to open chat template file %s", o->val_str));
+                }
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                if (file.bad()) {
+                    throw std::runtime_error(format("failed to read chat template file %s", o->val_str));
+                }
+                chat_template = buffer.str();
+                has_chat_template = true;
+            } else {
+                loader_kv_overrides.push_back(*o);
+            }
+        }
+        if (has_chat_template) {
+            loader_kv_overrides.emplace_back();
+            kv_overrides = loader_kv_overrides.data();
+        }
+    }
     std::vector<std::string> splits = {};
     llama_model_loader ml(/*metadata*/ nullptr, /*set_tensor_data*/ nullptr, /*set_tensor_data_ud*/ nullptr,
         fname_inp, splits, /*file*/ nullptr, /*load_mode*/ load_mode, /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true, kv_overrides, nullptr);
     ml.init_mappings(false); // no prefetching
+
+    std::vector<std::unique_ptr<llama_model_loader>> ref_loaders;
+    if (fname_ref != nullptr && fname_ref[0] != '\0') {
+        const std::string ref_fnames(fname_ref);
+        size_t begin = 0;
+        while (begin <= ref_fnames.size()) {
+            const size_t end = ref_fnames.find('#', begin);
+            const std::string ref_fname = ref_fnames.substr(begin,
+                    end == std::string::npos ? std::string::npos : end - begin);
+            if (ref_fname.empty()) {
+                throw std::runtime_error("empty ref model path");
+            }
+
+            std::vector<std::string> ref_splits;
+            auto ref_loader = std::make_unique<llama_model_loader>(
+                    /*metadata*/ nullptr, /*set_tensor_data*/ nullptr, /*set_tensor_data_ud*/ nullptr,
+                    ref_fname, ref_splits, /*file*/ nullptr, /*load_mode*/ load_mode,
+                    /*check_tensors*/ true, /*no_alloc*/ false, /*load_mtp*/ true,
+                    /*param_overrides*/ nullptr, /*param_tensor_buft_overrides*/ nullptr);
+            ref_loader->init_mappings(false); // no prefetching
+            ref_loaders.emplace_back(std::move(ref_loader));
+
+            if (end == std::string::npos) {
+                break;
+            }
+            begin = end + 1;
+        }
+    }
 
     auto mparams = llama_model_default_params();
     std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, mparams));
@@ -1127,6 +1187,9 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
     if (params->kv_overrides) {
         for (const llama_model_kv_override * o = params->kv_overrides; o->key[0] != 0; ++o) {
+            if (std::strcmp(o->key, chat_template_key) == 0) {
+                continue;
+            }
             if (o->tag == LLAMA_KV_OVERRIDE_TYPE_FLOAT) {
                 gguf_set_val_f32(ctx_out.get(), o->key, o->val_f64);
             } else if (o->tag == LLAMA_KV_OVERRIDE_TYPE_INT) {
@@ -1140,6 +1203,9 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                 LLAMA_LOG_WARN("%s: unknown KV override type for key %s\n", __func__, o->key);
             }
         }
+    }
+    if (has_chat_template) {
+        gguf_set_val_str(ctx_out.get(), chat_template_key, chat_template.c_str());
     }
 
     std::map<int, std::string> mapped;
@@ -1240,6 +1306,17 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         }
     }
 
+    struct ref_tensor_info {
+        llama_model_loader * loader;
+        const llama_model_loader::llama_tensor_weight * weight;
+    };
+    std::unordered_map<std::string, ref_tensor_info> ref_tensors;
+    for (const auto & ref_loader : ref_loaders) {
+        for (const auto & [name, weight] : ref_loader->weights_map) {
+            ref_tensors[name] = { ref_loader.get(), &weight };
+        }
+    }
+
     // Set split info if needed
     if (n_split > 1) {
         for (size_t i = 0; i < ctx_outs.size(); ++i) {
@@ -1253,6 +1330,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
     size_t total_size_new = 0;
 
     std::vector<no_init<uint8_t>> read_data;
+    std::vector<no_init<uint8_t>> ref_data;
     std::vector<no_init<uint8_t>> work;
     std::vector<no_init<float>> f32_conv_buf;
     llama_quantize_threadpool threadpool(nthread);
@@ -1330,6 +1408,22 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         // in then there's nothing to do.
         bool quantize = cur_type != new_type;
 
+        const llama_model_loader * ref_loader = nullptr;
+        const llama_model_loader::llama_tensor_weight * ref_weight = nullptr;
+        bool copy_from_ref = false;
+        if (!params->dry_run) {
+            const auto ref_it = ref_tensors.find(ggml_get_name(tensor));
+            if (ref_it != ref_tensors.end() && ref_it->second.weight->tensor->type == new_type) {
+                ref_loader = ref_it->second.loader;
+                ref_weight = ref_it->second.weight;
+                const ggml_tensor * ref_tensor = ref_weight->tensor;
+                GGML_ASSERT(ggml_are_same_shape(tensor, ref_tensor));
+                const size_t expected_size = ggml_nrows(tensor) * ggml_row_size(new_type, tensor->ne[0]);
+                GGML_ASSERT(ggml_nbytes(ref_tensor) == expected_size);
+                copy_from_ref = true;
+            }
+        }
+
         size_t new_size;
 
         if (params->dry_run) {
@@ -1352,7 +1446,17 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             continue;
         } else {
             // no --dry-run, perform quantization
-            if (!quantize) {
+            if (copy_from_ref) {
+                const size_t ref_size = ggml_nbytes(ref_weight->tensor);
+                if (!ref_loader->use_mmap && ref_data.size() < ref_size) {
+                    ref_data.resize(ref_size);
+                }
+                const void * data = ref_loader->load_data_range(*ref_weight, 0, ref_size, ref_data.data());
+                new_size = ref_size;
+                LLAMA_LOG_INFO("copied from ref with %s, size = %8.3f MiB\n", ggml_type_name(new_type), new_size/1024.0/1024.0);
+                fout.write((const char *) data, new_size);
+                if (ref_loader->use_mmap) ref_loader->unmap_weight(*ref_weight);
+            } else if (!quantize) {
                 new_size = tensor_size;
                 LLAMA_LOG_INFO("size = %8.3f MiB\n", tensor_size/1024.0/1024.0);
 
@@ -1369,7 +1473,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                 if (imatrix_data) {
                     auto it = imatrix_data->find(tm.remapped_imatrix_name);
                     if (it == imatrix_data->end()) {
-                        LLAMA_LOG_INFO("\n====== %s: did not find weights for %s\n", __func__, tensor->name);
+                        LLAMA_LOG_INFO("====== %s: did not find weights for %s\n", __func__, tensor->name);
                     } else {
                         if (it->second.size() == (size_t)tensor->ne[0]*tensor->ne[2]) {
                             imatrix = it->second.data();
@@ -1524,8 +1628,16 @@ uint32_t llama_model_quantize(
         const char * fname_inp,
         const char * fname_out,
         const llama_model_quantize_params * params) {
+    return llama_model_quantize_ref(fname_inp, fname_out, nullptr, params);
+}
+
+uint32_t llama_model_quantize_ref(
+        const char * fname_inp,
+        const char * fname_out,
+        const char * fname_ref,
+        const llama_model_quantize_params * params) {
     try {
-        llama_model_quantize_impl(fname_inp, fname_out, params);
+        llama_model_quantize_impl(fname_inp, fname_out, fname_ref, params);
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: failed to quantize: %s\n", __func__, err.what());
         return 1;

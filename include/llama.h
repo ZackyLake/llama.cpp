@@ -695,6 +695,12 @@ extern "C" {
             const char * fname_out,
             const llama_model_quantize_params * params);
 
+    LLAMA_API uint32_t llama_model_quantize_ref(
+            const char * fname_inp,
+            const char * fname_out,
+            const char * fname_ref,
+            const llama_model_quantize_params * params);
+
     //
     // Adapters
     //
