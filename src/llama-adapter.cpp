@@ -389,6 +389,9 @@ static void llama_adapter_lora_init_impl(llama_model & model, FILE * file, llama
             if (!buf) {
                 throw std::runtime_error("failed to allocate buffer for lora adapter\n");
             }
+            // mark as weights so ops using them stay on the same backend as the
+            // corresponding model tensor (avoids per-step host->device copies)
+            ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
             LLAMA_LOG_INFO("%s: %10s LoRA buffer size = %8.2f MiB\n", __func__, ggml_backend_buffer_name(buf.get()), ggml_backend_buffer_get_size(buf.get())/1024.0/1024.0);
             adapter.bufs.emplace_back(std::move(buf));
         }
