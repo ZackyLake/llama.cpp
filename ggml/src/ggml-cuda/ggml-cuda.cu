@@ -2000,6 +2000,19 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
 }
 
+// shape/stride requirements of the mmvf path for MUL_MAT_ID (mirrors the
+// asserts in ggml_cuda_mul_mat_vec_f / launch_mul_mat_vec_f_cuda); when met,
+// mul_mat_vec_f runs without any stream synchronization
+static bool ggml_cuda_mmvf_mmid_supported(const ggml_tensor * src0, const ggml_tensor * src1) {
+    const size_t ts0 = ggml_type_size(src0->type);
+    return src0->ne[0] % 2 == 0 &&
+           src0->nb[0] == ts0 &&
+           src0->nb[1] % (2*ts0) == 0 &&
+           (src0->ne[3] == 1 || src1->ne[3] % src0->ne[3] == 0) &&
+           src1->nb[0] == sizeof(float) &&
+           src1->nb[2] % (2*sizeof(float)) == 0;
+}
+
 // returns true when ggml_cuda_mul_mat_id takes the fallback path that requires stream synchronization
 // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
 static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int cc) {
@@ -2015,7 +2028,7 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
             if (dst->ne[2] <= get_mmvq_mmid_max_batch(src0->type, cc)) {
                 return false;
             }
-        } else if (GGML_CUDA_CC_IS_AMD(cc)) {
+        } else if (GGML_CUDA_CC_IS_AMD(cc) || ggml_cuda_mmvf_mmid_supported(src0, src1)) {
             return false;
         }
     }
@@ -2126,7 +2139,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                     return;
                 }
             } else {
-                if (GGML_CUDA_CC_IS_AMD(cc)) {
+                if (GGML_CUDA_CC_IS_AMD(cc) || ggml_cuda_mmvf_mmid_supported(src0, src1)) {
                     ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                     return;
                 }
