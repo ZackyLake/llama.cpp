@@ -2634,6 +2634,23 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
 }
 
+// shape/stride requirements of mul_mat_vec_f for MUL_MAT_ID (mirrors ggml_cuda_should_use_mmvf and the asserts in ggml_cuda_mul_mat_vec_f)
+static bool ggml_cuda_mmvf_mmid_supported(const ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * ids  = dst->src[2];
+    const size_t ts0 = ggml_type_size(src0->type);
+    return src0->ne[0] % 2 == 0 &&
+           src0->nb[0] == ts0 &&
+           ggml_cuda_is_aligned(src0, 2*ts0) &&
+           src1->ne[3] == dst->ne[3] &&
+           dst->ne[3] % src0->ne[3] == 0 &&
+           src1->nb[0] == sizeof(float) &&
+           src1->nb[2] % (2*sizeof(float)) == 0 &&
+           ids->nb[0] == sizeof(int32_t) &&
+           dst->nb[0] == sizeof(float);
+}
+
 // returns true when ggml_cuda_mul_mat_id takes the fallback path that requires stream synchronization
 // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
 static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int cc) {
@@ -2653,7 +2670,7 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
         } else if (src0->type == GGML_TYPE_F8_E4M3 &&
                 ggml_cuda_should_use_mmvf(src0, cc, warp_size, dst->ne[2])) {
             return false;
-        } else if (src0->type != GGML_TYPE_F8_E4M3 && GGML_CUDA_CC_IS_AMD(cc)) {
+        } else if (src0->type != GGML_TYPE_F8_E4M3 && (GGML_CUDA_CC_IS_AMD(cc) || ggml_cuda_mmvf_mmid_supported(dst))) {
             return false;
         }
     }
@@ -2697,7 +2714,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                 ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                 return;
             } else {
-                if (src0->type != GGML_TYPE_F8_E4M3 && GGML_CUDA_CC_IS_AMD(cc)) {
+                if (src0->type != GGML_TYPE_F8_E4M3 && (GGML_CUDA_CC_IS_AMD(cc) || ggml_cuda_mmvf_mmid_supported(dst))) {
                     ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                     return;
                 }
