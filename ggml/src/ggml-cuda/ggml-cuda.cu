@@ -2403,6 +2403,32 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
 }
 
+static bool ggml_cuda_should_use_mmvf_mmid(const ggml_tensor * dst, int cc, int warp_size) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * ids  = dst->src[2];
+
+    if (ggml_cuda_should_use_mmvf(src0, src1->type, cc, warp_size, dst->ne[2], /*mul_mat_id =*/ true)) {
+        return true;
+    }
+
+    if (src1->type != GGML_TYPE_F32 ||
+            (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_BF16)) {
+        return false;
+    }
+
+    const size_t ts0 = ggml_type_size(src0->type);
+    return src0->ne[0] % 2 == 0 &&
+           src0->nb[0] == ts0 &&
+           ggml_cuda_is_aligned(src0, 2*ts0) &&
+           src1->ne[3] == dst->ne[3] &&
+           dst->ne[3] % src0->ne[3] == 0 &&
+           src1->nb[0] == sizeof(float) &&
+           src1->nb[2] % (2*sizeof(float)) == 0 &&
+           ids->nb[0] == sizeof(int32_t) &&
+           dst->nb[0] == sizeof(float);
+}
+
 // returns true when ggml_cuda_mul_mat_id takes the fallback path that requires stream synchronization
 // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
 static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int cc) {
@@ -2419,7 +2445,7 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
             if (dst->ne[2] <= get_mmvq_mmid_max_batch(src0->type, cc)) {
                 return false;
             }
-        } else if (ggml_cuda_should_use_mmvf(src0, src1->type, cc, warp_size, dst->ne[2], /*mul_mat_id =*/ true)) {
+        } else if (ggml_cuda_should_use_mmvf_mmid(dst, cc, warp_size)) {
             return false;
         }
     }
@@ -2465,7 +2491,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;
                 }
-            } else if (ggml_cuda_should_use_mmvf(src0, src1->type, cc, warp_size, ne2, /*mul_mat_id =*/ true)) {
+            } else if (ggml_cuda_should_use_mmvf_mmid(dst, cc, warp_size)) {
                 ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
                 return;
             }
