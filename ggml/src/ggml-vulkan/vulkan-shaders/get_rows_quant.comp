@@ -32,6 +32,16 @@ void main() {
             const uint a_offset = get_aoffset() + i01*p.nb01 + i11*p.nb02 + i12*p.nb03;
             const uint d_offset = get_doffset() + i10*p.nb21 + i11*p.nb22 + i12*p.nb23;
 
+#if defined(DATA_A_IQK_ROW)
+            const uint row_offset = 2 * a_offset;
+            const uint block_offset = row_offset + IQK_ROW_META_SIZE + (i00 / QUANT_K) * IQK_BLOCK_SIZE;
+            data_d[d_offset + i00    ] = D_TYPE(dequantize_iqk_row(row_offset, block_offset, i00 % QUANT_K));
+            data_d[d_offset + i00 + 1] = D_TYPE(dequantize_iqk_row(row_offset, block_offset, (i00 + 1) % QUANT_K));
+#elif defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+            const uint block = a_offset + i00 / QUANT_K;
+            data_d[d_offset + i00    ] = D_TYPE(dequantize_iqk(block, i00 % QUANT_K));
+            data_d[d_offset + i00 + 1] = D_TYPE(dequantize_iqk(block, (i00 + 1) % QUANT_K));
+#else
             const uint ib = a_offset + i00/QUANT_K; // block index
             const uint iqs = (i00%QUANT_K)/QUANT_R; // quant index
             const uint iybs = i00 - i00%QUANT_K; // dst block start index
@@ -43,6 +53,7 @@ void main() {
 
             data_d[d_offset + iybs + iqs           ] = D_TYPE(v.x);
             data_d[d_offset + iybs + iqs + y_offset] = D_TYPE(v.y);
+#endif
 
             gid_y += gl_WorkGroupSize.y * gl_NumWorkGroups.y;
         }

@@ -29,6 +29,8 @@ layout (binding = 0) readonly buffer A_PACKED16 {A_TYPE_PACKED16 data_a_packed16
 #endif
 #if defined(A_TYPE_PACKED32)
 layout (binding = 0) readonly buffer A_PACKED32 {A_TYPE_PACKED32 data_a_packed32[];};
+#elif defined(DATA_A_IQK_ROW_PACKED32)
+layout (binding = 0) readonly buffer A_PACKED32 {uint32_t data_a_packed32[];};
 #endif
 layout (binding = 1) readonly buffer B {block_q8_1_x4_packed128 data_b[];};
 layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
@@ -197,13 +199,24 @@ void main() {
     const uint end_k = min(p.K, (ik + 1) * p.k_split);
 #endif
 
-    uint pos_a_ib =
+    #ifdef DATA_A_IQK_ROW
+        const uint pos_a_row =
+    #ifdef MUL_MAT_ID
+        expert_idx * p.batch_stride_a +
+    #else
+        batch_idx_a * p.batch_stride_a +
+    #endif
+        ir * BM * p.stride_a;
+        uint pos_a_ib = start_k / BK;
+    #else
+        uint pos_a_ib =
 #ifdef MUL_MAT_ID
         expert_idx * (p.batch_stride_a / BK) +
 #else
         batch_idx_a * (p.batch_stride_a / BK) +
 #endif
         (ir * BM * p.stride_a + start_k) / BK;
+    #endif
 #ifdef MUL_MAT_ID
     uint pos_b_ib = 0;
 #else
@@ -219,12 +232,21 @@ void main() {
     for (uint block = start_k; block < end_k; block += BK * BK_STEP) {
         [[unroll]] for (uint l = 0; loadc_a + l < BM; l += loadstride_a) {
             const uint buf_ib = loadc_a + l;
+#ifdef DATA_A_IQK_ROW
+            const uint row_offset = pos_a_row + buf_ib * p.stride_a;
+            const uint ib = pos_a_ib;
+#else
             const uint ib = pos_a_ib + buf_ib * p.stride_a / BK;
+#endif
             const uint iqs = loadr_a;
 
             [[unroll]] for (uint k_step = 0; k_step < BK_STEP; k_step++) {
                 if (block + k_step * BK < end_k) {
+#ifdef DATA_A_IQK_ROW
+                    block_a_to_shmem(k_step * BM + buf_ib, row_offset, ib + k_step, iqs);
+#else
                     block_a_to_shmem(k_step * BM + buf_ib, ib + k_step, iqs);
+#endif
                 }
             }
         }

@@ -1026,7 +1026,8 @@ template <> inline void init_pushconst_tensor_offsets(ggml_backend_vk_context * 
 }
 
 template <> inline void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_binary_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
-    const uint32_t a_offset = get_misalign_bytes(ctx, src0) / ggml_type_size(src0->type);
+    const size_t src0_unit_size = ggml_vk_tensor_storage_unit_size(src0->type);
+    const uint32_t a_offset = get_misalign_bytes(ctx, src0) / src0_unit_size;
     const uint32_t b_offset = get_misalign_bytes(ctx, src1) / ggml_type_size(src1->type);
     const uint32_t d_offset = get_misalign_bytes(ctx, dst) / ggml_type_size(dst->type);
 

@@ -9160,6 +9160,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    for (ggml_type type : iqk_types) {
+        for (int b : { 1, 7 }) {
+            for (bool v : { false, true }) {
+                for (bool vs0 : { false, true }) {
+                    test_cases.emplace_back(new test_get_rows(type, 256, 5, 4, b, 1, v, vs0));
+                }
+            }
+        }
+    }
     for (int b : {1, 7}) {
         for (bool v : {false, true}) {
             for (bool vs0 : {false, true}) {
@@ -9962,6 +9971,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             //test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 18,  i, 32*256, { 1,  1}, {8, 1}));
             //test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 19,  i, 33*256, { 1,  1}, {1, 1}));
         }
+        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 16, 512, 1 * 256, { 1, 1 }, { 1, 1 }));
         // mat-vec shaders split k across lanes and loop over the blocks in strides. k must be
         // long enough that the loop wraps, else the stride is never exercised
         test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  1, 16*256, { 1,  1}, {1, 1}));
