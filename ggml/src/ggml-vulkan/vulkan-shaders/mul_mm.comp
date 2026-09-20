@@ -327,12 +327,21 @@ void main() {
 #endif
 
     uint pos_a =
+#if defined(DATA_A_IQK_ROW)
+#ifdef MUL_MAT_ID
+        expert_idx * p.batch_stride_a +
+#else
+        batch_idx_a * p.batch_stride_a +
+#endif
+        ir * BM * p.stride_a;
+#else
 #ifdef MUL_MAT_ID
         expert_idx * (p.batch_stride_a / LOAD_VEC_A_EFF) +
 #else
         batch_idx_a * (p.batch_stride_a / LOAD_VEC_A_EFF) +
 #endif
         (ir * BM * p.stride_a + start_k) / LOAD_VEC_A_EFF;
+#endif
 #ifdef MUL_MAT_ID
     uint pos_b = 0;
 #else
@@ -382,7 +391,9 @@ void main() {
 
         barrier();
 
+#if !defined(DATA_A_IQK_ROW)
         pos_a += BK / LOAD_VEC_A_EFF;
+#endif
         pos_b += BK / LOAD_VEC_B_EFF;
 
 #ifdef COOPMAT

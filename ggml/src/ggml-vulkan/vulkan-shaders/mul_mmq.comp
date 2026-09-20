@@ -21,6 +21,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #endif
 
+#define IQK_MMQ_LUT
+
 #include "types.glsl"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
@@ -119,8 +121,17 @@ void main() {
         return;
     }
 #endif
-#ifdef NEEDS_INIT_IQ_SHMEM
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL) && !defined(DATA_A_IQ4_K) && !defined(DATA_A_IQ4_KS) && !defined(DATA_A_IQ4_KSS)
     init_iq_shmem(gl_WorkGroupSize);
+#endif
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#elif defined(DATA_A_IQ2_KL)
+    init_iq2kl_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    init_iq4k_table();
 #endif
 
 #ifndef MUL_MAT_ID
@@ -199,13 +210,24 @@ void main() {
     const uint end_k = min(p.K, (ik + 1) * p.k_split);
 #endif
 
-    uint pos_a_ib =
+    #ifdef DATA_A_IQK_ROW
+        const uint pos_a_row =
+    #ifdef MUL_MAT_ID
+        expert_idx * p.batch_stride_a +
+    #else
+        batch_idx_a * p.batch_stride_a +
+    #endif
+        ir * BM * p.stride_a;
+        uint pos_a_ib = start_k / BK;
+    #else
+        uint pos_a_ib =
 #ifdef MUL_MAT_ID
         expert_idx * (p.batch_stride_a / BK) +
 #else
         batch_idx_a * (p.batch_stride_a / BK) +
 #endif
         (ir * BM * p.stride_a + start_k) / BK;
+    #endif
 #ifdef MUL_MAT_ID
     uint pos_b_ib = 0;
 #else
@@ -221,12 +243,21 @@ void main() {
     for (uint block = start_k; block < end_k; block += BK * BK_STEP) {
         [[unroll]] for (uint l = 0; loadc_a + l < BM; l += loadstride_a) {
             const uint buf_ib = loadc_a + l;
+#ifdef DATA_A_IQK_ROW
+            const uint row_offset = pos_a_row + buf_ib * p.stride_a;
+            const uint ib = pos_a_ib;
+#else
             const uint ib = pos_a_ib + buf_ib * p.stride_a / BK;
+#endif
             const uint iqs = loadr_a;
 
             [[unroll]] for (uint k_step = 0; k_step < BK_STEP; k_step++) {
                 if (block + k_step * BK < end_k) {
+#ifdef DATA_A_IQK_ROW
+                    block_a_to_shmem(k_step * BM + buf_ib, row_offset, ib + k_step, iqs);
+#else
                     block_a_to_shmem(k_step * BM + buf_ib, ib + k_step, iqs);
+#endif
                 }
             }
         }

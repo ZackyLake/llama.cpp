@@ -7,6 +7,10 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 #extension GL_EXT_shader_16bit_storage : require
 
+#ifndef IQK_LUT_TYPE
+#define IQK_LUT_TYPE int8_t
+#endif
+
 #ifdef USE_OCP_FP4
 #extension GL_EXT_float_e2m1 : require
 #extension GL_EXT_float_e4m3 : require
@@ -489,6 +493,623 @@ struct block_q6_K_packed16
 #define A_TYPE block_q6_K
 #define A_TYPE_PACKED16 block_q6_K_packed16
 #define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_IQ2_K 256
+
+struct block_iq2_k
+{
+    float16_t d;
+    uint16_t extra;
+    uint8_t scales[QUANT_K_IQ2_K/32];
+    uint8_t qs[QUANT_K_IQ2_K/4];
+};
+
+struct block_iq2_k_packed16
+{
+    float16_t d;
+    uint16_t extra;
+    uint16_t scales[QUANT_K_IQ2_K/32/2];
+    uint16_t qs[QUANT_K_IQ2_K/4/2];
+};
+
+struct block_iq2_k_packed32
+{
+    uint32_t de;
+    uint32_t scales[QUANT_K_IQ2_K/32/4];
+    uint32_t qs[QUANT_K_IQ2_K/4/4];
+};
+
+#if defined(DATA_A_IQ2_K)
+#define QUANT_K QUANT_K_IQ2_K
+#define QUANT_R 1
+#define A_TYPE block_iq2_k
+#define A_TYPE_PACKED16 block_iq2_k_packed16
+#define A_TYPE_PACKED32 block_iq2_k_packed32
+#define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_IQ3_K 256
+
+struct block_iq3_k
+{
+    float16_t d;
+    uint16_t extra;
+    uint16_t scales_h;
+    uint8_t scales_l[QUANT_K_IQ3_K/32];
+    uint8_t qs[QUANT_K_IQ3_K/4];
+    uint8_t qh[QUANT_K_IQ3_K/8];
+};
+
+struct block_iq3_k_packed16
+{
+    float16_t d;
+    uint16_t extra;
+    uint16_t scales_h;
+    uint16_t scales_l[QUANT_K_IQ3_K/32/2];
+    uint16_t qs[QUANT_K_IQ3_K/4/2];
+    uint16_t qh[QUANT_K_IQ3_K/8/2];
+};
+
+#if defined(DATA_A_IQ3_K)
+#define QUANT_K QUANT_K_IQ3_K
+#define QUANT_R 1
+#define A_TYPE block_iq3_k
+#define A_TYPE_PACKED16 block_iq3_k_packed16
+#define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_IQ4_K 256
+
+struct block_iq4_k
+{
+    float16_t d;
+    uint16_t extra;
+    uint8_t scales_h[QUANT_K_IQ4_K/64];
+    uint8_t scales_l[QUANT_K_IQ4_K/32];
+    uint8_t qs[QUANT_K_IQ4_K/2];
+};
+
+struct block_iq4_k_packed16
+{
+    float16_t d;
+    uint16_t extra;
+    uint16_t scales_h[QUANT_K_IQ4_K/64/2];
+    uint16_t scales_l[QUANT_K_IQ4_K/32/2];
+    uint16_t qs[QUANT_K_IQ4_K/2/2];
+};
+
+struct block_iq4_k_packed32
+{
+    uint32_t de;
+    uint32_t scales_h;
+    uint32_t scales_l[QUANT_K_IQ4_K/32/4];
+    uint32_t qs[QUANT_K_IQ4_K/2/4];
+};
+
+#if defined(DATA_A_IQ4_K)
+#define QUANT_K QUANT_K_IQ4_K
+#define QUANT_R 1
+#define A_TYPE block_iq4_k
+#define A_TYPE_PACKED16 block_iq4_k_packed16
+#define A_TYPE_PACKED32 block_iq4_k_packed32
+#define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_IQ5_K 256
+
+struct block_iq5_k
+{
+    float16_t d;
+    uint16_t extra;
+    uint8_t scales_h[QUANT_K_IQ5_K/64];
+    uint8_t scales_l[QUANT_K_IQ5_K/32];
+    uint8_t qs[QUANT_K_IQ5_K/2];
+    uint8_t qh[QUANT_K_IQ5_K/8];
+};
+
+struct block_iq5_k_packed32
+{
+    uint32_t de;
+    uint32_t scales_h;
+    uint32_t scales_l[QUANT_K_IQ5_K/32/4];
+    uint32_t qs[QUANT_K_IQ5_K/2/4];
+    uint32_t qh[QUANT_K_IQ5_K/8/4];
+};
+
+#if defined(DATA_A_IQ5_K)
+#define QUANT_K QUANT_K_IQ5_K
+#define QUANT_R 1
+#define A_TYPE block_iq5_k
+#define A_TYPE_PACKED32 block_iq5_k_packed32
+#define DATA_A_QUANT_K
+#endif
+
+#define QUANT_K_IQ6_K 256
+
+struct block_iq6_k
+{
+    float16_t d;
+    uint16_t extra;
+    int8_t scales[QUANT_K_IQ6_K/16];
+    uint8_t qs[QUANT_K_IQ6_K/2];
+    uint8_t qh[QUANT_K_IQ6_K/4];
+};
+
+struct block_iq6_k_packed32
+{
+    uint32_t de;
+    int32_t scales[QUANT_K_IQ6_K/16/4];
+    uint32_t qs[QUANT_K_IQ6_K/2/4];
+    uint32_t qh[QUANT_K_IQ6_K/4/4];
+};
+
+#if defined(DATA_A_IQ6_K)
+#define QUANT_K QUANT_K_IQ6_K
+#define QUANT_R 1
+#define A_TYPE block_iq6_k
+#define A_TYPE_PACKED32 block_iq6_k_packed32
+#define DATA_A_QUANT_K
+
+const int8_t kvalues_iq6_k_const[128] = {
+    int8_t(-127), int8_t(-121), int8_t(-115), int8_t(-109), int8_t(-104), int8_t(-98), int8_t(-93), int8_t(-88), int8_t(-84), int8_t(-79), int8_t(-74), int8_t(-70), int8_t(-66), int8_t(-62), int8_t(-58), int8_t(-54),
+    int8_t(-51), int8_t(-47), int8_t(-44), int8_t(-40), int8_t(-37), int8_t(-34), int8_t(-31), int8_t(-28), int8_t(-25), int8_t(-22), int8_t(-19), int8_t(-16), int8_t(-13), int8_t(-11), int8_t(-8), int8_t(-5),
+    int8_t(-2), int8_t(0), int8_t(3), int8_t(6), int8_t(9), int8_t(12), int8_t(14), int8_t(17), int8_t(20), int8_t(23), int8_t(27), int8_t(30), int8_t(33), int8_t(36), int8_t(40), int8_t(44),
+    int8_t(47), int8_t(51), int8_t(55), int8_t(59), int8_t(63), int8_t(68), int8_t(72), int8_t(77), int8_t(82), int8_t(87), int8_t(92), int8_t(98), int8_t(103), int8_t(109), int8_t(115), int8_t(121),
+    int8_t(-126), int8_t(-120), int8_t(-114), int8_t(-108), int8_t(-103), int8_t(-97), int8_t(-92), int8_t(-87), int8_t(-83), int8_t(-78), int8_t(-73), int8_t(-69), int8_t(-65), int8_t(-61), int8_t(-57), int8_t(-53),
+    int8_t(-50), int8_t(-46), int8_t(-43), int8_t(-39), int8_t(-36), int8_t(-33), int8_t(-30), int8_t(-27), int8_t(-24), int8_t(-21), int8_t(-18), int8_t(-15), int8_t(-12), int8_t(-10), int8_t(-7), int8_t(-4),
+    int8_t(-1), int8_t(1), int8_t(4), int8_t(7), int8_t(10), int8_t(13), int8_t(15), int8_t(18), int8_t(21), int8_t(24), int8_t(28), int8_t(31), int8_t(34), int8_t(37), int8_t(41), int8_t(45),
+    int8_t(48), int8_t(52), int8_t(56), int8_t(60), int8_t(64), int8_t(69), int8_t(73), int8_t(78), int8_t(83), int8_t(88), int8_t(93), int8_t(99), int8_t(104), int8_t(110), int8_t(116), int8_t(122)
+};
+const uint32_t kpacked32_iq6_k_const[16] = {
+    0x938D8781u, 0xA8A39E98u, 0xBAB6B1ACu, 0xCAC6C2BEu,
+    0xD8D4D1CDu, 0xE4E1DEDBu, 0xF0EDEAE7u, 0xFBF8F5F3u,
+    0x060300FEu, 0x110E0C09u, 0x1E1B1714u, 0x2C282421u,
+    0x3B37332Fu, 0x4D48443Fu, 0x625C5752u, 0x79736D67u
+};
+shared IQK_LUT_TYPE kvalues_iq6_k[128];
+#endif
+
+#define QUANT_K_IQKS 256
+
+#if defined(DATA_A_IQ4_KSS)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 128
+#endif
+
+#if defined(DATA_A_IQ2_KS)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 2
+#define IQK_BLOCK_SIZE 70
+#endif
+
+#if defined(DATA_A_IQ3_KS)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 2
+#define IQK_BLOCK_SIZE 102
+#endif
+
+#if defined(DATA_A_IQ4_KS)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 136
+
+#endif
+
+#if defined(DATA_A_IQ5_KS)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 168
+#endif
+
+#if defined(DATA_A_IQ2_KL)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 2
+#define IQK_BLOCK_SIZE 86
+
+const i8vec4 kvalues_iq2_kl_const[16] = {
+    { int8_t(-63), int8_t(-23), int8_t(-63), int8_t( 13) }, { int8_t(-40), int8_t(-63), int8_t(-40), int8_t(-10) },
+    { int8_t(-40), int8_t( 13), int8_t(-40), int8_t( 47) }, { int8_t(-23), int8_t(-40), int8_t(-23), int8_t(-23) },
+    { int8_t(-23), int8_t(  1), int8_t(-23), int8_t( 13) }, { int8_t(-23), int8_t( 28), int8_t(-10), int8_t(-63) },
+    { int8_t(-10), int8_t(  1), int8_t(-10), int8_t( 13) }, { int8_t(-10), int8_t( 47), int8_t(  1), int8_t(-23) },
+    { int8_t(  1), int8_t(-10), int8_t(  1), int8_t(  1) }, { int8_t(  1), int8_t( 13), int8_t(  1), int8_t( 28) },
+    { int8_t( 13), int8_t(-40), int8_t( 13), int8_t(-23) }, { int8_t( 13), int8_t(-10), int8_t( 13), int8_t(  1) },
+    { int8_t( 13), int8_t( 13), int8_t( 28), int8_t(-63) }, { int8_t( 28), int8_t(-23), int8_t( 28), int8_t(  1) },
+    { int8_t( 28), int8_t( 28), int8_t( 28), int8_t( 47) }, { int8_t( 47), int8_t(-23), int8_t( 47), int8_t( 13) }
+};
+
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq2kl_table[64];
+#else
+shared IQK_LUT_TYPE kvalues_iq2_kl[64];
+#endif
+#endif
+
+
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+const int8_t kvalues_iq2_k_const[8] = {
+    int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
+};
+
+#if defined(IQK_MMQ_LUT)
+shared uint32_t iq2k_table[512];
+#else
+shared IQK_LUT_TYPE kvalues_iq2_k[8];
+#endif
+#endif
+
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+const int8_t kvalues_iq3_k_const[16] = {
+    int8_t(-63), int8_t(-40), int8_t(-23), int8_t(-10), int8_t(1), int8_t(13), int8_t(28), int8_t(47),
+    int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
+};
+
+#if defined(IQK_MMQ_LUT_LARGE)
+shared uint32_t iq3k_table4[4096];
+#elif defined(IQK_MMQ_LUT)
+shared uint16_t iq3k_table[128];
+#else
+shared IQK_LUT_TYPE kvalues_iq3_k[16];
+#endif
+#endif
+
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+const int8_t kvalues_iq4_k_const[32] = {
+    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
+    int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
+};
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq4k_table[512];
+#else
+shared IQK_LUT_TYPE kvalues_iq4_k[32];
+#endif
+#endif
+
+#if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+const int8_t kvalues_iq5_k_const[64] = {
+    int8_t(-126), int8_t(-114), int8_t(-103), int8_t(-92), int8_t(-83), int8_t(-74), int8_t(-65), int8_t(-57), int8_t(-50), int8_t(-43), int8_t(-36), int8_t(-30), int8_t(-24), int8_t(-18), int8_t(-12), int8_t(-6),
+    int8_t(-1), int8_t(5), int8_t(11), int8_t(17), int8_t(23), int8_t(29), int8_t(36), int8_t(43), int8_t(51), int8_t(59), int8_t(68), int8_t(77), int8_t(87), int8_t(97), int8_t(109), int8_t(121),
+    int8_t(-124), int8_t(-112), int8_t(-101), int8_t(-90), int8_t(-81), int8_t(-72), int8_t(-63), int8_t(-55), int8_t(-48), int8_t(-41), int8_t(-34), int8_t(-28), int8_t(-22), int8_t(-16), int8_t(-10), int8_t(-4),
+    int8_t(1), int8_t(7), int8_t(13), int8_t(19), int8_t(25), int8_t(31), int8_t(38), int8_t(45), int8_t(53), int8_t(61), int8_t(70), int8_t(79), int8_t(89), int8_t(99), int8_t(111), int8_t(123)
+};
+const uint32_t kpacked32_iq5_k_const[16] = {
+    0xA4998E82u, 0xC7BFB6ADu, 0xE2DCD5CEu, 0xFAF4EEE8u,
+    0x110B05FFu, 0x2B241D17u, 0x4D443B33u, 0x796D6157u,
+    0xA69B9084u, 0xC9C1B8AFu, 0xE4DED7D0u, 0xFCF6F0EAu,
+    0x130D0701u, 0x2D261F19u, 0x4F463D35u, 0x7B6F6359u
+};
+shared IQK_LUT_TYPE kvalues_iq5_k[64];
+#endif
+
+#if defined(DATA_A_IQ1_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 56
+#endif
+
+#if defined(DATA_A_IQ2_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 68
+#endif
+
+#if defined(DATA_A_IQ3_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 100
+#endif
+
+#if defined(DATA_A_IQ4_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
+#define IQK_BLOCK_SIZE 128
+#endif
+
+#if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
+const int8_t kvalues_iqkt_scale_const[16] = {
+    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10),
+    int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113)
+};
+shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
+#endif
+
+#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS))
+#extension GL_KHR_shader_subgroup_basic : require
+
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+const uint kpacked_iq2_k_lo = 0x1101F3E1u; // -31, -13, 1, 17
+const uint kpacked_iq2_k_hi = 0x1606F8E6u; // -26,  -8, 6, 22
+void init_iq2k_table() {
+    const uint shift1 = (gl_SubgroupInvocationID << 3u) & 0x18u;
+    const uint shift2 = (gl_SubgroupInvocationID << 1u) & 0x18u;
+    const uint8_t val1_lo = uint8_t(kpacked_iq2_k_lo >> shift1);
+    const uint8_t val2_lo = uint8_t(kpacked_iq2_k_lo >> shift2);
+    const uint8_t val1_hi = uint8_t(kpacked_iq2_k_hi >> shift1);
+    const uint8_t val2_hi = uint8_t(kpacked_iq2_k_hi >> shift2);
+    const uint16_t base_lo_u16 = pack16(i8vec2(val1_lo, val2_lo));
+    const uint16_t base_hi_u16 = pack16(i8vec2(val1_hi, val2_hi));
+    const uint32_t base_lo = uint32_t(base_lo_u16) << 8u;
+    const uint32_t base_hi = uint32_t(base_hi_u16) << 8u;
+    // assume only gl_WorkGroupSize.x and 256 being multiplies of 4*it.
+    for (uint index_ = (gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID) * 4u;
+         index_ < 256u; index_ += gl_WorkGroupSize.x * 4u) {
+
+        const uint shift3 = (index_ >> 3u) & 0x18u;
+
+        const uint32_t pack_lo = base_lo | ((kpacked_iq2_k_lo << (24u - shift3)) & 0xff000000u);
+        const uint32_t pack_hi = base_hi | ((kpacked_iq2_k_hi << (24u - shift3)) & 0xff000000u);
+
+        iq2k_table[index_    ] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
+        iq2k_table[index_ + 1] = pack_lo + uint8_t(kvalues_iq2_k_const[1]);
+        iq2k_table[index_ + 2] = pack_lo + uint8_t(kvalues_iq2_k_const[2]);
+        iq2k_table[index_ + 3] = pack_lo + uint8_t(kvalues_iq2_k_const[3]);
+        iq2k_table[256u + index_    ] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
+        iq2k_table[256u + index_ + 1] = pack_hi + uint8_t(kvalues_iq2_k_const[5]);
+        iq2k_table[256u + index_ + 2] = pack_hi + uint8_t(kvalues_iq2_k_const[6]);
+        iq2k_table[256u + index_ + 3] = pack_hi + uint8_t(kvalues_iq2_k_const[7]);
+    }
+    barrier();
+}
+#endif
+
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
+const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
+
+#if defined(IQK_MMQ_LUT_LARGE)
+
+void init_iq3k_table4() {
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint z_index = laneid >> 1u;
+    const uint z_target = bool(z_index & 4u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint z_value = ((z_target >> ((z_index & 3u) << 3u)) & 0xffu) << 16u;
+    const uint y_target = bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint y_value0 = (y_target & 0xffu) << 8u;
+    const uint y_value1 = ((y_target >> 8u) & 0xffu) << 8u;
+    const uint y_value2 = ((y_target >> 16u) & 0xffu) << 8u;
+    const uint y_value3 = ((y_target >> 24u) & 0xffu) << 8u;
+
+    for (uint index_ = (laneid + gl_SubgroupSize * gl_SubgroupID) * 32u;
+         index_ < 4096u; index_ += gl_WorkGroupSize.x * 32u) {
+        const uint w_shift = (index_ >> 6u) & 0x18u;
+        const uint w_target = bool(index_ & 0x800u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+        const uint w_value = ((w_target >> w_shift) & 0xffu) << 24u;
+        const uint base = z_value | w_value;
+
+        iq3k_table4[index_      ] = base | y_value0 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ +  1u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ +  2u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ +  3u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ +  4u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ +  5u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ +  6u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ +  7u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ +  8u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ +  9u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 10u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 11u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 12u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 13u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 14u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 15u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ + 16u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ + 17u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 18u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 19u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 20u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 21u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 22u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 23u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ + 24u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ + 25u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 26u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 27u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 28u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 29u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 30u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 31u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[7]);
+    }
+    barrier();
+}
+
+#else
+
+void init_iq3k_table() {
+#define WG0_INIT 0
+#if WG0_INIT
+    if (gl_SubgroupID == 0) {
+#endif
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint index = laneid * 4u;
+    const i8vec4 low = i8vec4(unpack8(bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo));
+    const uint high_target4 = bool(laneid & 8u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint high_target_shift = ((laneid / 2u) % 4u) * 8u;
+    const int8_t high = int8_t(high_target4 >> high_target_shift);
+    const i8vec4 low_hi = low + i8vec4(4);
+    const int8_t high_hi = high + int8_t(4);
+    if (laneid < 16u) {
+        iq3k_table[index     ] = uint16_t(pack16(i8vec2(low.x, high)));
+        iq3k_table[index + 1u] = uint16_t(pack16(i8vec2(low.y, high)));
+        iq3k_table[index + 2u] = uint16_t(pack16(i8vec2(low.z, high)));
+        iq3k_table[index + 3u] = uint16_t(pack16(i8vec2(low.w, high)));
+        iq3k_table[64u + index     ] = uint16_t(pack16(i8vec2(low_hi.x, high_hi)));
+        iq3k_table[64u + index + 1u] = uint16_t(pack16(i8vec2(low_hi.y, high_hi)));
+        iq3k_table[64u + index + 2u] = uint16_t(pack16(i8vec2(low_hi.z, high_hi)));
+        iq3k_table[64u + index + 3u] = uint16_t(pack16(i8vec2(low_hi.w, high_hi)));
+    }
+#if WG0_INIT
+    }
+    subgroupBarrier();
+#endif
+}
+
+#endif
+
+#endif
+
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+const uint32_t kpacked32_iq4_k_0 = 0xBFAD9881u;
+const uint32_t kpacked32_iq4_k_1 = 0xF6EADDCFu;
+const uint32_t kpacked32_iq4_k_2 = 0x26190D01u;
+const uint32_t kpacked32_iq4_k_3 = 0x71594535u;
+
+void init_iq4k_table() {
+    const uint laneid = gl_SubgroupInvocationID;
+    if (laneid < 16u) {
+        const uint32_t packed = bool(laneid & 0x8u) ? 
+            (bool(laneid & 0x4u) ? kpacked32_iq4_k_3 : kpacked32_iq4_k_2) :
+            (bool(laneid & 0x4u) ? kpacked32_iq4_k_1 : kpacked32_iq4_k_0);
+        const uint16_t high_value_lo = uint16_t(packed >> ((laneid & 0x3u) << 3u)) << 8u;
+        const uint16_t high_value_hi = high_value_lo + uint16_t(0x0400u);
+
+        const uint index = laneid * 16u;
+        [[unroll]] for (uint i = 0; i < 16u; ++i) {
+            iq4k_table[index + i] = high_value_lo | uint16_t(uint8_t(kvalues_iq4_k_const[i]));
+        }
+        [[unroll]] for (uint i = 0; i < 16u; ++i) {
+            iq4k_table[256u + index + i] = high_value_hi | uint16_t(uint8_t(kvalues_iq4_k_const[i + 16u]));
+        }
+    }
+}
+#endif
+
+#if defined(DATA_A_IQ2_KL)
+void init_iq2kl_table() {
+    if (gl_LocalInvocationIndex < 16u) {
+        const i8vec4 values = kvalues_iq2_kl_const[gl_LocalInvocationIndex];
+        const uint index = 4u * gl_LocalInvocationIndex;
+        iq2kl_table[index     ] = pack16(values.xy);
+        iq2kl_table[index + 1u] = pack16(values.yx);
+        iq2kl_table[index + 2u] = pack16(values.zw);
+        iq2kl_table[index + 3u] = pack16(values.wz);
+    }
+    barrier();
+}
+#endif
+
+#else
+
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K) || \
+    defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ4_KS) || \
+    defined(DATA_A_IQ5_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
+#define NEEDS_INIT_IQ_SHMEM
+void init_iq_shmem(uvec3 wgsize) {
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
+        kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
+    }
+#endif
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        kvalues_iq3_k[i] = IQK_LUT_TYPE(kvalues_iq3_k_const[i]);
+    }
+#endif
+#if defined(DATA_A_IQ2_KL)
+    if (gl_LocalInvocationIndex.x < 16) {
+        const uint i = gl_LocalInvocationIndex.x;
+        const i8vec4 values = kvalues_iq2_kl_const[i];
+        kvalues_iq2_kl[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq2_kl[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq2_kl[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq2_kl[4 * i + 3] = IQK_LUT_TYPE(values.w);
+    }
+#endif
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
+        kvalues_iq4_k[i] = IQK_LUT_TYPE(kvalues_iq4_k_const[i]);
+    }
+#endif
+#if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        const i8vec4 values = unpack8(int32_t(kpacked32_iq5_k_const[i]));
+        kvalues_iq5_k[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq5_k[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq5_k[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq5_k[4 * i + 3] = IQK_LUT_TYPE(values.w);
+    }
+#endif
+#if defined(DATA_A_IQ6_K)
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        const uint32_t packed = kpacked32_iq6_k_const[i];
+        const i8vec4 values = unpack8(int32_t(packed));
+        kvalues_iq6_k[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq6_k[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq6_k[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq6_k[4 * i + 3] = IQK_LUT_TYPE(values.w);
+
+        const i8vec4 values_hi = unpack8(int32_t(packed + 0x01010101u));
+        kvalues_iq6_k[64 + 4 * i    ] = IQK_LUT_TYPE(values_hi.x);
+        kvalues_iq6_k[64 + 4 * i + 1] = IQK_LUT_TYPE(values_hi.y);
+        kvalues_iq6_k[64 + 4 * i + 2] = IQK_LUT_TYPE(values_hi.z);
+        kvalues_iq6_k[64 + 4 * i + 3] = IQK_LUT_TYPE(values_hi.w);
+    }
+#endif
+#if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        kvalues_iqkt_scale[i] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[i]);
+    }
+#endif
+    barrier();
+}
+#endif
 #endif
 
 // IQuants

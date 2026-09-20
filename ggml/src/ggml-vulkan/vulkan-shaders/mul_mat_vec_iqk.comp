@@ -1,0 +1,149 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+
+#define IQK_MMQ_LUT
+#define MMQ
+#define B_TYPE block_q8_1_x4
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "mul_mat_vec_base.glsl"
+
+#include "mmq_iqk.glsl"
+
+#define K_PER_ITER 32
+
+uint a_offset, b_offset, d_offset;
+
+int32_t cache_b_qs[K_PER_ITER / 4];
+vec2 cache_b_ds;
+
+void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint col) {
+    int32_t qs_a[8];
+#ifdef DATA_A_IQK_ROW
+    const uint row = first_row;
+    const uint ib_row = col / QUANT_K_Q8_1;
+    const uint row_offset = a_offset + row * p.stride_a;
+    const uint block_offset = row_offset + IQK_ROW_META_SIZE + (ib_row >> 3u) * IQK_BLOCK_SIZE;
+    const uint8_t ib32 = uint8_t(ib_row & 7u);
+    const uint8_t element = ib32 << 5;
+    const float row_scale = iqks_row_scale(row_offset);
+    qs_a[0] = iqks_value4(block_offset, element);
+    qs_a[1] = iqks_value4(block_offset, element + uint8_t(4));
+    qs_a[2] = iqks_value4(block_offset, element + uint8_t(8));
+    qs_a[3] = iqks_value4(block_offset, element + uint8_t(12));
+    qs_a[4] = iqks_value4(block_offset, element + uint8_t(16));
+    qs_a[5] = iqks_value4(block_offset, element + uint8_t(20));
+    qs_a[6] = iqks_value4(block_offset, element + uint8_t(24));
+    qs_a[7] = iqks_value4(block_offset, element + uint8_t(28));
+    const float a_scale0 = iqks_d_scale(row_scale, block_offset, ib32);
+    const float a_scale1 = a_scale0;
+#else
+    const uint a_row_offset = first_row * p.ncols;
+    const uint a_ib_k = (a_row_offset + col) / QUANT_K + a_offset / 8u;
+    const uint8_t a_ib32 = uint8_t(gl_LocalInvocationID.x & 7u);
+    vec2 a_scales;
+    prepare_a_k32_iter(a_ib_k, a_ib32, qs_a, a_scales);
+    const float a_scale0 = a_scales.x;
+    const float a_scale1 = a_scales.y;
+#endif
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        // Preload data_b block
+        const uint b_block_idx = (j*p.batch_stride_b + col) / QUANT_K_Q8_1 + b_offset;
+        const uint b_block_idx_outer = b_block_idx / 4;
+        const uint b_block_idx_inner = b_block_idx % 4;
+        cache_b_ds = vec2(data_b[b_block_idx_outer].ds[b_block_idx_inner]);
+
+        cache_b_qs[0] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8    ];
+        cache_b_qs[1] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 1];
+        cache_b_qs[2] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 2];
+        cache_b_qs[3] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 3];
+        cache_b_qs[4] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 4];
+        cache_b_qs[5] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 5];
+        cache_b_qs[6] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 6];
+        cache_b_qs[7] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 7];
+
+        int32_t q_sum0 = dotPacked4x8EXT(qs_a[0], cache_b_qs[0]);
+        q_sum0 += dotPacked4x8EXT(qs_a[1], cache_b_qs[1]);
+        q_sum0 += dotPacked4x8EXT(qs_a[2], cache_b_qs[2]);
+        q_sum0 += dotPacked4x8EXT(qs_a[3], cache_b_qs[3]);
+        int32_t q_sum1 = dotPacked4x8EXT(qs_a[4], cache_b_qs[4]);
+        q_sum1 += dotPacked4x8EXT(qs_a[5], cache_b_qs[5]);
+        q_sum1 += dotPacked4x8EXT(qs_a[6], cache_b_qs[6]);
+        q_sum1 += dotPacked4x8EXT(qs_a[7], cache_b_qs[7]);
+        temp[j][0] += FLOAT_TYPE(float(cache_b_ds.x) * (a_scale0 * float(q_sum0) + a_scale1 * float(q_sum1)));
+    }
+}
+
+void compute_outputs(const uint32_t first_row) {
+    const uint tid = gl_LocalInvocationID.x;
+
+    get_offsets(a_offset, b_offset, d_offset);
+#ifndef DATA_A_IQK_ROW
+    a_offset *= QUANT_K / QUANT_K_Q8_1;
+#endif
+    b_offset /= QUANT_K_Q8_1;
+
+    FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        temp[j][0] = FLOAT_TYPE(0.0f);
+    }
+
+    const uint col_stride = K_PER_ITER * BLOCK_SIZE;
+    uint num_iters = p.ncols / col_stride;
+    if (num_iters * col_stride + K_PER_ITER * tid < p.ncols) {
+        num_iters++;
+    }
+
+    uint col = tid * K_PER_ITER;
+    while (num_iters >= 4) {
+        // Manually partially unroll the loop
+        [[unroll]] for (uint k = 0; k < 4; ++k) {
+            iter(temp, first_row, col);
+            col += col_stride;
+        }
+
+        num_iters -= 4;
+    }
+
+    if (num_iters >= 2) {
+        // Manually partially unroll the loop
+        iter(temp, first_row, col);
+        col += col_stride;
+        iter(temp, first_row, col);
+        col += col_stride;
+        num_iters -= 2;
+    }
+
+    if (num_iters > 0) {
+        iter(temp, first_row, col);
+    }
+
+    reduce_result(temp, d_offset, first_row, 1, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL) && !defined(DATA_A_IQ3_K) && !defined(DATA_A_IQ3_KS) && !defined(DATA_A_IQ4_K) && !defined(DATA_A_IQ4_KS) && !defined(DATA_A_IQ4_KSS)
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#elif defined(DATA_A_IQ2_KL)
+    init_iq2kl_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    init_iq4k_table();
+#endif
+
+    if (first_row >= p.stride_d) {
+        return;
+    }
+    compute_outputs(first_row);
+}

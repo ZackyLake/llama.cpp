@@ -1,0 +1,521 @@
+#version 450
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_clustered: enable
+
+#define IQK_MMQ_LUT
+#define MMQ
+#define SG_IQK 1
+#define B_TYPE block_q8_1_x4
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "mul_mat_vec_base.glsl"
+
+#ifndef SUBGROUP_SIZE
+#error SUBGROUP_SIZE must be defined
+#endif
+
+#define K_PER_ITER 32
+#define SG_K (QUANT_K / SUBGROUP_SIZE)
+#define SG_K_PER_ITER (K_PER_ITER / SG_K)
+#define SG_QS_PER_ITER (SG_K / 4)
+#define WG_K_PER_ITER (SG_K_PER_ITER * QUANT_K)
+
+#if (SUBGROUP_SIZE == 0) || ((QUANT_K % SUBGROUP_SIZE) != 0) || (SG_K < 4) || ((K_PER_ITER % SG_K) != 0)
+#error unsupported subgroup size
+#endif
+
+#include "mmq_iqk.glsl"
+
+uint a_offset, b_offset, d_offset;
+#ifdef DATA_A_IQK_ROW
+ROW_META_TYPE row_meta;
+#endif
+
+void iter_tail(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint subgroup_col) {
+    int32_t qs_a[SG_QS_PER_ITER];
+    float a_scale;
+    const uint lane_col = gl_SubgroupInvocationID * SG_K;
+#ifdef DATA_A_IQK_ROW
+    const uint row_begin_offset = a_offset + first_row * p.stride_a;
+    const uint a_row_ib_sg = subgroup_col / QUANT_K;
+    const uint block_byte_offset = row_begin_offset + IQK_ROW_META_SIZE + a_row_ib_sg * IQK_BLOCK_SIZE;
+
+    rm_prepare_a_sg(block_byte_offset, row_meta, qs_a, a_scale);
+#else
+    const uint a_row_offset = first_row * p.ncols;
+    const uint a_ib_sg = (a_row_offset + subgroup_col) / QUANT_K + a_offset / 8u;
+
+    prepare_a_sg(a_ib_sg, qs_a, a_scale);
+#endif
+
+    const uint b_block_col0_sg = subgroup_col / (QUANT_K_Q8_1 * 4) + b_offset / 4;
+    const uint batch_block_b = p.batch_stride_b / (QUANT_K_Q8_1 * 4);
+    const uint b_block_adj = lane_col / (QUANT_K_Q8_1 * 4);
+    const uint b_block_inner = (lane_col / QUANT_K_Q8_1) % 4;
+    const uint b_qs_idx = (lane_col % QUANT_K_Q8_1) / 4;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t cache_b_qs[SG_QS_PER_ITER];
+        const uint b_block_outer = b_block_col0_sg + j * batch_block_b + b_block_adj;
+        const vec2 cache_b_ds = vec2(data_b[b_block_outer].ds[b_block_inner]);
+
+        [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+            cache_b_qs[q] = data_b[b_block_outer].qs[b_block_inner * 8 + b_qs_idx + q];
+        }
+
+        int32_t q_sum = 0;
+        [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+            q_sum += dotPacked4x8EXT(qs_a[q], cache_b_qs[q]);
+        }
+        temp[j][0] += FLOAT_TYPE(float(cache_b_ds.x) * a_scale * float(q_sum));
+    }
+}
+
+void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint subgroup_col) {
+    int32_t qs_a[K_PER_ITER / 4];
+    float a_scales[SG_K_PER_ITER];
+    const uint lane_col = gl_SubgroupInvocationID * SG_K;
+#ifdef DATA_A_IQK_ROW
+    const uint row_begin_offset = a_offset + first_row * p.stride_a;
+    const uint a_row_ib_sg = subgroup_col / QUANT_K;
+#else
+    const uint a_row_offset = first_row * p.ncols;
+    const uint a_ib_sg = (a_row_offset + subgroup_col) / QUANT_K + a_offset / 8u;
+#endif
+
+    [[unroll]] for (uint sg_iter = 0; sg_iter < SG_K_PER_ITER; ++sg_iter) {
+        int32_t qs_a_sg[SG_QS_PER_ITER];
+#ifdef DATA_A_IQK_ROW
+        const uint block_byte_offset = row_begin_offset + IQK_ROW_META_SIZE + (a_row_ib_sg + sg_iter) * IQK_BLOCK_SIZE;
+        rm_prepare_a_sg(block_byte_offset, row_meta, qs_a_sg, a_scales[sg_iter]);
+#else
+        prepare_a_sg(a_ib_sg + sg_iter, qs_a_sg, a_scales[sg_iter]);
+#endif
+        [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+            qs_a[sg_iter * SG_QS_PER_ITER + q] = qs_a_sg[q];
+        }
+    }
+
+    const uint b_block_col0_sg = subgroup_col / (QUANT_K_Q8_1 * 4) + b_offset / 4;
+    const uint batch_block_b = p.batch_stride_b / (QUANT_K_Q8_1 * 4);
+    const uint b_block_adj = lane_col / (QUANT_K_Q8_1 * 4);
+    const uint b_block_inner = (lane_col / QUANT_K_Q8_1) % 4;
+    const uint b_qs_idx = (lane_col % QUANT_K_Q8_1) / 4;
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t cache_b_qs[K_PER_ITER / 4];
+        vec2 cache_b_ds;
+
+        uint b_block_sg = b_block_col0_sg + j * batch_block_b;
+
+        [[unroll]] for (uint sg_iter = 0; sg_iter < SG_K_PER_ITER; ++sg_iter) {
+            const uint b_block_outer = b_block_sg + b_block_adj;
+            cache_b_ds = vec2(data_b[b_block_outer].ds[b_block_inner]);
+
+            [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+                const uint q_idx = sg_iter * SG_QS_PER_ITER + q;
+                cache_b_qs[q_idx] = data_b[b_block_outer].qs[b_block_inner * 8 + b_qs_idx + q];
+            }
+
+            int32_t q_sum = 0;
+            [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+                const uint q_idx = sg_iter * SG_QS_PER_ITER + q;
+                q_sum += dotPacked4x8EXT(qs_a[q_idx], cache_b_qs[q_idx]);
+            }
+            temp[j][0] += FLOAT_TYPE(float(cache_b_ds.x) * a_scales[sg_iter] * float(q_sum));
+            b_block_sg += QUANT_K / (QUANT_K_Q8_1 * 4);
+        }
+    }
+}
+
+#ifdef SG_SCATTER_K
+void iter_scatter_tail(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint subgroup_col) {
+    int32_t qs_a[SG_QS_PER_ITER];
+    int8_t qscale_a[SG_QS_PER_ITER];
+#ifndef DATA_A_IQK_ROW
+    float a_blk_scale;
+#endif
+#ifdef DATA_A_IQK_ROW
+    const uint row_begin_offset = a_offset + first_row * p.stride_a;
+    const uint a_row_ib_sg = subgroup_col / QUANT_K;
+    const uint block_byte_offset = row_begin_offset + IQK_ROW_META_SIZE + a_row_ib_sg * IQK_BLOCK_SIZE;
+
+    rm_prepare_a_sg_scatter(block_byte_offset, qs_a, qscale_a);
+#else
+    const uint a_row_offset = first_row * p.ncols;
+    const uint a_ib_sg = (a_row_offset + subgroup_col) / QUANT_K + a_offset / 8u;
+
+    prepare_a_sg_scatter(a_ib_sg, qs_a, qscale_a);
+    a_blk_scale = float(data_a[a_ib_sg].d);
+#endif
+
+    const uint b_block_col0_sg = subgroup_col / (QUANT_K_Q8_1 * 4) + b_offset / 4;
+    const uint batch_block_b = p.batch_stride_b / (QUANT_K_Q8_1 * 4);
+    const uint b_ib32_offset = get_ib32_scatter_offset();
+    const uint b_lane_idx = gl_SubgroupInvocationID & 7u;
+#ifdef DATA_A_IQK_ROW
+    const float a_scale = row_meta;
+#else
+    const float a_scale = a_blk_scale;
+#endif
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        const uint b_block_sg = b_block_col0_sg + j * batch_block_b;
+        const uint b_block_outer = b_block_sg + (b_lane_idx >> 2u);
+        const uint b_block_inner = b_lane_idx & 3u;
+        const vec2 cache_b_ds = vec2(data_b[b_block_outer].ds[b_block_inner]);
+        const float abscale = float(cache_b_ds.x) * a_scale;
+
+        [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+            const uint b_block_idx = b_ib32_offset + q;
+            const float q_abscale = subgroupShuffle(abscale, b_block_idx);
+            const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+            const uint q_block_inner = b_block_idx & 3u;
+            const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+            temp[j][0] += FLOAT_TYPE(q_abscale * float(qscale_a[q] * dotPacked4x8EXT(qs_a[q], cache_b_q)));
+        }
+    }
+}
+
+void iter_scatter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint subgroup_col) {
+    int32_t qs_a[K_PER_ITER / 4];
+#if defined(SG_SUB_SCALE)
+    int8_t qscale_a[SG_K_PER_ITER];
+#else
+    int8_t qscale_a[K_PER_ITER / 4];
+#endif
+
+#ifndef DATA_A_IQK_ROW
+    float a_blk_scale[SG_K_PER_ITER];
+#endif
+
+#ifdef DATA_A_IQK_ROW
+    const uint row_begin_offset = a_offset + first_row * p.stride_a;
+    const uint a_row_ib_sg = subgroup_col / QUANT_K;
+#else
+    const uint a_row_offset = first_row * p.ncols;
+    const uint a_ib_sg = (a_row_offset + subgroup_col) / QUANT_K + a_offset / 8u;
+#endif
+
+    [[unroll]] for (uint sg_iter = 0; sg_iter < SG_K_PER_ITER; ++sg_iter) {
+        int32_t qs_a_sg[SG_QS_PER_ITER];
+#if !defined(SG_SUB_SCALE)
+        int8_t qscale_a_sg[SG_QS_PER_ITER];
+#endif
+#if defined(SG_SUB_SCALE)
+#ifdef DATA_A_IQK_ROW
+        // not implemented
+#else
+        prepare_a_sg_scatter2(a_ib_sg + sg_iter, qs_a_sg, qscale_a[sg_iter]);
+        a_blk_scale[sg_iter] = float(data_a[a_ib_sg + sg_iter].d);
+#endif
+#else
+#ifdef DATA_A_IQK_ROW
+        const uint block_byte_offset = row_begin_offset + IQK_ROW_META_SIZE + (a_row_ib_sg + sg_iter) * IQK_BLOCK_SIZE;
+        rm_prepare_a_sg_scatter(block_byte_offset, qs_a_sg, qscale_a_sg);
+#else
+        prepare_a_sg_scatter(a_ib_sg + sg_iter, qs_a_sg, qscale_a_sg);
+        a_blk_scale[sg_iter] = float(data_a[a_ib_sg + sg_iter].d);
+#endif
+#endif
+        [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+            const uint q_idx = sg_iter * SG_QS_PER_ITER + q;
+            qs_a[q_idx] = qs_a_sg[q];
+#if !defined(SG_SUB_SCALE)
+            qscale_a[q_idx] = qscale_a_sg[q];
+#endif
+        }
+    }
+
+    const uint b_block_col0_sg = subgroup_col / (QUANT_K_Q8_1 * 4) + b_offset / 4;
+    const uint batch_block_b = p.batch_stride_b / (QUANT_K_Q8_1 * 4);
+    const uint b_ib32_offset = get_ib32_scatter_offset();
+    const uint b_lane_idx = gl_SubgroupInvocationID & 7u;
+
+#if SUBGROUP_SIZE == 16 && !defined(SG_SUB_SCALE)
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t q_sum[K_PER_ITER / 4];
+        int qsum8;
+        const uint b_block_sg0 = b_block_col0_sg + j * batch_block_b;
+        const uint b_ds_outer = b_block_sg0 + ((gl_SubgroupInvocationID & 4u) >> 1u) + (gl_SubgroupInvocationID >> 3u);
+        const uint b_ds_inner = gl_SubgroupInvocationID & 3u;
+        const float b_scale = float(data_b[b_ds_outer].ds[b_ds_inner].x);
+#ifdef DATA_A_IQK_ROW
+        const float ab_scale = b_scale * row_meta;
+#else
+        const float ab_scale = b_scale * a_blk_scale[(gl_SubgroupInvocationID & 4u) >> 2u];
+#endif
+
+        [[unroll]] for (uint q_idx = 0; q_idx < K_PER_ITER / 4; ++q_idx) {
+            const uint sg_iter = q_idx / SG_QS_PER_ITER;
+            const uint q = q_idx % SG_QS_PER_ITER;
+            const uint b_block_sg = b_block_sg0 + sg_iter * QUANT_K / (QUANT_K_Q8_1 * 4);
+            const uint b_block_idx = b_ib32_offset + q;
+            const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+            const uint q_block_inner = b_block_idx & 3u;
+            const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+            q_sum[q_idx] = qscale_a[q_idx] * dotPacked4x8EXT(qs_a[q_idx], cache_b_q);
+            const int summed = subgroupClusteredAdd(q_sum[q_idx], 8);
+            // qidx:  0      1      2      3      4       5       6       7
+            // laneY: 0,8    1,9    2,10   3,11   4,12    5,13    6,14    7,15
+            // laneX: 0,4    1,5    2,6    3,7    8,12    9,13    10,14   11,15
+            if (gl_SubgroupInvocationID == q_idx + (gl_SubgroupInvocationID & 0x8u)) {
+                qsum8 = summed;
+            }
+        }
+
+        temp[j][0] += FLOAT_TYPE(float(qsum8) * ab_scale);
+    }
+#elif SUBGROUP_SIZE == 16 && defined(SG_SUB_SCALE)
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t qsum_0[K_PER_ITER / 8];
+        int32_t qsum_1[K_PER_ITER / 8];
+        int32_t qsum4[2];
+        const uint b_block_sg0 = b_block_col0_sg + j * batch_block_b;
+        const uint b_ds_outer = b_block_sg0 + ((gl_SubgroupInvocationID & 4u) >> 1u) + (gl_SubgroupInvocationID >> 3u);
+        const uint b_ds_inner = gl_SubgroupInvocationID & 3u;
+        const float b_scale = float(data_b[b_ds_outer].ds[b_ds_inner].x);
+#ifdef DATA_A_IQK_ROW
+        const float ab_scale = b_scale * row_meta;
+#else
+        const float ab_scale = b_scale * a_blk_scale[(gl_SubgroupInvocationID & 4u) >> 2u];
+#endif
+
+        [[unroll]] for (uint q_idx = 0; q_idx < K_PER_ITER / 4; ++q_idx) {
+            const uint sg_iter = q_idx / SG_QS_PER_ITER;
+            const uint q = q_idx % SG_QS_PER_ITER;
+            const uint b_block_sg = b_block_sg0 + sg_iter * QUANT_K / (QUANT_K_Q8_1 * 4);
+            const uint b_block_idx = b_ib32_offset + q;
+            const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+            const uint q_block_inner = b_block_idx & 3u;
+            const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+            const int32_t qvalue = dotPacked4x8EXT(qs_a[q_idx], cache_b_q);
+            const int summed = subgroupClusteredAdd(qvalue, 4);
+            // qidx:  0          1          2          3          4          5          6            7
+            // laneY: 0,4,8,12  1,5,9,13  2,6,10,14  3,7,11,15  0,4,8,12   1,5,9,13   2,6,10,14    3,7,11,15
+            // laneX: 0,0,4,4   1,1,5,5   2,2,6,6    3,3,7,7    8,8,12,12  9,9,13,13  10,10,14,14  11,11,15,15
+            // qsum4: 0          0          0          0          1          1          1            1
+            if (q_idx < K_PER_ITER / 8) {
+                qsum_0[q_idx] = summed;
+            } else {
+                qsum_1[q_idx - K_PER_ITER / 8] = summed;
+            }
+        }
+
+        // laneid:    0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15
+        // qsum4[0]:  0  2  4  6  1  3  5  7  8  10 12 14 9  11 13 15
+        // qsum4[1]: 16 18 20 22 17 19 21 23 24 26 28 30 25 27 29 31
+        qsum4[0] = qsum_0[gl_SubgroupInvocationID & 3u] * int32_t(qscale_a[0]);
+        qsum4[1] = qsum_1[gl_SubgroupInvocationID & 3u] * int32_t(qscale_a[1]);
+        const uint qsum4_idx = bool(gl_SubgroupInvocationID & 4u) ? 1u : 0u;
+        const uint shuffle_idx = bool(gl_SubgroupInvocationID & 4u) ? 0u : 1u;
+        const int32_t shuffled = subgroupShuffleXor(qsum4[shuffle_idx], 4u);
+        const int32_t qsum8 = qsum4[qsum4_idx] + shuffled;
+        temp[j][0] += FLOAT_TYPE(float(qsum8) * ab_scale);
+    }
+#elif SUBGROUP_SIZE == 32
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t q_sum[K_PER_ITER / 4];
+        int qsum8;
+        const uint b_block_sg0 = b_block_col0_sg + j * batch_block_b;
+        const uint lane_q_idx = gl_SubgroupInvocationID & 7u;
+        const uint lane_sg_iter = lane_q_idx / SG_QS_PER_ITER;
+        const uint lane_q = lane_q_idx % SG_QS_PER_ITER;
+        const uint b_lane_x = lane_sg_iter * (QUANT_K / QUANT_K_Q8_1) + b_ib32_offset + lane_q;
+        const uint b_ds_outer = b_block_sg0 + (b_lane_x >> 2u);
+        const uint b_ds_inner = b_lane_x & 3u;
+        const float b_scale = float(data_b[b_ds_outer].ds[b_ds_inner].x);
+#ifdef DATA_A_IQK_ROW
+        const float ab_scale = b_scale * row_meta;
+#else
+        const float ab_scale = b_scale * a_blk_scale[lane_sg_iter];
+#endif
+
+        [[unroll]] for (uint q_idx = 0; q_idx < K_PER_ITER / 4; ++q_idx) {
+            const uint sg_iter = q_idx / SG_QS_PER_ITER;
+            const uint q = q_idx % SG_QS_PER_ITER;
+            const uint b_block_sg = b_block_sg0 + sg_iter * 2u;
+            const uint b_block_idx = b_ib32_offset + q;
+            const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+            const uint q_block_inner = b_block_idx & 3u;
+            const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+            q_sum[q_idx] = qscale_a[q_idx] * dotPacked4x8EXT(qs_a[q_idx], cache_b_q);
+            const int summed = subgroupClusteredAdd(q_sum[q_idx], 8);
+            if (gl_SubgroupInvocationID == q_idx + (gl_SubgroupInvocationID & 0x18u)) {
+                qsum8 = summed;
+            }
+        }
+
+        temp[j][0] += FLOAT_TYPE(float(qsum8) * ab_scale);
+    }
+#elif SUBGROUP_SIZE == 64
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t q_sum[K_PER_ITER / 4];
+        int qsum8;
+        const uint b_block_sg0 = b_block_col0_sg + j * batch_block_b;
+        const uint lane_q_idx = gl_SubgroupInvocationID & 7u;
+        const uint b_lane_x = lane_q_idx * (QUANT_K / QUANT_K_Q8_1) + b_ib32_offset;
+        const uint b_ds_outer = b_block_sg0 + (b_lane_x >> 2u);
+        const uint b_ds_inner = b_lane_x & 3u;
+        const float b_scale = float(data_b[b_ds_outer].ds[b_ds_inner].x);
+#ifdef DATA_A_IQK_ROW
+        const float ab_scale = b_scale * row_meta;
+#else
+        const float ab_scale = b_scale * a_blk_scale[lane_q_idx];
+#endif
+
+        [[unroll]] for (uint q_idx = 0; q_idx < K_PER_ITER / 4; ++q_idx) {
+            const uint sg_iter = q_idx / SG_QS_PER_ITER;
+            const uint q = q_idx % SG_QS_PER_ITER;
+            const uint b_block_sg = b_block_sg0 + sg_iter * 2u;
+            const uint b_block_idx = b_ib32_offset + q;
+            const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+            const uint q_block_inner = b_block_idx & 3u;
+            const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+            q_sum[q_idx] = qscale_a[q_idx] * dotPacked4x8EXT(qs_a[q_idx], cache_b_q);
+            const int summed = subgroupClusteredAdd(q_sum[q_idx], 8);
+            if (gl_SubgroupInvocationID == q_idx + (gl_SubgroupInvocationID & 0x38u)) {
+                qsum8 = summed;
+            }
+        }
+
+        temp[j][0] += FLOAT_TYPE(float(qsum8) * ab_scale);
+    }
+#else
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        int32_t q_sum[K_PER_ITER / 4];
+        const uint b_block_sg0 = b_block_col0_sg + j * batch_block_b;
+        const uint b_ds_outer = b_block_sg0 + (gl_SubgroupInvocationID >> 2u);
+        const uint b_ds_inner = gl_SubgroupInvocationID & 3u;
+        const float b_scale = float(data_b[b_ds_outer].ds[b_ds_inner].x);
+#ifdef DATA_A_IQK_ROW
+        const float ab_scale = b_scale * row_meta;
+#else
+        const float ab_scale = b_scale * a_blk_scale[gl_SubgroupInvocationID / (QUANT_K / QUANT_K_Q8_1)];
+#endif
+
+        [[unroll]] for (uint sg_iter = 0; sg_iter < SG_K_PER_ITER; ++sg_iter) {
+            const uint b_block_sg = b_block_sg0 + sg_iter * QUANT_K / (QUANT_K_Q8_1 * 4);
+
+            [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+                const uint q_idx = sg_iter * SG_QS_PER_ITER + q;
+                const uint b_block_idx = b_ib32_offset + q;
+                const uint q_block_outer = b_block_sg + (b_block_idx >> 2u);
+                const uint q_block_inner = b_block_idx & 3u;
+                const int32_t cache_b_q = data_b[q_block_outer].qs[q_block_inner * 8 + b_lane_idx];
+
+                q_sum[q_idx] = qscale_a[q_idx] * dotPacked4x8EXT(qs_a[q_idx], cache_b_q);
+            }
+        }
+
+        [[unroll]] for (uint q_idx = 0; q_idx < K_PER_ITER / 4; ++q_idx) {
+            const uint sg_iter = q_idx / SG_QS_PER_ITER;
+            const uint q = q_idx % SG_QS_PER_ITER;
+            const uint b_block_idx = b_ib32_offset + q;
+            const float q_ab_scale = subgroupShuffle(ab_scale, sg_iter * (QUANT_K / QUANT_K_Q8_1) + b_block_idx);
+
+            temp[j][0] += FLOAT_TYPE(float(q_sum[q_idx]) * q_ab_scale);
+        }
+    }
+#endif
+}
+
+#define ITER_FUNC iter_scatter
+#define ITER_TAIL_FUNC iter_scatter_tail
+#else
+#define ITER_FUNC iter
+#define ITER_TAIL_FUNC iter_tail
+#endif
+
+void compute_outputs(const uint32_t first_row) {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint subgroup_id = gl_SubgroupID;
+
+    get_offsets(a_offset, b_offset, d_offset);
+#ifdef DATA_A_IQK_ROW
+    const uint row_begin_offset = a_offset + first_row * p.stride_a;
+    row_meta = rm_prepare_row_meta(row_begin_offset);
+#endif
+#ifndef DATA_A_IQK_ROW
+    a_offset *= QUANT_K / QUANT_K_Q8_1;
+#endif
+    b_offset /= QUANT_K_Q8_1;
+
+    FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
+
+    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+        temp[j][0] = FLOAT_TYPE(0.0f);
+    }
+
+    uint subgroup_col = subgroup_id * WG_K_PER_ITER;
+    const uint col_stride = K_PER_ITER * gl_WorkGroupSize.x;
+    uint num_iters = p.ncols / col_stride;
+    if (num_iters * col_stride + (subgroup_id + 1u) * WG_K_PER_ITER <= p.ncols) {
+        num_iters++;
+    }
+
+    while (num_iters >= 4) {
+        // Manually partially unroll the loop
+        [[unroll]] for (uint k = 0; k < 4; ++k) {
+            ITER_FUNC(temp, first_row, subgroup_col);
+            subgroup_col += col_stride;
+        }
+
+        num_iters -= 4;
+    }
+
+    if (num_iters >= 2) {
+        // Manually partially unroll the loop
+        ITER_FUNC(temp, first_row, subgroup_col);
+        subgroup_col += col_stride;
+        ITER_FUNC(temp, first_row, subgroup_col);
+        subgroup_col += col_stride;
+        num_iters -= 2;
+    }
+
+    if (num_iters > 0) {
+        ITER_FUNC(temp, first_row, subgroup_col);
+        subgroup_col += col_stride;
+    }
+
+    if (subgroup_col < p.ncols) {
+        const uint num_tail_blocks = (p.ncols - subgroup_col + QUANT_K - 1u) / QUANT_K;
+        [[unroll]] for (uint tail_block = 0; tail_block < num_tail_blocks; ++tail_block) {
+            ITER_TAIL_FUNC(temp, first_row, subgroup_col + tail_block * QUANT_K);
+        }
+    }
+
+    reduce_result(temp, d_offset, first_row, 1, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL) && !defined(DATA_A_IQ3_K) && !defined(DATA_A_IQ3_KS) && !defined(DATA_A_IQ4_K) && !defined(DATA_A_IQ4_KS) && !defined(DATA_A_IQ4_KSS)
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#elif defined(DATA_A_IQ2_KL)
+    init_iq2kl_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    init_iq4k_table();
+#endif
+
+    if (first_row >= p.stride_d) {
+        return;
+    }
+    compute_outputs(first_row);
+}
