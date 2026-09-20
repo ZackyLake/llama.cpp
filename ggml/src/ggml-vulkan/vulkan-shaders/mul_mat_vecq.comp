@@ -66,7 +66,11 @@ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const
 
         uint ibi = first_row*p.ncols;
         [[unroll]] for (uint n = 0; n < num_rows; ++n) {
+#ifdef DATA_A_IQK_ROW
+            const uint a_block_idx = (ibi + col)/QUANT_K_Q8_1;
+#else
             const uint a_block_idx = (ibi + col)/QUANT_K_Q8_1 + a_offset;
+#endif
             ibi += p.ncols;
 
             temp[j][n] += mmvq_dot_product(a_block_idx, b_qs_idx);
@@ -78,7 +82,9 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
     const uint tid = gl_LocalInvocationID.x;
 
     get_offsets(a_offset, b_offset, d_offset);
+#ifndef DATA_A_IQK_ROW
     a_offset *= QUANT_K / QUANT_K_Q8_1;
+#endif
     b_offset /= QUANT_K_Q8_1;
 
     FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
@@ -128,6 +134,11 @@ void main() {
 
 #ifdef NEEDS_INIT_IQ_SHMEM
     init_iq_shmem(gl_WorkGroupSize);
+#endif
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
 #endif
 
     // do NUM_ROWS at a time, unless there aren't enough remaining rows

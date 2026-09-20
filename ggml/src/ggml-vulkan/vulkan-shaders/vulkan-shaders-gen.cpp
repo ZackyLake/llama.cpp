@@ -77,6 +77,24 @@ const std::vector<std::string> type_names = {
     "bf16",
 };
 
+const std::vector<std::string> iqk_type_names = {
+    "iq2_k",
+    "iq3_k",
+    "iq4_k",
+    "iq5_k",
+    "iq6_k",
+    "iq4_kss",
+    "iq2_ks",
+    "iq3_ks",
+    "iq4_ks",
+    "iq5_ks",
+    "iq2_kl",
+    "iq1_kt",
+    "iq2_kt",
+    "iq3_kt",
+    "iq4_kt",
+};
+
 enum MatMulIdType {
     NONE,
     DEFAULT,
@@ -87,16 +105,17 @@ namespace {
 
 int execute_command(std::vector<std::string>& command, std::string& stdout_str, std::string& stderr_str) {
 #ifdef _WIN32
+    constexpr DWORD pipe_buffer_size = 256 * 1024;
     HANDLE stdout_read, stdout_write;
     HANDLE stderr_read, stderr_write;
     SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 
-    if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0) ||
+    if (!CreatePipe(&stdout_read, &stdout_write, &sa, pipe_buffer_size) ||
         !SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0)) {
         throw std::runtime_error("Failed to create stdout pipe");
     }
 
-    if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0) ||
+    if (!CreatePipe(&stderr_read, &stderr_write, &sa, pipe_buffer_size) ||
         !SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0)) {
         throw std::runtime_error("Failed to create stderr pipe");
     }
@@ -146,6 +165,12 @@ int execute_command(std::vector<std::string>& command, std::string& stdout_str, 
     if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
         throw std::runtime_error("Failed to create pipes");
     }
+
+#ifdef __linux__
+    constexpr int pipe_buffer_size = 256 * 1024;
+    fcntl(stdout_pipe[0], F_SETPIPE_SZ, pipe_buffer_size);
+    fcntl(stderr_pipe[0], F_SETPIPE_SZ, pipe_buffer_size);
+#endif
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -655,6 +680,49 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
         }
     }
 
+    if (!coopmat2) {
+        for (const auto& tname : iqk_type_names) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+            const std::map<std::string, std::string> float_type_dict = {
+                {"FLOAT_TYPE",   FLOAT_TYPE(1, tname)},
+                {"FLOAT_TYPEV2", FLOAT_TYPE(2, tname)},
+                {"FLOAT_TYPEV4", FLOAT_TYPE(4, tname)},
+                {"FLOAT_TYPEV8", FLOAT_TYPE(8, tname)},
+            };
+            const std::map<std::string, std::string> common_defines = {
+                {data_a_key, "1"},
+                {"IQK_LUT_TYPE", "float"},
+                {"LOAD_VEC_A", "4"},
+                {"LOAD_VEC_B", load_vec},
+                {"D_TYPE", "float"},
+            };
+
+            string_to_spv(shader_name + "_" + tname + "_f16" + dot2_sfx, source_name,
+                          merge_maps(merge_maps(base_dict, float_type_dict),
+                                     merge_maps(common_defines, {{"B_TYPE", aligned_b_type_f16}, {"B_TYPE_SCALAR", "float16_t"}, {"B_TYPEV4", "f16vec4"}})),
+                          fp16, coopmat, coopmat2, f16acc);
+            string_to_spv(shader_name + "_" + tname + "_f32" + dot2_sfx, source_name,
+                          merge_maps(merge_maps(base_dict, float_type_dict),
+                                     merge_maps(common_defines, {{"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}})),
+                          fp16, coopmat, coopmat2, f16acc);
+        }
+    }
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    if (!f16acc && !coopmat && !coopmat2 && !dot2) {
+        for (const auto& tname : iqk_type_names) {
+            const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+            const std::map<std::string, std::string> float_type_dict = {
+                {"FLOAT_TYPE",   FLOAT_TYPE(1, tname)},
+                {"FLOAT_TYPEV2", FLOAT_TYPE(2, tname)},
+                {"FLOAT_TYPEV4", FLOAT_TYPE(4, tname)},
+                {"FLOAT_TYPEV8", FLOAT_TYPE(8, tname)},
+            };
+            string_to_spv(shader_name + "_" + tname + "_q8_1", "mul_mmq.comp", merge_maps(merge_maps(base_dict, float_type_dict), {{data_a_key, "1"}, {"D_TYPE", "float"}}), fp16, coopmat, coopmat2, f16acc);
+        }
+    }
+#endif
+
     // Quant shader: one SPIR-V for all quant types, selected via MmTypeA spec constant
     {
         const std::map<std::string, std::string> quant_float_type_dict = {
@@ -836,6 +904,28 @@ void process_shaders() {
         }
         string_to_spv("get_rows_" + tname + "_f32", shader, merge_maps(base_dict, {{"TEMP_TYPE", "FLOAT_TYPE"}, {data_a_key, "1"}, {"B_TYPE", "int"}, {"D_TYPE", "float"}}));
     }
+
+    for (const auto& tname : iqk_type_names) {
+        const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+        string_to_spv("dequant_" + tname, "dequant_iqk.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float16_t"}}));
+
+        string_to_spv("get_rows_" + tname, "get_rows_quant.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"TEMP_TYPE", "float"}, {"B_TYPE", "int"}, {"D_TYPE", "float16_t"}}));
+        string_to_spv("get_rows_" + tname + "_f32", "get_rows_quant.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"TEMP_TYPE", "float"}, {"B_TYPE", "int"}, {"D_TYPE", "float"}}));
+    }
+
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    for (const auto& tname : iqk_type_names) {
+        const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+        string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vecq.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+        string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vecq.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+    }
+#endif
 
     string_to_spv("get_rows_i32", "get_rows.comp", {{"TEMP_TYPE", "uint"}, {"A_TYPE", "uint"}, {"B_TYPE", "int"}, {"D_TYPE", "uint"}});
 
@@ -1349,6 +1439,21 @@ void write_output_files() {
         }
     }
     }
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    for (const auto& tname : iqk_type_names) {
+        hdr << "extern const void * arr_dmmv_"   << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3];\n";
+        hdr << "extern const void * arr_dmmv_id_"   << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec.comp") {
+            src << "const void * arr_dmmv_"   << tname << "_q8_1_f32_data[3] = {mul_mat_vec_" << tname << "_q8_1_f32_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_" << tname << "_q8_1_f32_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+            src << "const void * arr_dmmv_id_"   << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
+            src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+    }
+#endif
 
 #if defined(GGML_VULKAN_FLOAT_E2M1_GLSLC_SUPPORT) && defined(GGML_VULKAN_FLOAT_E4M3_GLSLC_SUPPORT)
     for (const std::string& btype : {"f16", "f32"}) {

@@ -102,6 +102,18 @@ struct block_a_cache {
     int32_t qs[8];
     FLOAT_TYPEV2 d_scales;
 };
+#elif defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+#define QUANT_R_MMQ 1
+struct block_a_cache {
+    int32_t qs[8];
+    FLOAT_TYPEV2 d_scales;
+};
+#elif defined(DATA_A_IQK_ROW)
+#define QUANT_R_MMQ 2
+struct block_a_cache {
+    int32_t qs[8];
+    FLOAT_TYPEV2 d_scales;
+};
 #endif
 
 struct block_b_cache

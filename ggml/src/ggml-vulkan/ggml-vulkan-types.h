@@ -1431,3 +1431,6 @@ struct ggml_backend_vk_device_context {
     int op_offload_min_batch_size;
 };
 
+inline size_t ggml_vk_tensor_storage_unit_size(ggml_type type) {
+    return ggml_get_type_traits(type)->row_meta_size != 0 ? sizeof(uint16_t) : ggml_type_size(type);
+}

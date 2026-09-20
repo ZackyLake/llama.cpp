@@ -68,9 +68,14 @@ void get_offsets(out uint a_offset, out uint b_offset, out uint d_offset) {
 
     a_offset =
 #ifdef MUL_MAT_ID
-            expert_id * (p.batch_stride_a / QUANT_K);
+            expert_id *
 #else
-            batch_idx_a * (p.batch_stride_a / QUANT_K);
+            batch_idx_a *
+#endif
+#ifdef DATA_A_IQK_ROW
+            p.batch_stride_a;
+#else
+            (p.batch_stride_a / QUANT_K);
 #endif
     b_offset =
 #ifdef MUL_MAT_ID
