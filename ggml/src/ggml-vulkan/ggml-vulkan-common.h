@@ -60,6 +60,7 @@ void ggml_vk_buffer_memset(vk_buffer& dst, size_t offset, uint32_t c, size_t siz
 vk_buffer ggml_vk_buffer_from_host_ptr(vk_device & device, void * ptr, size_t size);
 
 // pipelines
+bool ggml_vk_is_verbose();
 uint64_t vk_tensor_offset(const ggml_tensor * tensor);
 uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t);
 void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx);
@@ -258,15 +259,74 @@ uint32_t ggml_vk_concat_unit_size(ggml_type type);
 bool ggml_vk_concat_supported(const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst);
 
 template <typename T>
+inline void ggml_vk_log_push_constants(const T & push_constants) {
+    const auto * values = reinterpret_cast<const uint32_t *>(push_constant_data(push_constants));
+    const size_t count = push_constant_size(push_constants) / sizeof(uint32_t);
+    std::cerr << "push_constants=[";
+    for (size_t i = 0; i < count; ++i) {
+        if (i != 0) {
+            std::cerr << ",";
+        }
+        std::cerr << values[i];
+    }
+    std::cerr << "]";
+}
+
+inline void ggml_vk_log_push_constants(const vk_mat_vec_push_constants & p) {
+    std::cerr << "push_constants={ncols=" << p.ncols
+              << ",stride_a=" << p.stride_a
+              << ",stride_b=" << p.stride_b
+              << ",stride_d=" << p.stride_d
+              << ",batch_stride_a=" << p.batch_stride_a
+              << ",batch_stride_b=" << p.batch_stride_b
+              << ",batch_stride_d=" << p.batch_stride_d
+              << ",fusion_flags=" << p.fusion_flags
+              << ",base_work_group_y=" << p.base_work_group_y
+              << ",ne02=" << p.ne02
+              << ",ne12=" << p.ne12
+              << ",broadcast2=" << p.broadcast2
+              << ",broadcast3=" << p.broadcast3 << "}";
+}
+
+inline void ggml_vk_log_push_constants(const vk_mat_vec_id_push_constants & p) {
+    std::cerr << "push_constants={ncols=" << p.ncols
+              << ",stride_a=" << p.stride_a
+              << ",stride_b=" << p.stride_b
+              << ",stride_d=" << p.stride_d
+              << ",batch_stride_a=" << p.batch_stride_a
+              << ",batch_stride_b=" << p.batch_stride_b
+              << ",batch_stride_d=" << p.batch_stride_d
+              << ",fusion_flags=" << p.fusion_flags
+              << ",nei0=" << p.nei0
+              << ",ne11=" << p.ne11
+              << ",expert_i1=" << p.expert_i1
+              << ",nbi1=" << p.nbi1 << "}";
+}
+
+template <typename T>
 inline void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& subctx, vk_pipeline& pipeline, std::initializer_list<vk::DescriptorBufferInfo> const& descriptor_buffer_infos, const T &push_constants, std::array<uint32_t, 3> elements) {
     const uint32_t wg0 = CEIL_DIV(elements[0], pipeline->wg_denoms[0]);
     const uint32_t wg1 = CEIL_DIV(elements[1], pipeline->wg_denoms[1]);
     const uint32_t wg2 = CEIL_DIV(elements[2], pipeline->wg_denoms[2]);
-    VK_LOG_DEBUG("ggml_vk_dispatch_pipeline(" << pipeline->name << ", {";
-    for (auto& buffer : descriptor_buffer_infos) {
-        std::cerr << "(" << buffer.buffer << ", " << buffer.offset << ", " << buffer.range << "), ";
+    if (ggml_vk_is_verbose()) {
+        const uint32_t local_size_x = pipeline->specialization_constants.empty() ? 0 : pipeline->specialization_constants[0];
+        std::cerr << "ggml_vk_dispatch_pipeline: pipeline=" << pipeline->name
+                  << ", shader=" << pipeline->name
+                  << ", elements=(" << elements[0] << "," << elements[1] << "," << elements[2] << ")"
+                  << ", workgroups=(" << wg0 << "," << wg1 << "," << wg2 << ")"
+                  << ", local_size=(" << local_size_x << ",1,1)"
+                  << ", required_subgroup_size=" << pipeline->required_subgroup_size
+                  << ", specialization_constants=[";
+        for (size_t i = 0; i < pipeline->specialization_constants.size(); ++i) {
+            if (i != 0) {
+                std::cerr << ",";
+            }
+            std::cerr << pipeline->specialization_constants[i];
+        }
+        std::cerr << "], ";
+        ggml_vk_log_push_constants(push_constants);
+        std::cerr << std::endl;
     }
-    std::cerr << "}, (" << wg0 << "," << wg1 << "," << wg2 << "))");
     GGML_ASSERT(wg0 <= ctx->device->properties.limits.maxComputeWorkGroupCount[0] &&
                 wg1 <= ctx->device->properties.limits.maxComputeWorkGroupCount[1] &&
                 wg2 <= ctx->device->properties.limits.maxComputeWorkGroupCount[2]);

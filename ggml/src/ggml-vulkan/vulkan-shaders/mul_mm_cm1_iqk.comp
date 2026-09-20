@@ -1,0 +1,426 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
+#extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#extension GL_EXT_shader_subgroup_extended_types_int8 : require
+#extension GL_EXT_shader_subgroup_extended_types_int16 : require
+
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : enable
+
+#ifndef MUL_MAT_ID_USE_SUBGROUPS
+#define MUL_MAT_ID_USE_SUBGROUPS 1
+#endif
+
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+#ifdef MUL_MAT_ID
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#endif
+
+#define IQK_MMQ_LUT
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "types.glsl"
+
+layout (binding = 0) readonly buffer A {A_TYPE data_a[];};
+#if defined(A_TYPE_PACKED16)
+layout (binding = 0) readonly buffer A_PACKED16 {A_TYPE_PACKED16 data_a_packed16[];};
+#endif
+#if defined(A_TYPE_PACKED32)
+layout (binding = 0) readonly buffer A_PACKED32 {A_TYPE_PACKED32 data_a_packed32[];};
+#endif
+layout (binding = 1) readonly buffer B {B_TYPE data_b[];};
+layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
+
+#ifdef MUL_MAT_ID
+layout (binding = 3) readonly buffer IDS {int data_ids[];};
+layout (binding = 4) readonly buffer Counts {int data_expert_count[];};
+#endif
+
+layout (push_constant) uniform parameter
+{
+    uint M;
+    uint N;
+    uint K;
+    uint stride_a;
+    uint stride_b;
+    uint stride_d;
+
+    uint batch_stride_a;
+    uint batch_stride_b;
+    uint batch_stride_d;
+
+#ifdef MUL_MAT_ID
+    uint nei0;
+    uint nei1;
+    uint nbi1;
+    uint ne11;
+    uint n_experts;
+    uint hoist_row_ids;
+#else
+    uint base_work_group_z;
+    uint num_batches;
+    uint k_split;
+    uint ne02;
+    uint ne12;
+    uint broadcast2;
+    uint broadcast3;
+#endif
+} p;
+
+layout (constant_id = 0) const uint BLOCK_SIZE = 512;
+layout (constant_id = 1) const uint BM = 64;
+layout (constant_id = 2) const uint BN = 64;
+// layout (constant_id = 3) const uint BK = 32;
+layout (constant_id = 4) const uint WM = 8;
+layout (constant_id = 5) const uint WN = 16;
+layout (constant_id = 6) const uint WMITER = 1;
+layout (constant_id = 7) const uint TM = 8;
+layout (constant_id = 8) const uint TN = 16;
+layout (constant_id = 9) const uint TK = 16;  // Only needed for coopmat
+layout (constant_id = 10) const uint WARP = 16;
+
+#define BK 32
+
+#define BK_STEP 8
+
+#define F16AMat coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA>
+#define F16BMat coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB>
+#define F16AccMat coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>
+
+// Each row contains 16 K16 chunks (four f16vec4 per chunk).
+#define K16STRIDE 16
+
+// Shared memory cache
+shared f16vec4 buf_a_qs[BM * K16STRIDE * 4]; // [K16 chunk][row][fp16 vector]
+shared f16vec4 buf_b_qs[BN * K16STRIDE * 4]; // [column][K16 chunk][fp16 vector]
+
+#define LOAD_ELEMS_B 16
+
+#define NUM_WARPS (BLOCK_SIZE / WARP)
+
+#include "mmq_iqk.glsl"
+#include "mul_mm_id_funcs.glsl"
+
+void unpack_qs_to_f16(const i32vec4 qs, const float scale, const uint buf_idx) {
+    buf_a_qs[buf_idx + 0u] = f16vec4(vec4(unpack8(qs.x)) * scale);
+    buf_a_qs[buf_idx + 1u] = f16vec4(vec4(unpack8(qs.y)) * scale);
+    buf_a_qs[buf_idx + 2u] = f16vec4(vec4(unpack8(qs.z)) * scale);
+    buf_a_qs[buf_idx + 3u] = f16vec4(vec4(unpack8(qs.w)) * scale);
+}
+
+#ifdef DATA_A_IQK_ROW
+void block_a_to_shmem(const uint16_t row_begin, const uint block_byte_offset, const float a_scale) {
+#else
+void block_a_to_shmem(const uint16_t row_begin, const uint ib_k, const float a_scale) {
+#endif
+    i32vec4 qs_a[4];
+    i8vec4 a_scales;
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t row = row_begin + (laneid & uint16_t(3));
+
+#if defined(SG_A_SHAPE_16x4)
+#ifdef DATA_A_IQK_ROW
+    rm_prepare_a_k16x4_iter(block_byte_offset, qs_a, a_scales);
+#else
+    prepare_a_k16x4_iter(ib_k, qs_a, a_scales);
+#endif
+    const uint16_t subid = laneid >> uint16_t(2);
+    const uint16_t is_high_16 = subid & uint16_t(1);
+    const uint16_t cache_half = subid >> uint16_t(1);
+    const uint16_t cache_base = cache_half * uint16_t(4);
+    const uint qs_base = uint(cache_base) * 2u + uint(is_high_16);
+    const uint a_qs_base = (qs_base * BM + row) * 4u;
+    const vec4 scales_a = vec4(a_scales) * a_scale;
+
+    unpack_qs_to_f16(qs_a[0], scales_a[0], a_qs_base + 0u * BM * 8u);
+    unpack_qs_to_f16(qs_a[1], scales_a[1], a_qs_base + 1u * BM * 8u);
+    unpack_qs_to_f16(qs_a[2], scales_a[2], a_qs_base + 2u * BM * 8u);
+    unpack_qs_to_f16(qs_a[3], scales_a[3], a_qs_base + 3u * BM * 8u);
+#elif defined(SG_A_SHAPE_32x2)
+#ifdef DATA_A_IQK_ROW
+    rm_prepare_a_k32x2_iter(block_byte_offset, qs_a, a_scales);
+#else
+    prepare_a_k32x2_iter(ib_k, qs_a, a_scales);
+#endif
+    const uint qs_base = uint(laneid >> uint16_t(2)) * 4u;
+    const uint a_qs_base = (qs_base * BM + row) * 4u;
+    const vec4 scales_a = vec4(a_scales) * a_scale;
+
+    unpack_qs_to_f16(qs_a[0], scales_a[0], a_qs_base + 0u * BM * 4u);
+    unpack_qs_to_f16(qs_a[1], scales_a[1], a_qs_base + 1u * BM * 4u);
+    unpack_qs_to_f16(qs_a[2], scales_a[2], a_qs_base + 2u * BM * 4u);
+    unpack_qs_to_f16(qs_a[3], scales_a[3], a_qs_base + 3u * BM * 4u);
+#else
+#error "Unsupported IQK subgroup shape in block_a_to_shmem"
+#endif
+}
+
+void block_b_to_shmem(const uint buf_ib, const uint pos_b, const uint iqs, const bool n_in_bounds) {
+    const uint qs_base = ((buf_ib % BN) * K16STRIDE + (buf_ib / BN) * (BK / 16) + iqs) * 4u;
+    const uint b_base = (pos_b + iqs * LOAD_ELEMS_B) / LOAD_VEC_B;
+
+    if (n_in_bounds) {
+        const B_TYPE b_lo = data_b[b_base + 0u];
+        const B_TYPE b_hi = data_b[b_base + 1u];
+        buf_b_qs[qs_base + 0u] = f16vec4(b_lo[0]);
+        buf_b_qs[qs_base + 1u] = f16vec4(b_lo[1]);
+        buf_b_qs[qs_base + 2u] = f16vec4(b_hi[0]);
+        buf_b_qs[qs_base + 3u] = f16vec4(b_hi[1]);
+    } else {
+        buf_b_qs[qs_base + 0u] = f16vec4(0.0f);
+        buf_b_qs[qs_base + 1u] = f16vec4(0.0f);
+        buf_b_qs[qs_base + 2u] = f16vec4(0.0f);
+        buf_b_qs[qs_base + 3u] = f16vec4(0.0f);
+    }
+}
+
+#ifdef DATA_A_IQK_ROW
+void load_a(uint16_t sgid, uint32_t ir, uint32_t block, uint bytes_in_k, uint a_offset) {
+#else
+void load_a(uint16_t sgid, uint32_t ir, uint32_t block, uint blk256_in_k, uint a_ib_offset) {
+#endif
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t row_begin = sgid * uint16_t(4);
+    const uint first_row = ir * BM + row_begin;
+    const uint first_col = block;
+    const uint16_t row = laneid & uint16_t(3);
+#ifdef DATA_A_IQK_ROW
+    const uint a_offset_in_row = IQK_ROW_META_SIZE + (first_col / QUANT_K) * IQK_BLOCK_SIZE;
+    const uint a_row_begin = a_offset + (first_row + row) * bytes_in_k;
+    const float a_scale = iqks_row_scale(a_row_begin);
+    block_a_to_shmem(row_begin, a_row_begin + a_offset_in_row, a_scale);
+#else
+    const uint a_ib_row = a_ib_offset + first_row * blk256_in_k;
+    const uint a_ib_k = a_ib_row + first_col / QUANT_K;
+    const uint a_ib_lane = a_ib_k + row * blk256_in_k;
+    const float a_scale = float(data_a[a_ib_lane].d);
+    block_a_to_shmem(row_begin, a_ib_lane, a_scale);
+#endif
+}
+
+void load_b(uint16_t sgid, uint16_t sgsize, uint32_t pos_b) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t k_step = laneid / uint16_t(BK / LOAD_ELEMS_B);
+    const uint16_t iqs = laneid % uint16_t(BK / LOAD_ELEMS_B);
+
+    [[unroll]] for (uint buf_ib = sgid; buf_ib < BN; buf_ib += sgsize) {
+        uint b_offset = pos_b + uint(k_step) * BK;
+#ifdef MUL_MAT_ID
+        const bool n_in_bounds = gl_WorkGroupID.y * BN + buf_ib < _ne1;
+        if (n_in_bounds) {
+            const u16vec2 row_idx = row_ids[buf_ib];
+            b_offset += row_idx.y * p.batch_stride_b + (row_idx.x % p.ne11) * p.stride_b;
+        }
+#else
+        const bool n_in_bounds = gl_WorkGroupID.y * BN + buf_ib < p.N;
+        b_offset += buf_ib * p.stride_b;
+#endif
+        block_b_to_shmem(k_step * BN + buf_ib, b_offset, iqs, n_in_bounds);
+    }
+}
+
+
+void main() {
+    const uint ic = gl_WorkGroupID.y;
+
+#ifdef MUL_MAT_ID
+    const uint expert_idx = gl_WorkGroupID.z;
+    if (ic * BN >= data_expert_count[expert_idx]) {
+        return;
+    }
+#endif
+
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#elif defined(DATA_A_IQ2_KL)
+    init_iq2kl_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    init_iq4k_table();
+#elif defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+    init_iq5k_table();
+#elif defined(NEEDS_INIT_IQ_SHMEM)
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+#ifndef MUL_MAT_ID
+    const uint batch_idx = gl_WorkGroupID.z + p.base_work_group_z;
+
+    const uint i13 = batch_idx / p.ne12;
+    const uint i12 = batch_idx % p.ne12;
+
+    const uint i03 = i13 / p.broadcast3;
+    const uint i02 = i12 / p.broadcast2;
+
+    const uint batch_idx_a = i03 * p.ne02 + i02;
+#endif
+
+    const uint blocks_m = (p.M + BM - 1) / BM;
+    const uint ir = gl_WorkGroupID.x % blocks_m;
+    const uint ik = gl_WorkGroupID.x / blocks_m;
+
+    const uint WNITER = (WM * WN) / (TM * TN * WMITER);
+    const uint WSUBM = WM / WMITER;
+    const uint WSUBN = WN / WNITER;
+    const uint16_t subgroup_id = uint16_t(gl_SubgroupID);
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t subgroup_count = uint16_t(BLOCK_SIZE / WARP);
+    const uint16_t load_a_count = uint16_t(BM / 4);
+
+    // Logical coordinates in the staged output, not the fragment's lane layout.
+    const uint16_t tiwr = laneid % uint16_t(TM);
+    const uint16_t tiwc = laneid / uint16_t(TM);
+
+    const uint16_t warp_r = subgroup_id % uint16_t(BM / WM);
+    const uint16_t warp_c = subgroup_id / uint16_t(BM / WM);
+
+#ifdef MUL_MAT_ID
+    if (p.hoist_row_ids != 0) {
+        load_row_ids_hoisted(expert_idx, ic);
+    } else {
+        if (bitCount(p.nei0) == 1) {
+            load_row_ids(expert_idx, true, ic);
+        } else {
+            load_row_ids(expert_idx, false, ic);
+        }
+    }
+
+    // Workgroup has no work
+    if (ic * BN >= _ne1) return;
+#endif
+
+#ifdef MUL_MAT_ID
+    const uint start_k = 0;
+    const uint end_k = p.K;
+#else
+    const uint start_k = ik * p.k_split;
+    const uint end_k = min(p.K, (ik + 1) * p.k_split);
+#endif
+
+#ifdef MUL_MAT_ID
+    uint pos_b = 0;
+#else
+    uint pos_b = batch_idx * p.batch_stride_b + ic * BN * p.stride_b + start_k;
+#endif
+
+    F16AccMat sums[WMITER * WNITER];
+
+    [[unroll]] for (uint i = 0; i < WMITER * WNITER; i++) {
+        sums[i] = F16AccMat(float16_t(0.0f));
+    }
+
+    const uint a_offset =
+#ifdef MUL_MAT_ID
+    expert_idx * p.batch_stride_a;
+#else
+    batch_idx_a * p.batch_stride_a;
+#endif
+#ifdef DATA_A_IQK_ROW
+    const uint bytes_in_k = IQK_ROW_META_SIZE + (p.K / QUANT_K) * IQK_BLOCK_SIZE;
+#else
+    const uint blk256_in_k = p.K / QUANT_K;
+    const uint a_ib_offset = a_offset / QUANT_K;
+#endif
+
+    for (uint block = start_k; block < end_k; block += BK * BK_STEP) {
+
+        if (load_a_count >= subgroup_count) {
+            [[unroll]] for (uint16_t sgid = subgroup_id; sgid < load_a_count; sgid += subgroup_count) {
+#ifdef DATA_A_IQK_ROW
+                load_a(sgid, ir, block, bytes_in_k, a_offset);
+#else
+                load_a(sgid, ir, block, blk256_in_k, a_ib_offset);
+#endif
+            }
+            load_b(subgroup_id, subgroup_count, pos_b);
+        } else {
+            if (subgroup_id < load_a_count) {
+#ifdef DATA_A_IQK_ROW
+                load_a(subgroup_id, ir, block, bytes_in_k, a_offset);
+#else
+                load_a(subgroup_id, ir, block, blk256_in_k, a_ib_offset);
+#endif
+            } else {
+                load_b(subgroup_id - load_a_count, subgroup_count - load_a_count, pos_b);
+            }
+        }
+
+        barrier();
+
+        pos_b += BK * BK_STEP;
+
+        [[unroll]] for (uint k_step = 0; k_step < BK * BK_STEP / TK; k_step++) {
+            const uint qs_base = k_step * (TK / 4);
+
+            [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+                const uint b_col = warp_c * WN + wsic * WSUBN;
+                F16BMat qs_b;
+                coopMatLoad(qs_b, buf_b_qs, b_col * K16STRIDE * 4u + qs_base,
+                            K16STRIDE * 4u, gl_CooperativeMatrixLayoutColumnMajor);
+
+                [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+                    const uint a_row = warp_r * WM + wsir * WSUBM;
+                    const uint sums_idx = wsic * WMITER + wsir;
+                    F16AMat qs_a;
+                    coopMatLoad(qs_a, buf_a_qs, (k_step * BM + a_row) * 4u,
+                                4, gl_CooperativeMatrixLayoutRowMajor);
+
+                    sums[sums_idx] = coopMatMulAdd(qs_a, qs_b, sums[sums_idx]);
+                }
+            }
+        }
+
+        barrier();
+    }
+
+    const uint dr = ir * BM + warp_r * WM;
+    const uint dc = ic * BN + warp_c * WN;
+
+#ifndef MUL_MAT_ID
+    const uint offsets = batch_idx * p.batch_stride_d + ik * p.batch_stride_d * p.num_batches;
+#endif
+
+    // A is no longer needed. Reuse its fp16 storage for output.
+    const uint stage_base = uint(subgroup_id) * (TM * TN / 4);
+
+    [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+        [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+            const uint sums_idx = wsic * WMITER + wsir;
+            coopMatStore(sums[sums_idx], buf_a_qs, stage_base, TM / 4,
+                         gl_CooperativeMatrixLayoutColumnMajor);
+            controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+
+            const uint dr_warp = dr + wsir * WSUBM + tiwr;
+            const uint dc_warp = dc + wsic * WSUBN + tiwc;
+            [[unroll]] for (uint cc = 0; cc < TN; cc += WARP / TM) {
+#ifdef MUL_MAT_ID
+                const uint row_i = dc_warp + cc;
+                if (row_i >= _ne1) break;
+
+                const u16vec2 row_idx = row_ids[row_i - ic * BN];
+#endif // MUL_MAT_ID
+                const uint stage_idx = (cc + uint(tiwc)) * TM + uint(tiwr);
+                const float value = float(buf_a_qs[stage_base + stage_idx / 4][stage_idx % 4]);
+#ifdef MUL_MAT_ID
+                if (dr_warp < p.M) {
+                    data_d[row_idx.y * p.batch_stride_d + row_idx.x * p.stride_d + dr_warp] = D_TYPE(value);
+                }
+#else
+                if (dr_warp < p.M && dc_warp + cc < p.N) {
+                    data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp] = D_TYPE(value);
+                }
+#endif // MUL_MAT_ID
+            }
+            controlBarrier(gl_ScopeSubgroup, gl_ScopeSubgroup, gl_StorageSemanticsShared, gl_SemanticsAcquireRelease);
+        }
+    }
+}
