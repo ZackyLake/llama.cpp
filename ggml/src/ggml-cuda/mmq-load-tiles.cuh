@@ -2589,11 +2589,12 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     float * x_df = (float *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    const int kqsx = threadIdx.x % MMQ_TILE_NE_K;
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+    const int kqsx = tid % MMQ_TILE_NE_K;
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/MMQ_TILE_NE_K)) {
-        int i = i0 + threadIdx.y * (warp_size/MMQ_TILE_NE_K) + threadIdx.x/MMQ_TILE_NE_K;
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / MMQ_TILE_NE_K) {
+        int i = i0 + tid/MMQ_TILE_NE_K;
 
         if (fallback) {
             i = min(i, i_max);
@@ -2623,8 +2624,8 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/(MMQ_TILE_NE_K/4))) {
-        int i = i0 + threadIdx.y * (warp_size/(MMQ_TILE_NE_K/4)) + threadIdx.x / (MMQ_TILE_NE_K/4);
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / (MMQ_TILE_NE_K/4)) {
+        int i = i0 + tid/(MMQ_TILE_NE_K/4);
 
         if (fallback) {
             i = min(i, i_max);
@@ -2633,12 +2634,13 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         const float * dptr = (const float *)(x + i*stride);
         const float d = dptr[0];
         const block_iq1_kt * bxi = (const block_iq1_kt *)(dptr + 1) + kbx0;
-        const int ls = iq4k_values[bxi->sh[threadIdx.x % 8] & 0xf];
+        const int scale_lane = tid % (MMQ_TILE_NE_K/4);
+        const int ls = iq4k_values[bxi->sh[scale_lane] & 0xf];
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*sram_stride             + threadIdx.x % 8] = d * ls;
+        x_df[i*sram_stride             + scale_lane] = d * ls;
 #else
-        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = d * ls;
+        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + scale_lane] = d * ls;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
@@ -2662,11 +2664,12 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     float * x_df = (float *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    const int kqsx = threadIdx.x % MMQ_TILE_NE_K;
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+    const int kqsx = tid % MMQ_TILE_NE_K;
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/MMQ_TILE_NE_K)) {
-        int i = i0 + threadIdx.y * (warp_size/MMQ_TILE_NE_K) + threadIdx.x/MMQ_TILE_NE_K;
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / MMQ_TILE_NE_K) {
+        int i = i0 + tid/MMQ_TILE_NE_K;
 
         if (fallback) {
             i = min(i, i_max);
@@ -2697,8 +2700,8 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/(MMQ_TILE_NE_K/4))) {
-        int i = i0 + threadIdx.y * (warp_size/(MMQ_TILE_NE_K/4)) + threadIdx.x / (MMQ_TILE_NE_K/4);
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / (MMQ_TILE_NE_K/4)) {
+        int i = i0 + tid/(MMQ_TILE_NE_K/4);
 
         if (fallback) {
             i = min(i, i_max);
@@ -2707,13 +2710,14 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         const float * dptr = (const float *)(x + i*stride);
         const float d = dptr[0]; // fudge factor 1.05f removed
         const block_iq2_kt * bxi = (const block_iq2_kt *)(dptr + 1) + kbx0;
-        int ib32 = threadIdx.x % 8;
+        const int scale_lane = tid % (MMQ_TILE_NE_K/4);
+        int ib32 = scale_lane;
         const int ls = iq4k_values[(bxi->scales[ib32%4] >> 4*(ib32/4)) & 0xf];
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*sram_stride             + threadIdx.x % 8] = d * ls;
+        x_df[i*sram_stride             + scale_lane] = d * ls;
 #else
-        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = d * ls;
+        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + scale_lane] = d * ls;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
@@ -2737,11 +2741,12 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     float * x_df = (float *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    const int kqsx = threadIdx.x % MMQ_TILE_NE_K;
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+    const int kqsx = tid % MMQ_TILE_NE_K;
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/MMQ_TILE_NE_K)) {
-        int i = i0 + threadIdx.y * (warp_size/MMQ_TILE_NE_K) + threadIdx.x/MMQ_TILE_NE_K;
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / MMQ_TILE_NE_K) {
+        int i = i0 + tid/MMQ_TILE_NE_K;
 
         if (fallback) {
             i = min(i, i_max);
@@ -2778,8 +2783,8 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/(MMQ_TILE_NE_K/4))) {
-        int i = i0 + threadIdx.y * (warp_size/(MMQ_TILE_NE_K/4)) + threadIdx.x / (MMQ_TILE_NE_K/4);
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / (MMQ_TILE_NE_K/4)) {
+        int i = i0 + tid/(MMQ_TILE_NE_K/4);
 
         if (fallback) {
             i = min(i, i_max);
@@ -2788,13 +2793,14 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         const float * dptr = (const float *)(x + i*stride);
         const float d = dptr[0]; // fudge factor 1.01f removed
         const block_iq3_kt * bxi = (const block_iq3_kt *)(dptr + 1) + kbx0;
-        int ib32 = threadIdx.x % 8;
+        const int scale_lane = tid % (MMQ_TILE_NE_K/4);
+        int ib32 = scale_lane;
         const int ls = (bxi->scales[ib32%4] >> 4*(ib32/4)) & 0xf;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*sram_stride             + threadIdx.x % 8] = d * ls;
+        x_df[i*sram_stride             + scale_lane] = d * ls;
 #else
-        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = d * ls;
+        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + scale_lane] = d * ls;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
@@ -2818,11 +2824,12 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     float * x_df = (float *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    const int kqsx = threadIdx.x % MMQ_TILE_NE_K;
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+    const int kqsx = tid % MMQ_TILE_NE_K;
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/MMQ_TILE_NE_K)) {
-        int i = i0 + threadIdx.y * (warp_size/MMQ_TILE_NE_K) + threadIdx.x/MMQ_TILE_NE_K;
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / MMQ_TILE_NE_K) {
+        int i = i0 + tid/MMQ_TILE_NE_K;
 
         if (fallback) {
             i = min(i, i_max);
@@ -2856,8 +2863,8 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/(MMQ_TILE_NE_K/4))) {
-        int i = i0 + threadIdx.y * (warp_size/(MMQ_TILE_NE_K/4)) + threadIdx.x / (MMQ_TILE_NE_K/4);
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / (MMQ_TILE_NE_K/4)) {
+        int i = i0 + tid/(MMQ_TILE_NE_K/4);
 
         if (fallback) {
             i = min(i, i_max);
@@ -2865,12 +2872,13 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 
         const float * dptr = (const float *)(x + i*stride);
         const block_iq4_kt * bxi = (const block_iq4_kt *)(dptr + 1) + kbx0;
-        const int ls = (bxi->qs[threadIdx.x % 8] & 0xff) >> 1;
+        const int scale_lane = tid % (MMQ_TILE_NE_K/4);
+        const int ls = (bxi->qs[scale_lane] & 0xff) >> 1;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*sram_stride             + threadIdx.x % 8] = dptr[0] * (ls - 64);
+        x_df[i*sram_stride             + scale_lane] = dptr[0] * (ls - 64);
 #else
-        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = dptr[0] * (ls - 64);
+        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + scale_lane] = dptr[0] * (ls - 64);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }
@@ -2891,15 +2899,16 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     half2 * x_ds = (half2 *) (x_qs + txs.qs);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
-    const int logical_lane = threadIdx.x % MMQ_TILE_NE_K;
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+    const int logical_lane = tid % MMQ_TILE_NE_K;
     const int kbx  = logical_lane / 4;
     const int kqsx = logical_lane % 4;
 
     int32_t grid32[2];
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * (warp_size/MMQ_TILE_NE_K)) {
-        int i = i0 + threadIdx.y * (warp_size/MMQ_TILE_NE_K) + threadIdx.x/MMQ_TILE_NE_K;
+    for (int i0 = 0; i0 < I; i0 += (nwarps * warp_size) / MMQ_TILE_NE_K) {
+        int i = i0 + tid/MMQ_TILE_NE_K;
 
         if (fallback) {
             i = min(i, i_max);
@@ -2926,12 +2935,11 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
     }
 
     constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / 4;
-    constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
-    const int kbxd = threadIdx.x % blocks_per_tile_x_row;
+    const int kbxd = tid % blocks_per_tile_x_row;
 
 #pragma unroll
-    for (int i0 = 0; i0 < I; i0 += nwarps * rows_per_warp) {
-        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
+    for (int i0 = 0; i0 < I; i0 += nwarps * warp_size/blocks_per_tile_x_row) {
+        int i = i0 + tid/blocks_per_tile_x_row;
 
         if (fallback) {
             i = min(i, i_max);
