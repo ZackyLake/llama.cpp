@@ -1,4 +1,9 @@
 // k_pair is the K coordinate measured in FLOAT_TYPEV2 elements.
+#if defined(DATA_A_IQK_ROW) || defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || \
+    defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+#include "dequant_funcs.glsl"
+#endif
+
 uint a_shmem_index(uint m, uint k_pair) {
     if (APPLY_SLM_A_RESHAPE) {
         const uint tile_width = TK / 2;
@@ -69,6 +74,28 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
     } else {
         store_a(col, row, FLOAT_TYPEV2(0.0f));
     }
+#elif defined(DATA_A_IQK_ROW)
+    const uint row_offset = pos_a + col * p.stride_a;
+    const uint block_offset = row_offset + IQK_ROW_META_SIZE + (block / QUANT_K) * IQK_BLOCK_SIZE;
+    const uint k_pair = row * LOAD_VEC_A / 2;
+    const uint element = (block % QUANT_K) + row * LOAD_VEC_A;
+
+    const vec4 values = dequantize_iqk_row4(row_offset, block_offset, element);
+    store_a(col, k_pair,     FLOAT_TYPEV2(FLOAT_TYPE(values.x), FLOAT_TYPE(values.y)));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(FLOAT_TYPE(values.z), FLOAT_TYPE(values.w)));
+    
+#elif defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || \
+      defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
+    const uint k_pair = row * LOAD_VEC_A / 2;
+    const uint loads_per_block = QUANT_K / LOAD_VEC_A;
+    const uint block_index = idx / loads_per_block;
+    const uint element = (idx % loads_per_block) * LOAD_VEC_A;
+    const vec4 values = dequantize_iqk4(block_index, element);
+
+    store_a(col, k_pair, FLOAT_TYPEV2(FLOAT_TYPE(values.x), FLOAT_TYPE(values.y)));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(FLOAT_TYPE(values.z), FLOAT_TYPE(values.w)));
+
 #elif defined(DATA_A_IQ1_S)
     const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
     const uint k_pair = row * LOAD_VEC_A / 2;
