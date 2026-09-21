@@ -79,6 +79,7 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
     switch (type) {
         case GGML_TYPE_Q1_0:    return vec_dot_q1_0_q8_1;
         case GGML_TYPE_Q2_0:    return vec_dot_q2_0_q8_1;
+        case GGML_TYPE_PTQ1_0:  return vec_dot_ptq1_0_q8_1;
         case GGML_TYPE_Q4_0:    return vec_dot_q4_0_q8_1;
         case GGML_TYPE_Q4_1:    return vec_dot_q4_1_q8_1;
         case GGML_TYPE_Q5_0:    return vec_dot_q5_0_q8_1;
@@ -139,6 +140,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
     switch (type) {
         case GGML_TYPE_Q1_0:    return VDR_Q1_0_Q8_1_MMVQ;
         case GGML_TYPE_Q2_0:    return VDR_Q2_0_Q8_1_MMVQ;
+        case GGML_TYPE_PTQ1_0:  return VDR_PTQ1_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_0:    return VDR_Q4_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_1:    return VDR_Q4_1_Q8_1_MMVQ;
         case GGML_TYPE_Q5_0:    return VDR_Q5_0_Q8_1_MMVQ;
@@ -824,6 +826,29 @@ static __global__ void mul_mat_vec_q(
         }
 #endif
 
+#if !defined(GGML_USE_HIP)
+        if constexpr (type == GGML_TYPE_PTQ1_0 && ncols_dst > 1 && ncols_dst <= 3) {
+#pragma unroll
+            for (int i = 0; i < rows_per_cuda_block; ++i) {
+                float dots[ncols_dst];
+                vec_dot_ptq1_0_q8_1_multi<ncols_dst>(x, &y[kby], kbx, kqs, stride_col_y, dots);
+#pragma unroll
+                for (int j = 0; j < ncols_dst; ++j) {
+                    tmp[j][i] += dots[j];
+                }
+                if constexpr (has_fusion) {
+                    if (use_gate) {
+                        vec_dot_ptq1_0_q8_1_multi<ncols_dst>(x_gate, &y[kby], kbx, kqs, stride_col_y, dots);
+#pragma unroll
+                        for (int j = 0; j < ncols_dst; ++j) {
+                            tmp_gate[j][i] += dots[j];
+                        }
+                    }
+                }
+            }
+        } else
+#endif
+        {
 #pragma unroll
         for (int j = 0; j < ncols_dst; ++j) {
 #pragma unroll
@@ -837,6 +862,7 @@ static __global__ void mul_mat_vec_q(
                     }
                 }
             }
+        }
         }
     }
 
@@ -1395,6 +1421,12 @@ static void mul_mat_vec_q_switch_type(
             break;
         case GGML_TYPE_Q2_0:
             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q2_0>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_PTQ1_0:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_PTQ1_0>
                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);

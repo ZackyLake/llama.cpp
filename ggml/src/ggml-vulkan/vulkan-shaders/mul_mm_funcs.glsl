@@ -21,6 +21,31 @@ void store_a(uint m, uint k_pair, FLOAT_TYPEV2 value) {
     buf_a[a_shmem_index(m, k_pair)] = value;
 }
 
+#ifdef MULMAT_QUANT
+float ptq1_0_trit_mmq(uint ib, uint e) {
+    uint b;
+    uint n;
+    if (e < 80u) {
+        b = uint(a_ptq1_0.data[ib].qs[e & 15u]);
+        n = e >> 4u;
+    } else if (e < 120u) {
+        const uint t = e - 80u;
+        b = uint(a_ptq1_0.data[ib].qs[16u + (t & 7u)]);
+        n = t >> 3u;
+    } else {
+        const uint t = e - 120u;
+        b = uint(a_ptq1_0.data[ib].qh[t & 1u]);
+        n = t >> 1u;
+    }
+
+    uint v = b;
+    for (uint i = 0u; i < n; ++i) {
+        v = (v * 3u) & 0xFFu;
+    }
+    return float(int((v * 3u) >> 8u) - 1);
+}
+#endif
+
 void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uint idx_m, const uint block, const uint end_k) {
 #if defined(DATA_A_F32) || defined(DATA_A_F16)
 #if LOAD_VEC_A == 8
@@ -587,6 +612,19 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
 
         store_a(col, k_pair, FLOAT_TYPEV2(v.xy));
         store_a(col, k_pair + 1, FLOAT_TYPEV2(v.zw));
+    } else if (MmTypeA == GGML_TYPE_PTQ1_0) {
+        const uint idx = pos_a + col * p.stride_a / mm_load_vec_a() + row;
+        const uint ib = idx / 16u;
+        const uint grp = idx & 0xfu;
+        const uint e0 = grp * 8u;
+        const float d = float(a_ptq1_0.data[ib].d);
+        const uint k_pair = row * mm_load_vec_a() / 2u;
+
+        [[unroll]] for (uint l = 0u; l < 4u; ++l) {
+            store_a(col, k_pair + l, FLOAT_TYPEV2(
+                ptq1_0_trit_mmq(ib, e0 + 2u*l) * d,
+                ptq1_0_trit_mmq(ib, e0 + 2u*l + 1u) * d));
+        }
     } else if (MmTypeA == GGML_TYPE_Q1_0) {
         const uint idx = pos_a + col * p.stride_a / mm_load_vec_a() + row;
         const uint k_pair = row * mm_load_vec_a() / 2;
