@@ -5,56 +5,14 @@
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) readonly buffer A { A_TYPE data_a[]; };
+#if defined(A_TYPE_PACKED16)
+layout (binding = 0) readonly buffer A_PACKED16 { A_TYPE_PACKED16 data_a_packed16[]; };
+#endif
+#if defined(A_TYPE_PACKED32)
+layout (binding = 0) readonly buffer A_PACKED32 { A_TYPE_PACKED32 data_a_packed32[]; };
+#endif
 layout (binding = 1) writeonly buffer D { D_TYPE data_b[]; };
 #include "dequant_funcs.glsl"
-
-#if defined(DATA_A_IQ2_K)
-void dequant_iq2_k(uint i, uint tid) {
-    const uint y = i * 256 + tid * 8;
-    [[unroll]] for (uint j = 0; j < 2; ++j) {
-        data_b[y + j] = D_TYPE(dequantize_iqk(i, tid * 8 + j));
-        data_b[y + j + 2] = D_TYPE(dequantize_iqk(i, tid * 8 + j + 2));
-        data_b[y + j + 4] = D_TYPE(dequantize_iqk(i, tid * 8 + j + 4));
-        data_b[y + j + 6] = D_TYPE(dequantize_iqk(i, tid * 8 + j + 6));
-    }
-}
-#endif
-
-#if defined(DATA_A_IQ3_K)
-void dequant_iq3_k(uint i, uint tid) {
-    const uint y = i * 256 + tid * 8;
-    [[unroll]] for (uint j = 0; j < 8; ++j) {
-        data_b[y + j] = D_TYPE(dequantize_iqk(i, tid * 8 + j));
-    }
-}
-#endif
-
-    #if defined(DATA_A_IQ4_K)
-void dequant_iq4_k(uint i, uint tid) {
-        const uint y = i * 256 + tid * 8;
-        [[unroll]] for (uint j = 0; j < 8; ++j) {
-            data_b[y + j] = D_TYPE(dequantize_iqk(i, tid * 8 + j));
-    }
-}
-#endif
-
-#if defined(DATA_A_IQ5_K)
-void dequant_iq5_k(uint i, uint tid) {
-    const uint y = i * 256 + tid * 8;
-    [[unroll]] for (uint j = 0; j < 8; ++j) {
-        data_b[y + j] = D_TYPE(dequantize_iqk(i, tid * 8 + j));
-    }
-}
-#endif
-
-#if defined(DATA_A_IQ6_K)
-void dequant_iq6_k(uint i, uint tid) {
-    const uint y = i * 256 + tid * 8;
-    [[unroll]] for (uint j = 0; j < 8; ++j) {
-        data_b[y + j] = D_TYPE(dequantize_iqk(i, tid * 8 + j));
-    }
-}
-#endif
 
 void main() {
 #ifdef NEEDS_INIT_IQ_SHMEM
@@ -68,31 +26,34 @@ void main() {
             return;
         }
 
+        const uint element = 8 * gl_LocalInvocationID.x;
+        uint dst_offset;
+        vec4 values0;
+        vec4 values1;
+
 #if defined(DATA_A_IQK_ROW)
         const uint blocks_per_row = p.K / QUANT_K;
         const uint row = i / blocks_per_row;
         const uint block = i % blocks_per_row;
         const uint row_offset = (row / p.M) * p.stride_b + (row % p.M) * p.stride_a;
         const uint block_offset = row_offset + IQK_ROW_META_SIZE + block * IQK_BLOCK_SIZE;
-        const uint element = 8 * gl_LocalInvocationID.x;
-        const uint dst_offset = row * p.K + block * QUANT_K + element;
 
-        [[unroll]] for (uint j = 0; j < 8; ++j) {
-            data_b[dst_offset + j] = D_TYPE(dequantize_iqk_row(row_offset, block_offset, element + j));
-        }
+        dst_offset = row * p.K + block * QUANT_K + element;
+        values0 = dequantize_iqk_row4(row_offset, block_offset, element);
+        values1 = dequantize_iqk_row4(row_offset, block_offset, element + 4);
 #else
-        const uint tid = gl_LocalInvocationID.x;
-#if defined(DATA_A_IQ2_K)
-        dequant_iq2_k(i, tid);
-#elif defined(DATA_A_IQ3_K)
-        dequant_iq3_k(i, tid);
-#elif defined(DATA_A_IQ4_K)
-        dequant_iq4_k(i, tid);
-#elif defined(DATA_A_IQ5_K)
-        dequant_iq5_k(i, tid);
-#elif defined(DATA_A_IQ6_K)
-        dequant_iq6_k(i, tid);
+        dst_offset = i * QUANT_K + element;
+        values0 = dequantize_iqk4(i, element);
+        values1 = dequantize_iqk4(i, element + 4);
 #endif
-#endif
+
+        data_b[dst_offset + 0] = D_TYPE(values0.x);
+        data_b[dst_offset + 1] = D_TYPE(values0.y);
+        data_b[dst_offset + 2] = D_TYPE(values0.z);
+        data_b[dst_offset + 3] = D_TYPE(values0.w);
+        data_b[dst_offset + 4] = D_TYPE(values1.x);
+        data_b[dst_offset + 5] = D_TYPE(values1.y);
+        data_b[dst_offset + 6] = D_TYPE(values1.z);
+        data_b[dst_offset + 7] = D_TYPE(values1.w);
     }
 }

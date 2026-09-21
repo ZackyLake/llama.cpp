@@ -1,5 +1,6 @@
 // k_pair is the K coordinate measured in FLOAT_TYPEV2 elements.
-#if defined(DATA_A_IQK_ROW)
+#if defined(DATA_A_IQK_ROW) || defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || \
+    defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
 #include "dequant_funcs.glsl"
 #endif
 
@@ -104,157 +105,21 @@ void load_a_to_shmem(const uint pos_a, const uint row, const uint col, const uin
     const uint k_pair = row * LOAD_VEC_A / 2;
     const uint element = (block % QUANT_K) + row * LOAD_VEC_A;
 
-    if (idx_m < p.M) {
-        const vec4 values = dequantize_iqk_row4(row_offset, block_offset, element);
-        store_a(col, k_pair,     FLOAT_TYPEV2(FLOAT_TYPE(values.x), FLOAT_TYPE(values.y)));
-        store_a(col, k_pair + 1, FLOAT_TYPEV2(FLOAT_TYPE(values.z), FLOAT_TYPE(values.w)));
-    } else {
-        store_a(col, k_pair,     FLOAT_TYPEV2(0.0f));
-        store_a(col, k_pair + 1, FLOAT_TYPEV2(0.0f));
-    }
-#elif defined(DATA_A_IQ2_K)
+    const vec4 values = dequantize_iqk_row4(row_offset, block_offset, element);
+    store_a(col, k_pair,     FLOAT_TYPEV2(FLOAT_TYPE(values.x), FLOAT_TYPE(values.y)));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(FLOAT_TYPE(values.z), FLOAT_TYPE(values.w)));
+    
+#elif defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || \
+      defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
     const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
     const uint k_pair = row * LOAD_VEC_A / 2;
-    const uint pairs_per_idx = LOAD_VEC_A / 2;
-    const uint block_index = idx / (128 / pairs_per_idx);
-    const uint pair_index = (idx % (128 / pairs_per_idx)) * pairs_per_idx;
-    const uint block_half = pair_index / 64;
-    const uint quarter_index = (pair_index % 64) / 16;
-    const uint lane_index = pair_index % 16;
-    const uint qs_index = 32 * block_half + 2 * lane_index;
+    const uint loads_per_block = QUANT_K / LOAD_VEC_A;
+    const uint block_index = idx / loads_per_block;
+    const uint element = (idx % loads_per_block) * LOAD_VEC_A;
+    const vec4 values = dequantize_iqk4(block_index, element);
 
-    const uint qs = data_a_packed32[block_index].qs[qs_index / 4];
-    const u8vec4 qs_values = unpack8((qs >> (2 * quarter_index)) & 0x03030303);
-    const uint scale_byte = uint(data_a[block_index].scales[4 * block_half + quarter_index]);
-    const int scale_value = int((scale_byte >> (4 * (lane_index / 8))) & 0x0Fu) - 8;
-    const float block_scale = float(data_a[block_index].d) * float(scale_value);
-    const uint extra = uint(data_a[block_index].extra) >> (8 * block_half + lane_index / 8);
-    const uint table_offset = 4u * ((extra >> (2 * quarter_index)) & 1u);
-
-    store_a(col, k_pair, FLOAT_TYPEV2(block_scale * kvalues_iq2_k[qs_values.x + table_offset],
-                                      block_scale * kvalues_iq2_k[qs_values.y + table_offset]));
-
-    store_a(col, k_pair + 1, FLOAT_TYPEV2(block_scale * kvalues_iq2_k[qs_values.z + table_offset],
-                                          block_scale * kvalues_iq2_k[qs_values.w + table_offset]));
-
-#elif defined(DATA_A_IQ3_K)
-    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
-    const uint k_pair = row * LOAD_VEC_A / 2;
-    const uint pairs_per_idx = LOAD_VEC_A / 2;
-    const uint block_index = idx / (128 / pairs_per_idx);
-    const uint pair_index = (idx % (128 / pairs_per_idx)) * pairs_per_idx;
-    const uint block_half = pair_index / 64;
-    const uint quarter_index = (pair_index % 64) / 16;
-    const uint lane_index = pair_index % 16;
-    const uint qs_index = 32 * block_half + 2 * lane_index;
-    const uint qh_index = 2 * lane_index;
-
-    const uint qs = pack32(u16vec2(data_a_packed16[block_index].qs[qs_index / 2],
-                                   data_a_packed16[block_index].qs[qs_index / 2 + 1]));
-    const uint qh = pack32(u16vec2(data_a_packed16[block_index].qh[qh_index / 2],
-                                   data_a_packed16[block_index].qh[qh_index / 2 + 1]));
-    const uint values = ((qs >> (2 * quarter_index)) & 0x03030303) |
-                        (((qh >> (4 * block_half + quarter_index)) & 0x01010101) << 2u);
-    const u8vec4 value_bytes = unpack8(values);
-    const uint scale_byte = uint(data_a[block_index].scales_l[4 * block_half + quarter_index]);
-    const int scale_value = int((scale_byte >> (4 * (lane_index / 8))) & 0x0Fu);
-    const uint scale_high = uint(data_a[block_index].scales_h) >> (8 * block_half + lane_index / 8);
-    const float block_scale = float(data_a[block_index].d) * float(2 * scale_value + 1) *
-                              (((scale_high >> (2 * quarter_index)) & 1u) != 0u ? -1.0f : 1.0f);
-    const uint extra = uint(data_a[block_index].extra) >> (8 * block_half + lane_index / 8);
-    const uint table_offset = 8u * ((extra >> (2 * quarter_index)) & 1u);
-
-    store_a(col, k_pair, FLOAT_TYPEV2(block_scale * kvalues_iq3_k[value_bytes.x + table_offset],
-                                      block_scale * kvalues_iq3_k[value_bytes.y + table_offset]));
-
-    store_a(col, k_pair + 1, FLOAT_TYPEV2(block_scale * kvalues_iq3_k[value_bytes.z + table_offset],
-                                          block_scale * kvalues_iq3_k[value_bytes.w + table_offset]));
-
-#elif defined(DATA_A_IQ4_K)
-    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
-    const uint k_pair = row * LOAD_VEC_A / 2;
-    const uint pairs_per_idx = LOAD_VEC_A / 2;
-    const uint block_index = idx / (128 / pairs_per_idx);
-    const uint pair_index = (idx % (128 / pairs_per_idx)) * pairs_per_idx;
-    const uint group_index = pair_index / 16;
-    const uint group_pair = pair_index % 16;
-    const uint quarter_index = group_pair / 8;
-    const uint qs_index = 16 * group_index + 2 * (group_pair % 8);
-
-    const uint qs = data_a_packed32[block_index].qs[qs_index / 4];
-    const u8vec4 qs_values = unpack8((qs >> (4 * quarter_index)) & 0x0F0F0F0F);
-    const uint scales_high = uint(data_a[block_index].scales_h[group_index / 2]) >> (4 * (group_index % 2));
-    const uint scales_low = uint(data_a[block_index].scales_l[group_index]);
-    const int scale_value = quarter_index == 0u
-        ? int((scales_low & 0x0Fu) | ((scales_high << 4) & 0x30u)) - 32
-        : int((scales_low >> 4) | ((scales_high << 2) & 0x30u)) - 32;
-    const float block_scale = float(data_a[block_index].d) * float(scale_value);
-    const uint table_offset = 16u * ((uint(data_a[block_index].extra) >> (2 * group_index + quarter_index)) & 1u);
-
-    store_a(col, k_pair, FLOAT_TYPEV2(block_scale * kvalues_iq4_k[qs_values.x + table_offset],
-                                      block_scale * kvalues_iq4_k[qs_values.y + table_offset]));
-
-    store_a(col, k_pair + 1, FLOAT_TYPEV2(block_scale * kvalues_iq4_k[qs_values.z + table_offset],
-                                          block_scale * kvalues_iq4_k[qs_values.w + table_offset]));
-
-#elif defined(DATA_A_IQ5_K)
-    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
-    const uint k_pair = row * LOAD_VEC_A / 2;
-    const uint pairs_per_idx = LOAD_VEC_A / 2;
-    const uint block_index = idx / (128 / pairs_per_idx);
-    const uint pair_index = (idx % (128 / pairs_per_idx)) * pairs_per_idx;
-    const uint group_index = pair_index / 32;
-    const uint group_pair = pair_index % 32;
-    const uint quarter_index = group_pair / 8;
-    const uint lane_index = group_pair % 8;
-    const uint qs_index = 32 * group_index + 16 * (quarter_index % 2) + 2 * lane_index;
-    const uint qh_index = 16 * (quarter_index % 2) + 2 * lane_index;
-
-    const uint qs = data_a_packed32[block_index].qs[qs_index / 4];
-    const uint qh = data_a_packed32[block_index].qh[qh_index / 4];
-    const uint values = ((qs >> (4 * (quarter_index / 2))) & 0x0F0F0F0F) |
-                        (((qh >> (2 * (group_index % 4) + quarter_index / 2)) & 0x01010101) << 4u);
-    const u8vec4 value_bytes = unpack8(values);
-    const uint scales_high = uint(data_a[block_index].scales_h[group_index]);
-    const uint scales_low = uint(data_a[block_index].scales_l[2 * group_index + quarter_index / 2]);
-    const uint scale_high = ((scales_high >> (2 * quarter_index)) & 3u) << 4u;
-    const int scale_value = int(((scales_low >> (4 * (quarter_index % 2))) & 0x0Fu) | scale_high) - 32;
-    const float block_scale = float(data_a[block_index].d) * float(scale_value);
-    const uint table_offset = 32u * ((uint(data_a[block_index].extra) >> (4 * (group_index % 4) + quarter_index)) & 1u);
-
-    store_a(col, k_pair, FLOAT_TYPEV2(block_scale * kvalues_iq5_k[value_bytes.x + table_offset],
-                                      block_scale * kvalues_iq5_k[value_bytes.y + table_offset]));
-
-    store_a(col, k_pair + 1, FLOAT_TYPEV2(block_scale * kvalues_iq5_k[value_bytes.z + table_offset],
-                                          block_scale * kvalues_iq5_k[value_bytes.w + table_offset]));
-
-#elif defined(DATA_A_IQ6_K)
-    const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;
-    const uint k_pair = row * LOAD_VEC_A / 2;
-    const uint pairs_per_idx = LOAD_VEC_A / 2;
-    const uint block_index = idx / (128 / pairs_per_idx);
-    const uint pair_index = (idx % (128 / pairs_per_idx)) * pairs_per_idx;
-    const uint group_index = pair_index / 32;
-    const uint group_pair = pair_index % 32;
-    const uint quarter_index = group_pair / 8;
-    const uint lane_index = group_pair % 8;
-    const uint qs_index = 32 * group_index + 16 * (quarter_index % 2) + 2 * lane_index;
-    const uint qh_index = 32 * (group_index / 2) + 16 * (quarter_index % 2) + 2 * lane_index;
-
-    const uint qs = data_a_packed32[block_index].qs[qs_index / 4];
-    const uint qh = data_a_packed32[block_index].qh[qh_index / 4];
-    const uint values = ((qs >> (4 * (quarter_index / 2))) & 0x0F0F0F0F) |
-                        (((qh >> (4 * (group_index % 2) + 2 * (quarter_index / 2))) & 0x03030303) << 4u);
-    const u8vec4 value_bytes = unpack8(values);
-    const uint extra = uint(data_a[block_index].extra) >> (4 * (group_index % 4));
-    const uint table_offset = 64u * ((extra >> quarter_index) & 1u);
-    const float block_scale = float(data_a[block_index].d) * float(data_a[block_index].scales[4 * group_index + quarter_index]);
-
-    store_a(col, k_pair, FLOAT_TYPEV2(block_scale * kvalues_iq6_k[value_bytes.x + table_offset],
-                                      block_scale * kvalues_iq6_k[value_bytes.y + table_offset]));
-
-    store_a(col, k_pair + 1, FLOAT_TYPEV2(block_scale * kvalues_iq6_k[value_bytes.z + table_offset],
-                                          block_scale * kvalues_iq6_k[value_bytes.w + table_offset]));
+    store_a(col, k_pair, FLOAT_TYPEV2(FLOAT_TYPE(values.x), FLOAT_TYPE(values.y)));
+    store_a(col, k_pair + 1, FLOAT_TYPEV2(FLOAT_TYPE(values.z), FLOAT_TYPE(values.w)));
 
 #elif defined(DATA_A_IQ1_S)
     const uint idx = pos_a + col * p.stride_a / LOAD_VEC_A + row;

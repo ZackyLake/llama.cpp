@@ -6,10 +6,23 @@
 #include "generic_binary_head.glsl"
 #include "dequant_funcs.glsl"
 
+#if defined(DATA_A_IQK_ROW) || defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || \
+    defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+#define GET_ROWS_IQK
+#endif
+
+#if defined(GET_ROWS_IQK)
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+#else
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+#endif
 
 void main() {
+#if defined(GET_ROWS_IQK)
+    const uint i00 = (gl_GlobalInvocationID.x)*8;
+#else
     const uint i00 = (gl_GlobalInvocationID.x)*2;
+#endif
 
 #ifdef NEEDS_INIT_IQ_SHMEM
     init_iq_shmem(gl_WorkGroupSize);
@@ -34,13 +47,31 @@ void main() {
 
 #if defined(DATA_A_IQK_ROW)
             const uint row_offset = 2 * a_offset;
+            const uint element = i00 % QUANT_K;
             const uint block_offset = row_offset + IQK_ROW_META_SIZE + (i00 / QUANT_K) * IQK_BLOCK_SIZE;
-            data_d[d_offset + i00    ] = D_TYPE(dequantize_iqk_row(row_offset, block_offset, i00 % QUANT_K));
-            data_d[d_offset + i00 + 1] = D_TYPE(dequantize_iqk_row(row_offset, block_offset, (i00 + 1) % QUANT_K));
+            const vec4 values0 = dequantize_iqk_row4(row_offset, block_offset, element);
+            const vec4 values1 = dequantize_iqk_row4(row_offset, block_offset, element + 4u);
+            data_d[d_offset + i00    ] = D_TYPE(values0.x);
+            data_d[d_offset + i00 + 1] = D_TYPE(values0.y);
+            data_d[d_offset + i00 + 2] = D_TYPE(values0.z);
+            data_d[d_offset + i00 + 3] = D_TYPE(values0.w);
+            data_d[d_offset + i00 + 4] = D_TYPE(values1.x);
+            data_d[d_offset + i00 + 5] = D_TYPE(values1.y);
+            data_d[d_offset + i00 + 6] = D_TYPE(values1.z);
+            data_d[d_offset + i00 + 7] = D_TYPE(values1.w);
 #elif defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K)
+            const uint element = i00 % QUANT_K;
             const uint block = a_offset + i00 / QUANT_K;
-            data_d[d_offset + i00    ] = D_TYPE(dequantize_iqk(block, i00 % QUANT_K));
-            data_d[d_offset + i00 + 1] = D_TYPE(dequantize_iqk(block, (i00 + 1) % QUANT_K));
+            const vec4 values0 = dequantize_iqk4(block, element);
+            const vec4 values1 = dequantize_iqk4(block, element + 4u);
+            data_d[d_offset + i00    ] = D_TYPE(values0.x);
+            data_d[d_offset + i00 + 1] = D_TYPE(values0.y);
+            data_d[d_offset + i00 + 2] = D_TYPE(values0.z);
+            data_d[d_offset + i00 + 3] = D_TYPE(values0.w);
+            data_d[d_offset + i00 + 4] = D_TYPE(values1.x);
+            data_d[d_offset + i00 + 5] = D_TYPE(values1.y);
+            data_d[d_offset + i00 + 6] = D_TYPE(values1.z);
+            data_d[d_offset + i00 + 7] = D_TYPE(values1.w);
 #else
             const uint ib = a_offset + i00/QUANT_K; // block index
             const uint iqs = (i00%QUANT_K)/QUANT_R; // quant index
