@@ -9040,6 +9040,7 @@ static const ggml_type iqk_legacy_types[] = {
 };
 
 static const ggml_type iqk_types[] = {
+    GGML_TYPE_PTQ1_0,
     GGML_TYPE_IQ2_K, GGML_TYPE_IQ3_K, GGML_TYPE_IQ4_K, GGML_TYPE_IQ5_K, GGML_TYPE_IQ6_K,  
     GGML_TYPE_IQ4_KSS,
     GGML_TYPE_IQ2_KS, GGML_TYPE_IQ3_KS, GGML_TYPE_IQ4_KS, GGML_TYPE_IQ5_KS, 
