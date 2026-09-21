@@ -201,7 +201,8 @@ static __global__ void dequantize_block_ptq1_0(const block_ptq1_0 * __restrict__
 }
 
 template <typename dst_t>
-static void dequantize_row_ptq1_0_cuda(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k, cudaStream_t stream) {
+static void dequantize_row_ptq1_0_cuda(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t nrows, const int64_t n_per_row, cudaStream_t stream) {
+    const int64_t k = nrows * n_per_row;
     GGML_ASSERT(k % QK_PTQ1_0 == 0);
     constexpr int quant_blocks_per_cuda_block = CUDA_DEQUANTIZE_BLOCK_SIZE / 8;
     const int64_t nb = k / QK_PTQ1_0;
