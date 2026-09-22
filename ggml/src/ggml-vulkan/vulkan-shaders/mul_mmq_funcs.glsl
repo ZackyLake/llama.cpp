@@ -3,6 +3,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 
 #include "types.glsl"
+#include "mmq_iqk.glsl"
 
 // Each iqs value maps to a 32-bit integer
 
@@ -218,23 +219,15 @@ ACC_TYPE mmq_dot_product(const uint ib_a) {
 #endif
 
 #if defined(DATA_A_IQ2_K)
-int32_t unpack_iq2_k(uint32_t values, uint table_offset) {
-    const u8vec4 indexes = unpack8(values);
-    return pack32(i8vec4(kvalues_iq2_k[indexes.x + table_offset],
-                         kvalues_iq2_k[indexes.y + table_offset],
-                         kvalues_iq2_k[indexes.z + table_offset],
-                         kvalues_iq2_k[indexes.w + table_offset]));
-}
-
 void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
     const uint ib_k = ib / 8;
     const uint ib32 = ib % 8;
     const uint half_idx = iqs / 4;
     const uint byte_idx = (ib32 / 4) * 32 + half_idx * 16 + (iqs % 4) * 4;
     const uint shift = 2 * (ib32 % 4);
-    const uint table_offset = 4 * ((uint(data_a[ib_k].extra) >> (2 * ib32 + half_idx)) & 1);
+    const bool is_hi_table = bool((uint(data_a[ib_k].extra) >> (2 * ib32 + half_idx)) & 1);
 
-    buf_a[buf_ib].qs[iqs] = unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4] >> shift) & 0x03030303, table_offset);
+    buf_a[buf_ib].qs[iqs] = unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4] >> shift) & 0x03030303, is_hi_table);
 
     if (iqs == 0) {
         const uint scales = uint(data_a[ib_k].scales[ib32]);
@@ -498,13 +491,9 @@ uint mmq_iqks_pack4(uint block_offset, uint element) {
     const uint half_idx = element / 128;
     const uint group = (element % 128) / 32;
     const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const u8vec4 values = unpack8(mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + pos));
-    const u8vec4 indexes = (values >> int8_t(2 * group)) & int8_t(3);
-    const uint table_offset = 4 * ((extra >> group) & 1);
-    return pack32(i8vec4(kvalues_iq2_ks[indexes.x + table_offset],
-                         kvalues_iq2_ks[indexes.y + table_offset],
-                         kvalues_iq2_ks[indexes.z + table_offset],
-                         kvalues_iq2_ks[indexes.w + table_offset]));
+    const bool is_hi_table = bool((extra >> group) & 1);
+    const uint values = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + pos);
+    return unpack_iq2_k((values >> (2 * group)) & 0x03030303u, is_hi_table);
 #elif defined(DATA_A_IQ2_KL)
     const uint ib64 = element / 64;
     const uint pos64 = element % 64;
@@ -706,25 +695,17 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint half_idx = element / 128;
     const uint group = (element % 128) / 32;
     const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const uint table_offset = 4 * ((extra >> group) & 1);
+    const bool is_hi_table = bool((extra >> group) & 1);
     const uint values0 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32);
     const uint values1 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32 + 16);
-    const u8vec4 indexes0 = (unpack8(values0) >> int8_t(2 * group)) & int8_t(3);
-    const u8vec4 indexes1 = (unpack8(values1) >> int8_t(2 * group)) & int8_t(3);
     if (element % 32 == 0) {
         const uint packed_scale = mmq_iqks_load_u8(block_offset + 2 + 2 * half_idx + group / 2);
         const uint scale = ((packed_scale >> (4 * (group % 2))) & 0x0F) | (((extra >> (8 + group)) & 1) << 4);
         d_scale = float(int(scale) - 16);
     }
 
-    value0 = pack32(i8vec4(kvalues_iq2_ks[indexes0.x + table_offset],
-                           kvalues_iq2_ks[indexes0.y + table_offset],
-                           kvalues_iq2_ks[indexes0.z + table_offset],
-                           kvalues_iq2_ks[indexes0.w + table_offset]));
-    value1 = pack32(i8vec4(kvalues_iq2_ks[indexes1.x + table_offset],
-                           kvalues_iq2_ks[indexes1.y + table_offset],
-                           kvalues_iq2_ks[indexes1.z + table_offset],
-                           kvalues_iq2_ks[indexes1.w + table_offset]));
+    value0 = uint(unpack_iq2_k((values0 >> (2 * group)) & 0x03030303u, is_hi_table));
+    value1 = uint(unpack_iq2_k((values1 >> (2 * group)) & 0x03030303u, is_hi_table));
 #elif defined(DATA_A_IQ3_KS)
     const uint half_idx = element / 128;
     const uint group = (element % 128) / 32;

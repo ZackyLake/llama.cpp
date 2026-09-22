@@ -3,6 +3,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
 
 #include "types.glsl"
+#include "mmq_iqk.glsl"
 
 #if defined(DATA_A_Q2_0)
 FLOAT_TYPE get_dm(uint ib) {
@@ -449,25 +450,18 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQ2_K)
-int32_t unpack_iq2_k(uint32_t values, uint table_offset) {
-    const u8vec4 indexes = unpack8(values);
-    return pack32(i8vec4(kvalues_iq2_k[indexes.x + table_offset],
-                         kvalues_iq2_k[indexes.y + table_offset],
-                         kvalues_iq2_k[indexes.z + table_offset],
-                         kvalues_iq2_k[indexes.w + table_offset]));
-}
-
 i32vec4 repack4(uint ib, uint iqs) {
     const uint ib_k = ib / 8;
     const uint ib32 = ib % 8;
     const uint byte_idx = (ib32 / 4) * 32 + iqs * 16;
     const uint shift = 2 * (ib32 % 4);
-    const uint table_offset = 4 * ((uint(data_a[ib_k].extra) >> (2 * ib32 + iqs)) & 1);
+    // const uint table_offset = 4 * ((uint(data_a[ib_k].extra) >> (2 * ib32 + iqs)) & 1);
+    const bool is_hi_table = ((data_a[ib_k].extra >> (2 * ib32 + iqs)) & 1) != 0;
 
-    return i32vec4(unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4    ] >> shift) & 0x03030303, table_offset),
-                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 1] >> shift) & 0x03030303, table_offset),
-                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 2] >> shift) & 0x03030303, table_offset),
-                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 3] >> shift) & 0x03030303, table_offset));
+    return i32vec4(unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4    ] >> shift) & 0x03030303, is_hi_table),
+                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 1] >> shift) & 0x03030303, is_hi_table),
+                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 2] >> shift) & 0x03030303, is_hi_table),
+                   unpack_iq2_k((data_a_packed32[ib_k].qs[byte_idx / 4 + 3] >> shift) & 0x03030303, is_hi_table));
 }
 
 float get_d_scale(uint ib, uint iqs) {
@@ -778,12 +772,8 @@ int32_t iqks_value4(uint block_offset, uint element) {
     const uint group = (element % 128) / 32;
     const uint16_t extra = iqks_load_u16(block_offset) >> (high_half ? 4u : 0u);
     const uint values = iqks_load_u32(block_offset + 6 + (high_half ? 32u : 0u) + pos);
-    const u8vec4 indexes = unpack8((values >> (2 * group)) & 0x03030303u);
-    const uint table_offset = bool(extra & (uint16_t(1) << group)) ? 4u : 0u;
-    return pack32(i8vec4(kvalues_iq2_ks[indexes.x + table_offset],
-                         kvalues_iq2_ks[indexes.y + table_offset],
-                         kvalues_iq2_ks[indexes.z + table_offset],
-                         kvalues_iq2_ks[indexes.w + table_offset]));
+    const bool is_hi_table = bool(extra & (uint16_t(1) << group));
+    return unpack_iq2_k((values >> (2 * group)) & 0x03030303u, is_hi_table);
 #elif defined(DATA_A_IQ2_KL)
     const uint ib64 = element / 64;
     const uint pos64 = element % 64;

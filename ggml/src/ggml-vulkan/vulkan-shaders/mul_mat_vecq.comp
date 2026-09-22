@@ -134,6 +134,9 @@ void main() {
 #ifdef NEEDS_INIT_IQ_SHMEM
     init_iq_shmem(gl_WorkGroupSize);
 #endif
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+    init_iq2k_table();
+#endif
 
     // do NUM_ROWS at a time, unless there aren't enough remaining rows
     if (first_row + NUM_ROWS <= p.stride_d) {

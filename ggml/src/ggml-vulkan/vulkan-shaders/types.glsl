@@ -544,11 +544,6 @@ struct block_iq2_k_packed32
 #define A_TYPE_PACKED16 block_iq2_k_packed16
 #define A_TYPE_PACKED32 block_iq2_k_packed32
 #define DATA_A_QUANT_K
-
-const int8_t kvalues_iq2_k_const[8] = {
-    int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
-};
-shared IQK_LUT_TYPE kvalues_iq2_k[8];
 #endif
 
 #define QUANT_K_IQ3_K 256
@@ -732,11 +727,6 @@ shared IQK_LUT_TYPE kvalues_iq4_kss[32];
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 2
 #define IQK_BLOCK_SIZE 70
-
-const int8_t kvalues_iq2_ks_const[8] = {
-    int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
-};
-shared IQK_LUT_TYPE kvalues_iq2_ks[8];
 #endif
 
 #if defined(DATA_A_IQ3_KS)
@@ -811,6 +801,13 @@ const int8_t kvalues_iq2_kl_const[64] = {
 shared IQK_LUT_TYPE kvalues_iq2_kl[64];
 #endif
 
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+const int8_t kvalues_iq2_k_const[8] = {
+    int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
+};
+shared IQK_LUT_TYPE kvalues_iq2_k[8];
+#endif
+
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
@@ -854,7 +851,7 @@ shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
     defined(DATA_A_IQ5_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize) {
-#if defined(DATA_A_IQ2_K)
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
         kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
     }
@@ -877,10 +874,6 @@ void init_iq_shmem(uvec3 wgsize) {
 #elif defined(DATA_A_IQ4_KSS)
     for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
         kvalues_iq4_kss[i] = IQK_LUT_TYPE(kvalues_iq4_kss_const[i]);
-    }
-#elif defined(DATA_A_IQ2_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
-        kvalues_iq2_ks[i] = IQK_LUT_TYPE(kvalues_iq2_ks_const[i]);
     }
 #elif defined(DATA_A_IQ3_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {

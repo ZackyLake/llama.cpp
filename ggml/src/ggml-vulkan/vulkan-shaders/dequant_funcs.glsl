@@ -867,10 +867,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
     const u8vec4 indexes = unpack8((values >> (2 * group)) & 0x03030303u);
     const uint table_offset = bool(extra & (uint16_t(1) << group)) ? 4u : 0u;
     const float d = iqk_row_scale(row_offset) * float(int(scale) - 16);
-    return d * vec4(float(kvalues_iq2_ks[indexes.x + table_offset]),
-                    float(kvalues_iq2_ks[indexes.y + table_offset]),
-                    float(kvalues_iq2_ks[indexes.z + table_offset]),
-                    float(kvalues_iq2_ks[indexes.w + table_offset]));
+    return d * vec4(float(kvalues_iq2_k[indexes.x + table_offset]),
+                    float(kvalues_iq2_k[indexes.y + table_offset]),
+                    float(kvalues_iq2_k[indexes.z + table_offset]),
+                    float(kvalues_iq2_k[indexes.w + table_offset]));
 #elif defined(DATA_A_IQ2_KL)
     const uint ib64 = element / 64;
     const uint ib32_scale = element / 32;
