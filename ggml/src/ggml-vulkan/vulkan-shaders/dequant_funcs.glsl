@@ -851,10 +851,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
     const u8vec4 indexes = unpack8((values >> (4 * (pos / 16))) & 0x0F0F0F0F);
     const uint table_offset = bool(scale & uint8_t(1)) ? 16u : 0u;
     const float d = iqk_row_scale(row_offset) * float(int(scale & uint8_t(254)) - 127);
-    return d * vec4(float(kvalues_iq4_kss[indexes.x + table_offset]),
-                    float(kvalues_iq4_kss[indexes.y + table_offset]),
-                    float(kvalues_iq4_kss[indexes.z + table_offset]),
-                    float(kvalues_iq4_kss[indexes.w + table_offset]));
+    return d * vec4(float(kvalues_iq4_k[indexes.x + table_offset]),
+                    float(kvalues_iq4_k[indexes.y + table_offset]),
+                    float(kvalues_iq4_k[indexes.z + table_offset]),
+                    float(kvalues_iq4_k[indexes.w + table_offset]));
 #elif defined(DATA_A_IQ2_KS)
     const bool high_half = bool(element & 128u);
     const uint group = (element % 128) / 32;
@@ -908,10 +908,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
                         extra_bits;
     const u8vec4 indexes = unpack8(packed);
     const float d = iqk_row_scale(row_offset) * float(int(scale) - 16);
-    return d * vec4(float(kvalues_iq3_ks[indexes.x]),
-                    float(kvalues_iq3_ks[indexes.y]),
-                    float(kvalues_iq3_ks[indexes.z]),
-                    float(kvalues_iq3_ks[indexes.w]));
+    return d * vec4(float(kvalues_iq3_k[indexes.x]),
+                    float(kvalues_iq3_k[indexes.y]),
+                    float(kvalues_iq3_k[indexes.z]),
+                    float(kvalues_iq3_k[indexes.w]));
 #elif defined(DATA_A_IQ4_KS)
     const uint ib32 = element / 32;
     const uint pos = element % 32;
@@ -920,10 +920,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
     const u8vec4 indexes = (unpack8(values) >> int8_t(4 * (pos / 16))) & int8_t(0x0F);
     const uint table_offset = bool(scale & uint8_t(1)) ? 16u : 0u;
     const float d = iqk_row_scale(row_offset) * float(int(scale & uint8_t(254)) - 127);
-    return d * vec4(float(kvalues_iq4_ks[indexes.x + table_offset]),
-                    float(kvalues_iq4_ks[indexes.y + table_offset]),
-                    float(kvalues_iq4_ks[indexes.z + table_offset]),
-                    float(kvalues_iq4_ks[indexes.w + table_offset]));
+    return d * vec4(float(kvalues_iq4_k[indexes.x + table_offset]),
+                    float(kvalues_iq4_k[indexes.y + table_offset]),
+                    float(kvalues_iq4_k[indexes.z + table_offset]),
+                    float(kvalues_iq4_k[indexes.w + table_offset]));
 #else
     const uint ib64 = element / 64;
     const uint pos64 = element % 64;
@@ -939,10 +939,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
                         (((high >> high_shift) & 0x01010101u) << 4);
     const u8vec4 indexes = unpack8(packed);
     const float d = iqk_row_scale(row_offset) * float(int(scale & uint8_t(254)) - 127);
-    return d * vec4(float(kvalues_iq5_ks[indexes.x + table_offset]),
-                    float(kvalues_iq5_ks[indexes.y + table_offset]),
-                    float(kvalues_iq5_ks[indexes.z + table_offset]),
-                    float(kvalues_iq5_ks[indexes.w + table_offset]));
+    return d * vec4(float(kvalues_iq5_k[indexes.x + table_offset]),
+                    float(kvalues_iq5_k[indexes.y + table_offset]),
+                    float(kvalues_iq5_k[indexes.z + table_offset]),
+                    float(kvalues_iq5_k[indexes.w + table_offset]));
 #endif
 }
 #endif

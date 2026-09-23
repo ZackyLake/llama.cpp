@@ -65,3 +65,28 @@ int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
 #endif
 
 #endif
+
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+
+shared uint16_t iq3k_table[128];
+
+void init_iq3k_table() {
+    for (uint index = gl_LocalInvocationIndex; index < 64u; index += gl_WorkGroupSize.x) {
+        const i8vec2 values = i8vec2(kvalues_iq3_k[index & 7u], kvalues_iq3_k[index >> 3u]);
+        iq3k_table[index] = uint16_t(pack16(values));
+        iq3k_table[64u + index] = uint16_t(pack16(values + i8vec2(4)));
+    }
+    barrier();
+}
+
+int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint8_t shift_h, bool is_hi_table) {
+    const uint8_t shift_l = (shift_h & uint8_t(3)) << 1;
+    const uint indexes = ((ql >> shift_l) & 0x03030303u) |
+                         (((qh >> shift_h) & 0x01010101u) << 2u);
+    const uint table_offset = is_hi_table ? 64u : 0u;
+    const uint index0 = table_offset + dotPacked4x8EXT(indexes & 0xffffu, 0x00000801u); // WA for intel bug
+    const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
+    return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
+}
+
+#endif

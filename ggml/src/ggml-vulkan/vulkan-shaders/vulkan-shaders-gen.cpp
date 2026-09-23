@@ -106,16 +106,17 @@ namespace {
 
 int execute_command(std::vector<std::string>& command, std::string& stdout_str, std::string& stderr_str) {
 #ifdef _WIN32
+    constexpr DWORD pipe_buffer_size = 256 * 1024;
     HANDLE stdout_read, stdout_write;
     HANDLE stderr_read, stderr_write;
     SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 
-    if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0) ||
+    if (!CreatePipe(&stdout_read, &stdout_write, &sa, pipe_buffer_size) ||
         !SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0)) {
         throw std::runtime_error("Failed to create stdout pipe");
     }
 
-    if (!CreatePipe(&stderr_read, &stderr_write, &sa, 0) ||
+    if (!CreatePipe(&stderr_read, &stderr_write, &sa, pipe_buffer_size) ||
         !SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0)) {
         throw std::runtime_error("Failed to create stderr pipe");
     }
@@ -165,6 +166,12 @@ int execute_command(std::vector<std::string>& command, std::string& stdout_str, 
     if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
         throw std::runtime_error("Failed to create pipes");
     }
+
+#ifdef __linux__
+    constexpr int pipe_buffer_size = 256 * 1024;
+    fcntl(stdout_pipe[0], F_SETPIPE_SZ, pipe_buffer_size);
+    fcntl(stderr_pipe[0], F_SETPIPE_SZ, pipe_buffer_size);
+#endif
 
     pid_t pid = fork();
     if (pid < 0) {

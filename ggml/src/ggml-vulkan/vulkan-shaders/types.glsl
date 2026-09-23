@@ -574,12 +574,6 @@ struct block_iq3_k_packed16
 #define A_TYPE block_iq3_k
 #define A_TYPE_PACKED16 block_iq3_k_packed16
 #define DATA_A_QUANT_K
-
-const int8_t kvalues_iq3_k_const[16] = {
-    int8_t(-63), int8_t(-40), int8_t(-23), int8_t(-10), int8_t(1), int8_t(13), int8_t(28), int8_t(47),
-    int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
-};
-shared IQK_LUT_TYPE kvalues_iq3_k[16];
 #endif
 
 #define QUANT_K_IQ4_K 256
@@ -617,12 +611,6 @@ struct block_iq4_k_packed32
 #define A_TYPE_PACKED16 block_iq4_k_packed16
 #define A_TYPE_PACKED32 block_iq4_k_packed32
 #define DATA_A_QUANT_K
-
-const int8_t kvalues_iq4_k_const[32] = {
-    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
-    int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
-};
-shared IQK_LUT_TYPE kvalues_iq4_k[32];
 #endif
 
 #define QUANT_K_IQ5_K 256
@@ -652,14 +640,6 @@ struct block_iq5_k_packed32
 #define A_TYPE block_iq5_k
 #define A_TYPE_PACKED32 block_iq5_k_packed32
 #define DATA_A_QUANT_K
-
-const int8_t kvalues_iq5_k_const[64] = {
-    int8_t(-126), int8_t(-114), int8_t(-103), int8_t(-92), int8_t(-83), int8_t(-74), int8_t(-65), int8_t(-57), int8_t(-50), int8_t(-43), int8_t(-36), int8_t(-30), int8_t(-24), int8_t(-18), int8_t(-12), int8_t(-6),
-    int8_t(-1), int8_t(5), int8_t(11), int8_t(17), int8_t(23), int8_t(29), int8_t(36), int8_t(43), int8_t(51), int8_t(59), int8_t(68), int8_t(77), int8_t(87), int8_t(97), int8_t(109), int8_t(121),
-    int8_t(-124), int8_t(-112), int8_t(-101), int8_t(-90), int8_t(-81), int8_t(-72), int8_t(-63), int8_t(-55), int8_t(-48), int8_t(-41), int8_t(-34), int8_t(-28), int8_t(-22), int8_t(-16), int8_t(-10), int8_t(-4),
-    int8_t(1), int8_t(7), int8_t(13), int8_t(19), int8_t(25), int8_t(31), int8_t(38), int8_t(45), int8_t(53), int8_t(61), int8_t(70), int8_t(79), int8_t(89), int8_t(99), int8_t(111), int8_t(123)
-};
-shared IQK_LUT_TYPE kvalues_iq5_k[64];
 #endif
 
 #define QUANT_K_IQ6_K 256
@@ -711,12 +691,6 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 128
-
-const int8_t kvalues_iq4_kss_const[32] = {
-    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
-    int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
-};
-shared IQK_LUT_TYPE kvalues_iq4_kss[32];
 #endif
 
 #if defined(DATA_A_IQ2_KS)
@@ -737,12 +711,6 @@ shared IQK_LUT_TYPE kvalues_iq4_kss[32];
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 2
 #define IQK_BLOCK_SIZE 102
-
-const int8_t kvalues_iq3_ks_const[16] = {
-    int8_t(-63), int8_t(-40), int8_t(-23), int8_t(-10), int8_t(1), int8_t(13), int8_t(28), int8_t(47),
-    int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
-};
-shared IQK_LUT_TYPE kvalues_iq3_ks[16];
 #endif
 
 #if defined(DATA_A_IQ4_KS)
@@ -754,11 +722,6 @@ shared IQK_LUT_TYPE kvalues_iq3_ks[16];
 #define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 136
 
-const int8_t kvalues_iq4_ks_const[32] = {
-    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
-    int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
-};
-shared IQK_LUT_TYPE kvalues_iq4_ks[32];
 #endif
 
 #if defined(DATA_A_IQ5_KS)
@@ -769,14 +732,6 @@ shared IQK_LUT_TYPE kvalues_iq4_ks[32];
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 168
-
-const int8_t kvalues_iq5_ks_const[64] = {
-    int8_t(-126), int8_t(-114), int8_t(-103), int8_t(-92), int8_t(-83), int8_t(-74), int8_t(-65), int8_t(-57), int8_t(-50), int8_t(-43), int8_t(-36), int8_t(-30), int8_t(-24), int8_t(-18), int8_t(-12), int8_t(-6),
-    int8_t(-1), int8_t(5), int8_t(11), int8_t(17), int8_t(23), int8_t(29), int8_t(36), int8_t(43), int8_t(51), int8_t(59), int8_t(68), int8_t(77), int8_t(87), int8_t(97), int8_t(109), int8_t(121),
-    int8_t(-124), int8_t(-112), int8_t(-101), int8_t(-90), int8_t(-81), int8_t(-72), int8_t(-63), int8_t(-55), int8_t(-48), int8_t(-41), int8_t(-34), int8_t(-28), int8_t(-22), int8_t(-16), int8_t(-10), int8_t(-4),
-    int8_t(1), int8_t(7), int8_t(13), int8_t(19), int8_t(25), int8_t(31), int8_t(38), int8_t(45), int8_t(53), int8_t(61), int8_t(70), int8_t(79), int8_t(89), int8_t(99), int8_t(111), int8_t(123)
-};
-shared IQK_LUT_TYPE kvalues_iq5_ks[64];
 #endif
 
 #if defined(DATA_A_IQ2_KL)
@@ -806,6 +761,32 @@ const int8_t kvalues_iq2_k_const[8] = {
     int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
 };
 shared IQK_LUT_TYPE kvalues_iq2_k[8];
+#endif
+
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+const int8_t kvalues_iq3_k_const[16] = {
+    int8_t(-63), int8_t(-40), int8_t(-23), int8_t(-10), int8_t(1), int8_t(13), int8_t(28), int8_t(47),
+    int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
+};
+shared IQK_LUT_TYPE kvalues_iq3_k[16];
+#endif
+
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+const int8_t kvalues_iq4_k_const[32] = {
+    int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
+    int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
+};
+shared IQK_LUT_TYPE kvalues_iq4_k[32];
+#endif
+
+#if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+const int8_t kvalues_iq5_k_const[64] = {
+    int8_t(-126), int8_t(-114), int8_t(-103), int8_t(-92), int8_t(-83), int8_t(-74), int8_t(-65), int8_t(-57), int8_t(-50), int8_t(-43), int8_t(-36), int8_t(-30), int8_t(-24), int8_t(-18), int8_t(-12), int8_t(-6),
+    int8_t(-1), int8_t(5), int8_t(11), int8_t(17), int8_t(23), int8_t(29), int8_t(36), int8_t(43), int8_t(51), int8_t(59), int8_t(68), int8_t(77), int8_t(87), int8_t(97), int8_t(109), int8_t(121),
+    int8_t(-124), int8_t(-112), int8_t(-101), int8_t(-90), int8_t(-81), int8_t(-72), int8_t(-63), int8_t(-55), int8_t(-48), int8_t(-41), int8_t(-34), int8_t(-28), int8_t(-22), int8_t(-16), int8_t(-10), int8_t(-4),
+    int8_t(1), int8_t(7), int8_t(13), int8_t(19), int8_t(25), int8_t(31), int8_t(38), int8_t(45), int8_t(53), int8_t(61), int8_t(70), int8_t(79), int8_t(89), int8_t(99), int8_t(111), int8_t(123)
+};
+shared IQK_LUT_TYPE kvalues_iq5_k[64];
 #endif
 
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
@@ -855,37 +836,21 @@ void init_iq_shmem(uvec3 wgsize) {
     for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
         kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
     }
-#elif defined(DATA_A_IQ3_K)
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
         kvalues_iq3_k[i] = IQK_LUT_TYPE(kvalues_iq3_k_const[i]);
     }
-#elif defined(DATA_A_IQ4_K)
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
         kvalues_iq4_k[i] = IQK_LUT_TYPE(kvalues_iq4_k_const[i]);
     }
-#elif defined(DATA_A_IQ5_K)
+#elif defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
         kvalues_iq5_k[i] = IQK_LUT_TYPE(kvalues_iq5_k_const[i]);
     }
 #elif defined(DATA_A_IQ6_K)
     for (uint i = gl_LocalInvocationIndex.x; i < 128; i += wgsize.x) {
         kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
-    }
-#elif defined(DATA_A_IQ4_KSS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
-        kvalues_iq4_kss[i] = IQK_LUT_TYPE(kvalues_iq4_kss_const[i]);
-    }
-#elif defined(DATA_A_IQ3_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
-        kvalues_iq3_ks[i] = IQK_LUT_TYPE(kvalues_iq3_ks_const[i]);
-    }
-#elif defined(DATA_A_IQ4_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
-        kvalues_iq4_ks[i] = IQK_LUT_TYPE(kvalues_iq4_ks_const[i]);
-    }
-#elif defined(DATA_A_IQ5_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
-        kvalues_iq5_ks[i] = IQK_LUT_TYPE(kvalues_iq5_ks_const[i]);
     }
 #elif defined(DATA_A_IQ2_KL)
     for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {

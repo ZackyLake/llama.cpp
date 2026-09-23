@@ -124,6 +124,8 @@ void main() {
 #endif
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
     init_iq2k_table();
+#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+    init_iq3k_table();
 #endif
 
 #ifndef MUL_MAT_ID
