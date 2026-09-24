@@ -46,7 +46,7 @@ void main() {
             const uint d_offset = get_doffset() + i10*p.nb21 + i11*p.nb22 + i12*p.nb23;
 
 #if defined(DATA_A_IQK_ROW)
-            const uint row_offset = 2 * a_offset;
+            const uint row_offset = a_offset;
             const uint element = i00 % QUANT_K;
             const uint block_offset = row_offset + IQK_ROW_META_SIZE + (i00 / QUANT_K) * IQK_BLOCK_SIZE;
             const vec4 values0 = dequantize_iqk_row4(row_offset, block_offset, element);

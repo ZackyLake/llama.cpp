@@ -270,10 +270,29 @@ size_t ggml_vk_descriptor_offset(size_t tensor_offset, size_t alignment, size_t 
     return descriptor_offset;
 }
 
+static size_t ggml_vk_tensor_max_access_alignment(ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_IQ2_KS:
+        case GGML_TYPE_IQ3_KS:
+        case GGML_TYPE_IQ2_KL:
+            return sizeof(uint16_t);
+        case GGML_TYPE_IQ4_KSS:
+        case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ5_KS:
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
+            return sizeof(uint32_t);
+        default:
+            return ggml_get_type_traits(type)->row_meta_size != 0 ? sizeof(uint16_t) : ggml_type_size(type);
+    }
+}
+
 uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t) {
     const size_t tensor_offset = ggml_vk_tensor_buffer_offset(ctx, t);
     const size_t descriptor_offset = ggml_vk_descriptor_offset(
-        tensor_offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_vk_tensor_storage_unit_size(t->type));
+        tensor_offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_vk_tensor_max_access_alignment(t->type));
     GGML_ASSERT(tensor_offset - descriptor_offset <= UINT32_MAX);
     return tensor_offset - descriptor_offset;
 }
@@ -5905,7 +5924,7 @@ vk_subbuffer ggml_vk_tensor_subbuffer(
     size_t size = ggml_nbytes(tensor);
 
     const size_t descriptor_offset = ggml_vk_descriptor_offset(
-        offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_vk_tensor_storage_unit_size(tensor->type));
+        offset, ctx->device->properties.limits.minStorageBufferOffsetAlignment, ggml_vk_tensor_max_access_alignment(tensor->type));
     const size_t misalign_bytes = offset - descriptor_offset;
     // The shader must support misaligned offsets when indexing into the buffer
     GGML_ASSERT(allow_misalign || misalign_bytes == 0);

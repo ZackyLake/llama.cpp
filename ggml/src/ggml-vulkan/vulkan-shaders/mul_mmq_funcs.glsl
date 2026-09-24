@@ -387,193 +387,17 @@ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQK_ROW)
-uint mmq_iqks_load_u8(uint offset) {
-#if defined(DATA_A_IQK_ROW_PACKED32)
-    return (data_a_packed32[offset / 4] >> (8 * (offset & 3))) & 0xFF;
-#else
-    return (uint(data_a[offset / 2]) >> (8 * (offset & 1))) & 0xFF;
-#endif
-}
-
-uint mmq_iqks_load_u16(uint offset) {
-#if defined(DATA_A_IQK_ROW_PACKED32)
-    return (data_a_packed32[offset / 4] >> (8 * (offset & 2))) & 0xFFFF;
-#else
-    return uint(data_a[offset / 2]);
-#endif
-}
-
-uint mmq_iqks_load_u32(uint offset) {
-#if defined(DATA_A_IQK_ROW_PACKED32)
-    return data_a_packed32[offset / 4];
-#else
-    return mmq_iqks_load_u16(offset) | (mmq_iqks_load_u16(offset + 2) << 16);
-#endif
-}
-
-float mmq_iqks_row_scale(uint row_offset) {
-#if defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ3_KS)
-    return unpackHalf2x16(mmq_iqks_load_u16(row_offset)).x;
-#else
-    return uintBitsToFloat(mmq_iqks_load_u32(row_offset));
-#endif
-}
-
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
-int mmq_iqkt_next(inout uint state) {
-    state *= 0xCBAC1FEDu;
-    const uint value = state & 0x3F3F3F3Fu;
-    return int(value & 0xFF) + int((value >> 8) & 0xFF) + int((value >> 16) & 0xFF) + int(value >> 24) - 126;
-}
-
 void mmq_iqkt_take4(inout uint state, uint count, out int value0, out int value1, out int value2, out int value3) {
     [[unroll]] for (uint j = 0; j < count; ++j) {
-        mmq_iqkt_next(state);
+        iqkt_next(state);
     }
-    value0 = mmq_iqkt_next(state);
-    value1 = mmq_iqkt_next(state);
-    value2 = mmq_iqkt_next(state);
-    value3 = mmq_iqkt_next(state);
-}
-
-uint mmq_iqkt_pack4(uint block_offset, uint element) {
-    const uint group8 = element / 8;
-    const uint pos8 = element % 8;
-    const uint ib32 = element / 32;
-    uint state;
-
-#if defined(DATA_A_IQ1_KT)
-    const uint sh = mmq_iqks_load_u8(block_offset + ib32);
-    state = mmq_iqks_load_u8(block_offset + 8 + group8) |
-            ((mmq_iqks_load_u8(block_offset + 40 + group8 % 16) >> (4 * (group8 / 16))) & 0x0F) << 8 |
-            ((sh >> (4 + group8 % 4)) & 1) << 12;
-    state += 4096;
-#elif defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT)
-    state = mmq_iqks_load_u16(block_offset + 4 + 2 * group8) + 4096;
-#else
-    const uint header = mmq_iqks_load_u32(block_offset + 4 * ib32);
-    const uint seed_index = 2 * group8 + pos8 / 4;
-    state = mmq_iqks_load_u8(block_offset + 32 + seed_index) |
-            ((mmq_iqks_load_u8(block_offset + 96 + seed_index % 32) >> (4 * (seed_index / 32))) & 0x0F) << 8 |
-            ((header >> (8 + 3 * (seed_index % 8))) & 7) << 12 |
-            (header & 1) << 15;
-    state += 4096;
-#endif
-
-    int value0 = 0;
-    int value1 = 0;
-    int value2 = 0;
-    int value3 = 0;
-    const uint count =
-#if defined(DATA_A_IQ4_KT)
-        pos8 % 4;
-#else
-        pos8;
-#endif
-    for (uint j = 0; j < count; ++j) {
-        mmq_iqkt_next(state);
-    }
-    value0 = mmq_iqkt_next(state);
-    value1 = mmq_iqkt_next(state);
-    value2 = mmq_iqkt_next(state);
-    value3 = mmq_iqkt_next(state);
-
-#if defined(DATA_A_IQ3_KT)
-    value0 = abs(value0);
-    value1 = abs(value1);
-    value2 = abs(value2);
-    value3 = abs(value3);
-    const u8vec4 signs = unpack8(mmq_iqks_load_u32(block_offset + 68 + element % 32));
-    if (((uint(signs.x) >> ib32) & 1) != 0) value0 = -value0;
-    if (((uint(signs.y) >> ib32) & 1) != 0) value1 = -value1;
-    if (((uint(signs.z) >> ib32) & 1) != 0) value2 = -value2;
-    if (((uint(signs.w) >> ib32) & 1) != 0) value3 = -value3;
-#endif
-    return pack32(i8vec4(int8_t(value0), int8_t(value1), int8_t(value2), int8_t(value3)));
+    value0 = iqkt_next(state);
+    value1 = iqkt_next(state);
+    value2 = iqkt_next(state);
+    value3 = iqkt_next(state);
 }
 #endif
-
-uint mmq_iqks_pack4(uint block_offset, uint element) {
-    const uint pos = element % 32;
-
-#if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
-    return mmq_iqkt_pack4(block_offset, element);
-#elif defined(DATA_A_IQ4_KSS)
-    const uint ib32 = element / 32;
-    const uint word_offset = block_offset + 4 * (4 * ib32 + (pos % 16) / 4);
-    uint values = mmq_iqks_load_u32(word_offset) & 0xFFFEFFFE;
-    values ^= values >> 1;
-    uint scale_bits = 0;
-    [[unroll]] for (uint j = 0; j < 4; ++j) {
-        scale_bits |= (mmq_iqks_load_u32(block_offset + 4 * (4 * ib32 + j)) & 0x00010001) << (2 * j);
-    }
-    const uint scale = (scale_bits | (scale_bits >> 15)) & 0xFF;
-    const u8vec4 indexes = unpack8((values >> (4 * (pos / 16))) & 0x0F0F0F0Fu);
-    const uint table_offset = 16 * (scale & 1);
-    return pack32(i8vec4(kvalues_iq4_k[indexes.x + table_offset],
-                         kvalues_iq4_k[indexes.y + table_offset],
-                         kvalues_iq4_k[indexes.z + table_offset],
-                         kvalues_iq4_k[indexes.w + table_offset]));
-#elif defined(DATA_A_IQ2_KS)
-    const uint half_idx = element / 128;
-    const uint group = (element % 128) / 32;
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const bool is_hi_table = bool((extra >> group) & 1);
-    const uint values = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + pos);
-    return unpack_iq2_k((values >> (2 * group)) & 0x03030303u, is_hi_table);
-#elif defined(DATA_A_IQ2_KL)
-    const uint ib64 = element / 64;
-    const uint pos64 = element % 64;
-    const uint pos32 = pos64 % 32;
-    const uint half_idx = pos64 / 32;
-    const uint packed = mmq_iqks_load_u16(block_offset + 6 + 16 * ib64 + pos32 / 2);
-    const uint high = mmq_iqks_load_u16(block_offset + 70 + pos32 / 2);
-    const uint shift = 4 * half_idx;
-    const uint high_shift = 2 * ib64 + half_idx;
-    const uint packed0 = (packed >> shift) & 0x0F;
-    const uint packed1 = ((packed >> 8) >> shift) & 0x0F;
-    const uint high0 = (high >> high_shift) & 1;
-    const uint high1 = ((high >> 8) >> high_shift) & 1;
-    const uint index0 = packed0 | (high0 << 4);
-    const uint index1 = packed1 | (high1 << 4);
-    return pack32(i8vec4(kvalues_iq2_kl[2 * index0 + (pos32 & 1)],
-                         kvalues_iq2_kl[2 * index0 + ((pos32 + 1) & 1)],
-                         kvalues_iq2_kl[2 * index1 + ((pos32 + 2) & 1)],
-                         kvalues_iq2_kl[2 * index1 + ((pos32 + 3) & 1)]));
-#elif defined(DATA_A_IQ3_KS)
-    const uint half_idx = element / 128;
-    const uint8_t shift_h = uint8_t(element) >> 5;
-    const uint8_t group = shift_h & uint8_t(3);
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const uint low = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + pos);
-    const uint high = mmq_iqks_load_u32(block_offset + 70 + pos);
-    const bool is_hi_table = bool((extra >> (8 + group)) & 1);
-    return uint(unpack_iq3_k(low, high, shift_h, is_hi_table));
-#elif defined(DATA_A_IQ4_KS)
-    const uint ib32 = element / 32;
-    const uint scale = mmq_iqks_load_u8(block_offset + ib32);
-    const u8vec4 values = unpack8(mmq_iqks_load_u32(block_offset + 8 + 16 * ib32 + pos % 16));
-    const u8vec4 indexes = (values >> int8_t(4 * (pos / 16))) & int8_t(0x0F);
-    const uint table_offset = 16 * (scale & 1);
-    return pack32(i8vec4(kvalues_iq4_k[indexes.x + table_offset],
-                         kvalues_iq4_k[indexes.y + table_offset],
-                         kvalues_iq4_k[indexes.z + table_offset],
-                         kvalues_iq4_k[indexes.w + table_offset]));
-#else
-    const uint ib64 = element / 64;
-    const uint pos64 = element % 64;
-    const uint half_idx = pos64 / 32;
-    const uint scale = mmq_iqks_load_u8(block_offset + 2 * ib64 + half_idx);
-    const u8vec4 values = unpack8(mmq_iqks_load_u32(block_offset + 8 + 32 * ib64 + pos64 % 32));
-    const u8vec4 high = (unpack8(mmq_iqks_load_u32(block_offset + 136 + pos64 % 32)) >> int8_t(2 * ib64 + half_idx)) & int8_t(1);
-    const u8vec4 indexes = ((values >> int8_t(4 * half_idx)) & int8_t(0x0F)) |
-                           (high << int8_t(4)) | u8vec4((scale & 1) << 5);
-    return pack32(i8vec4(kvalues_iq5_k[indexes.x],
-                         kvalues_iq5_k[indexes.y],
-                         kvalues_iq5_k[indexes.z],
-                         kvalues_iq5_k[indexes.w]));
-#endif
-}
 
 void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint value1, out float d_scale) {
     d_scale = 0.0;
@@ -586,23 +410,23 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     uint state1;
 
 #if defined(DATA_A_IQ1_KT)
-    const uint sh = mmq_iqks_load_u8(block_offset + ib32);
-    state0 = mmq_iqks_load_u8(block_offset + 8 + group8) |
-             ((mmq_iqks_load_u8(block_offset + 40 + group8 % 16) >> (4 * (group8 / 16))) & 0x0F) << 8 |
-             ((sh >> (4 + group8 % 4)) & 1) << 12;
-    state1 = mmq_iqks_load_u8(block_offset + 8 + group8_next) |
-             ((mmq_iqks_load_u8(block_offset + 40 + group8_next % 16) >> (4 * (group8_next / 16))) & 0x0F) << 8 |
-             ((sh >> (4 + group8_next % 4)) & 1) << 12;
-    state0 += 4096;
-    state1 += 4096;
+    const uint8_t sh = iqks_load_u8(block_offset + ib32);
+    const uint8_t x0 = iqks_load_u8(block_offset + 8 + group8);
+    const uint8_t x1 = iqks_load_u8(block_offset + 8 + group8_next);
+    const uint8_t y0 = (iqks_load_u8(block_offset + 40 + group8 % 16) >> (4 * (group8 / 16))) & uint8_t(0x0F);
+    const uint8_t y1 = (iqks_load_u8(block_offset + 40 + group8_next % 16) >> (4 * (group8_next / 16))) & uint8_t(0x0F);
+    const bool z0 = bool(sh & (uint8_t(1) << (4 + group8 % 4)));
+    const bool z1 = bool(sh & (uint8_t(1) << (4 + group8_next % 4)));
+    state0 = pack32(u8vec4(x0, y0 | (z0 ? uint8_t(2) : uint8_t(1)) << 4, uint8_t(0), uint8_t(0)));
+    state1 = pack32(u8vec4(x1, y1 | (z1 ? uint8_t(2) : uint8_t(1)) << 4, uint8_t(0), uint8_t(0)));
     if (element % 32 == 0) {
         d_scale = float(kvalues_iqkt_scale[sh & 0x0F]);
     }
 #elif defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT)
-    state0 = mmq_iqks_load_u16(block_offset + 4 + 2 * group8) + 4096;
-    state1 = mmq_iqks_load_u16(block_offset + 4 + 2 * group8_next) + 4096;
+    state0 = uint(iqks_load_u16(block_offset + 4 + 2 * group8)) + 4096u;
+    state1 = uint(iqks_load_u16(block_offset + 4 + 2 * group8_next)) + 4096u;
     if (element % 32 == 0) {
-        const uint scale = (mmq_iqks_load_u8(block_offset + ib32 % 4) >> (4 * (ib32 / 4))) & 0x0F;
+        const uint8_t scale = (iqks_load_u8(block_offset + ib32 % 4) >> (4 * (ib32 / 4))) & uint8_t(0x0F);
 #if defined(DATA_A_IQ2_KT)
         d_scale = float(kvalues_iqkt_scale[scale]);
 #else
@@ -610,19 +434,20 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
 #endif
     }
 #else
-    const uint header = mmq_iqks_load_u32(block_offset + 4 * ib32);
+    const uint header = iqks_load_u32(block_offset + 4 * ib32);
     const uint seed_index0 = 2 * group8 + pos8 / 4;
     const uint seed_index1 = 2 * group8_next + pos8 / 4;
-    state0 = mmq_iqks_load_u8(block_offset + 32 + seed_index0) |
-             ((mmq_iqks_load_u8(block_offset + 96 + seed_index0 % 32) >> (4 * (seed_index0 / 32))) & 0x0F) << 8 |
-             ((header >> (8 + 3 * (seed_index0 % 8))) & 7) << 12 |
-             (header & 1) << 15;
-    state1 = mmq_iqks_load_u8(block_offset + 32 + seed_index1) |
-             ((mmq_iqks_load_u8(block_offset + 96 + seed_index1 % 32) >> (4 * (seed_index1 / 32))) & 0x0F) << 8 |
-             ((header >> (8 + 3 * (seed_index1 % 8))) & 7) << 12 |
-             (header & 1) << 15;
-    state0 += 4096;
-    state1 += 4096;
+    const uint8_t x0 = iqks_load_u8(block_offset + 32 + seed_index0);
+    const uint8_t x1 = iqks_load_u8(block_offset + 32 + seed_index1);
+    const uint8_t y0 = (iqks_load_u8(block_offset + 96 + seed_index0 % 32) >> (4 * (seed_index0 / 32))) & uint8_t(0x0F);
+    const uint8_t y1 = (iqks_load_u8(block_offset + 96 + seed_index1 % 32) >> (4 * (seed_index1 / 32))) & uint8_t(0x0F);
+    const uint8_t z0 = uint8_t((header >> (8 + 3 * (seed_index0 % 8))) & 7u);
+    const uint8_t z1 = uint8_t((header >> (8 + 3 * (seed_index1 % 8))) & 7u);
+    const bool w = bool(header & 1u);
+    const uint8_t high0 = z0 + uint8_t(1) + (w ? uint8_t(8) : uint8_t(0));
+    const uint8_t high1 = z1 + uint8_t(1) + (w ? uint8_t(8) : uint8_t(0));
+    state0 = pack32(u8vec4(x0, y0 | ((high0 & uint8_t(0x0F)) << 4), high0 >> 4, uint8_t(0)));
+    state1 = pack32(u8vec4(x1, y1 | ((high1 & uint8_t(0x0F)) << 4), high1 >> 4, uint8_t(0)));
     if (element % 32 == 0) {
         d_scale = float(int((header & 0xFF) >> 1) - 64);
     }
@@ -654,16 +479,16 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     v11 = abs(v11);
     v12 = abs(v12);
     v13 = abs(v13);
-    const u8vec4 signs0 = unpack8(mmq_iqks_load_u32(block_offset + 68 + element % 32));
-    const u8vec4 signs1 = unpack8(mmq_iqks_load_u32(block_offset + 68 + (element + 16) % 32));
-    if (((uint(signs0.x) >> ib32) & 1) != 0) v00 = -v00;
-    if (((uint(signs0.y) >> ib32) & 1) != 0) v01 = -v01;
-    if (((uint(signs0.z) >> ib32) & 1) != 0) v02 = -v02;
-    if (((uint(signs0.w) >> ib32) & 1) != 0) v03 = -v03;
-    if (((uint(signs1.x) >> ib32) & 1) != 0) v10 = -v10;
-    if (((uint(signs1.y) >> ib32) & 1) != 0) v11 = -v11;
-    if (((uint(signs1.z) >> ib32) & 1) != 0) v12 = -v12;
-    if (((uint(signs1.w) >> ib32) & 1) != 0) v13 = -v13;
+    const u8vec4 signs0 = unpack8((iqks_load_u32(block_offset + 68 + element % 32) >> ib32) & 0x01010101u);
+    const u8vec4 signs1 = unpack8((iqks_load_u32(block_offset + 68 + (element + 16) % 32) >> ib32) & 0x01010101u);
+    if (signs0.x != uint8_t(0)) v00 = -v00;
+    if (signs0.y != uint8_t(0)) v01 = -v01;
+    if (signs0.z != uint8_t(0)) v02 = -v02;
+    if (signs0.w != uint8_t(0)) v03 = -v03;
+    if (signs1.x != uint8_t(0)) v10 = -v10;
+    if (signs1.y != uint8_t(0)) v11 = -v11;
+    if (signs1.z != uint8_t(0)) v12 = -v12;
+    if (signs1.w != uint8_t(0)) v13 = -v13;
 #endif
 
     value0 = pack32(i8vec4(int8_t(v00), int8_t(v01), int8_t(v02), int8_t(v03)));
@@ -672,18 +497,18 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint ib32 = element / 32;
     const uint pos = element % 32;
     const uint word_offset = block_offset + 4 * (4 * ib32 + (pos % 16) / 4);
-    uint values = mmq_iqks_load_u32(word_offset) & 0xFFFEFFFE;
+    uint values = iqks_load_u32(word_offset) & 0xFFFEFFFE;
     values ^= values >> 1;
 
     uint scale_bits = 0;
     [[unroll]] for (uint j = 0; j < 4; ++j) {
-        scale_bits |= (mmq_iqks_load_u32(block_offset + 4 * (4 * ib32 + j)) & 0x00010001) << (2 * j);
+        scale_bits |= (iqks_load_u32(block_offset + 4 * (4 * ib32 + j)) & 0x00010001) << (2 * j);
     }
-    const uint scale = (scale_bits | (scale_bits >> 15)) & 0xFF;
+    const uint8_t scale = uint8_t(scale_bits | (scale_bits >> 15));
     if (element % 32 == 0) {
-        d_scale = float(int(scale & 254) - 127);
+        d_scale = float(int(scale & uint8_t(254)) - 127);
     }
-    const uint table_offset = 16 * (scale & 1);
+    const uint table_offset = bool(scale & uint8_t(1)) ? 16u : 0u;
     const u8vec4 indexes0 = unpack8(values & 0x0F0F0F0Fu);
     const u8vec4 indexes1 = unpack8((values >> 4) & 0x0F0F0F0Fu);
 
@@ -698,13 +523,14 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
 #elif defined(DATA_A_IQ4_KS)
     const uint ib32 = element / 32;
     const uint pos = element % 32;
-    const uint scale = mmq_iqks_load_u8(block_offset + ib32);
-    const uint values = mmq_iqks_load_u32(block_offset + 8 + 16 * ib32 + pos % 16);
-    const uint table_offset = 16 * (scale & 1);
-    const u8vec4 indexes0 = (unpack8(values) & int8_t(0x0F));
-    const u8vec4 indexes1 = (unpack8(values) >> int8_t(4)) & int8_t(0x0F);
+    const uint8_t scale = iqks_load_u8(block_offset + ib32);
+    const uint values = iqks_load_u32(block_offset + 8 + 16 * ib32 + pos % 16);
+    const uint table_offset = bool(scale & uint8_t(1)) ? 16u : 0u;
+    const u8vec4 unpacked_values = unpack8(values);
+    const u8vec4 indexes0 = unpacked_values & int8_t(0x0F);
+    const u8vec4 indexes1 = (unpacked_values >> int8_t(4)) & int8_t(0x0F);
     if (element % 32 == 0) {
-        d_scale = float(int(scale & 254) - 127);
+        d_scale = float(int(scale & uint8_t(254)) - 127);
     }
 
     value0 = pack32(i8vec4(kvalues_iq4_k[indexes0.x + table_offset],
@@ -718,13 +544,14 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
 #elif defined(DATA_A_IQ2_KS)
     const uint half_idx = element / 128;
     const uint group = (element % 128) / 32;
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
+    const uint16_t extra = iqks_load_u16(block_offset) >> (4 * half_idx);
     const bool is_hi_table = bool((extra >> group) & 1);
-    const uint values0 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32);
-    const uint values1 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32 + 16);
+    const uint values0 = iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32);
+    const uint values1 = iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32 + 16);
     if (element % 32 == 0) {
-        const uint packed_scale = mmq_iqks_load_u8(block_offset + 2 + 2 * half_idx + group / 2);
-        const uint scale = ((packed_scale >> (4 * (group % 2))) & 0x0F) | (((extra >> (8 + group)) & 1) << 4);
+        const uint8_t packed_scale = iqks_load_u8(block_offset + 2 + 2 * half_idx + group / 2);
+        const uint8_t scale = ((packed_scale >> (4 * (group % 2))) & uint8_t(0x0F)) |
+                              (bool(extra & (uint16_t(1) << (8 + group))) ? uint8_t(16) : uint8_t(0));
         d_scale = float(int(scale) - 16);
     }
 
@@ -734,15 +561,15 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint half_idx = element / 128;
     const uint8_t shift_h = uint8_t(element) >> 5;
     const uint8_t group = shift_h & uint8_t(3);
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const uint low0 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32);
-    const uint low1 = mmq_iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32 + 16);
-    const uint high0 = mmq_iqks_load_u32(block_offset + 70 + element % 32);
-    const uint high1 = mmq_iqks_load_u32(block_offset + 70 + element % 32 + 16);
+    const uint16_t extra = iqks_load_u16(block_offset) >> (4 * half_idx);
+    const uint low0 = iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32);
+    const uint low1 = iqks_load_u32(block_offset + 6 + 32 * half_idx + element % 32 + 16);
+    const uint high0 = iqks_load_u32(block_offset + 70 + element % 32);
+    const uint high1 = iqks_load_u32(block_offset + 70 + element % 32 + 16);
     const bool is_hi_table = bool((extra >> (8 + group)) & 1);
     if (element % 32 == 0) {
-        const uint scale = ((mmq_iqks_load_u8(block_offset + 2 + group) >> (4 * half_idx)) & 0x0F) |
-                           (((extra >> group) & 1) << 4);
+        const uint8_t scale = ((iqks_load_u8(block_offset + 2 + group) >> (4 * half_idx)) & uint8_t(0x0F)) |
+                              (bool(extra & (uint16_t(1) << group)) ? uint8_t(16) : uint8_t(0));
         d_scale = float(int(scale) - 16);
     }
 
@@ -753,20 +580,20 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint pos64 = element % 64;
     const uint pos32 = pos64 % 32;
     const uint half_idx = pos64 / 32;
-    const uint scale = mmq_iqks_load_u8(block_offset + 2 * ib64 + half_idx);
-    const uint values0 = mmq_iqks_load_u32(block_offset + 8 + 32 * ib64 + pos32);
-    const uint values1 = mmq_iqks_load_u32(block_offset + 8 + 32 * ib64 + pos32 + 16);
-    const uint high0 = mmq_iqks_load_u32(block_offset + 136 + pos32);
-    const uint high1 = mmq_iqks_load_u32(block_offset + 136 + pos32 + 16);
+    const uint8_t scale = iqks_load_u8(block_offset + 2 * ib64 + half_idx);
+    const uint values0 = iqks_load_u32(block_offset + 8 + 32 * ib64 + pos32);
+    const uint values1 = iqks_load_u32(block_offset + 8 + 32 * ib64 + pos32 + 16);
+    const uint high0 = iqks_load_u32(block_offset + 136 + pos32);
+    const uint high1 = iqks_load_u32(block_offset + 136 + pos32 + 16);
     const uint value_shift = 4 * half_idx;
     const uint high_shift = 2 * ib64 + half_idx;
-    const uint table_offset = 32 * (scale & 1);
+    const uint table_offset = bool(scale & uint8_t(1)) ? 32u : 0u;
     const u8vec4 indexes0 = ((unpack8(values0) >> int8_t(value_shift)) & int8_t(0x0F)) |
                             (((unpack8(high0) >> int8_t(high_shift)) & int8_t(1)) << int8_t(4));
     const u8vec4 indexes1 = ((unpack8(values1) >> int8_t(value_shift)) & int8_t(0x0F)) |
                             (((unpack8(high1) >> int8_t(high_shift)) & int8_t(1)) << int8_t(4));
     if (element % 32 == 0) {
-        d_scale = float(int(scale & 254) - 127);
+        d_scale = float(int(scale & uint8_t(254)) - 127);
     }
 
     value0 = pack32(i8vec4(kvalues_iq5_k[indexes0.x + table_offset],
@@ -784,19 +611,19 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint pos32 = pos64 % 32;
     const uint half_idx = pos64 / 32;
     const uint next_pos32 = pos32 + 16;
-    const uint packed0 = mmq_iqks_load_u16(block_offset + 6 + 16 * ib64 + pos32 / 2);
-    const uint packed1 = mmq_iqks_load_u16(block_offset + 6 + 16 * ib64 + next_pos32 / 2);
-    const uint high0 = mmq_iqks_load_u16(block_offset + 70 + pos32 / 2);
-    const uint high1 = mmq_iqks_load_u16(block_offset + 70 + next_pos32 / 2);
+    const uint16_t packed0 = iqks_load_u16(block_offset + 6 + 16 * ib64 + pos32 / 2);
+    const uint16_t packed1 = iqks_load_u16(block_offset + 6 + 16 * ib64 + next_pos32 / 2);
+    const uint16_t high0 = iqks_load_u16(block_offset + 70 + pos32 / 2);
+    const uint16_t high1 = iqks_load_u16(block_offset + 70 + next_pos32 / 2);
     const uint shift = 4 * half_idx;
     const uint high_shift = 2 * ib64 + half_idx;
-    const uint index00 = ((packed0 >> shift) & 0x0F) | (((high0 >> high_shift) & 1) << 4);
-    const uint index01 = (((packed0 >> 8) >> shift) & 0x0F) | ((((high0 >> 8) >> high_shift) & 1) << 4);
-    const uint index10 = ((packed1 >> shift) & 0x0F) | (((high1 >> high_shift) & 1) << 4);
-    const uint index11 = (((packed1 >> 8) >> shift) & 0x0F) | ((((high1 >> 8) >> high_shift) & 1) << 4);
+    const uint8_t index00 = uint8_t(((packed0 >> shift) & uint16_t(0x0F)) | (((high0 >> high_shift) & uint16_t(1)) << 4));
+    const uint8_t index01 = uint8_t((((packed0 >> 8) >> shift) & uint16_t(0x0F)) | ((((high0 >> 8) >> high_shift) & uint16_t(1)) << 4));
+    const uint8_t index10 = uint8_t(((packed1 >> shift) & uint16_t(0x0F)) | (((high1 >> high_shift) & uint16_t(1)) << 4));
+    const uint8_t index11 = uint8_t((((packed1 >> 8) >> shift) & uint16_t(0x0F)) | ((((high1 >> 8) >> high_shift) & uint16_t(1)) << 4));
     if (element % 32 == 0) {
-        const uint scale_low = (mmq_iqks_load_u8(block_offset + 2 + ib32_scale % 4) >> (4 * (ib32_scale / 4))) & 0x0F;
-        const uint scale_high = (mmq_iqks_load_u16(block_offset) >> (2 * ib32_scale)) & 3;
+        const uint8_t scale_low = (iqks_load_u8(block_offset + 2 + ib32_scale % 4) >> (4 * (ib32_scale / 4))) & uint8_t(0x0F);
+        const uint8_t scale_high = uint8_t((iqks_load_u16(block_offset) >> (2 * ib32_scale)) & uint16_t(3));
         d_scale = float(int(scale_low | (scale_high << 4)) - 32);
     }
 
@@ -809,49 +636,8 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
                            kvalues_iq2_kl[2 * index11 + ((next_pos32 + 2) & 1)],
                            kvalues_iq2_kl[2 * index11 + ((next_pos32 + 3) & 1)]));
 #else
-    value0 = mmq_iqks_pack4(block_offset, element);
-    value1 = mmq_iqks_pack4(block_offset, element + 16);
-#endif
-}
-
-float mmq_iqks_d_scale(uint row_offset, uint block_offset, uint ib32) {
-#if defined(DATA_A_IQ1_KT)
-    return mmq_iqks_row_scale(row_offset) * float(kvalues_iqkt_scale[mmq_iqks_load_u8(block_offset + ib32) & 0x0F]);
-#elif defined(DATA_A_IQ2_KT)
-    const uint scale = (mmq_iqks_load_u8(block_offset + ib32 % 4) >> (4 * (ib32 / 4))) & 0x0F;
-    return mmq_iqks_row_scale(row_offset) * float(kvalues_iqkt_scale[scale]);
-#elif defined(DATA_A_IQ3_KT)
-    const uint scale = (mmq_iqks_load_u8(block_offset + ib32 % 4) >> (4 * (ib32 / 4))) & 0x0F;
-    return mmq_iqks_row_scale(row_offset) * float(scale);
-#elif defined(DATA_A_IQ4_KT)
-    return mmq_iqks_row_scale(row_offset) * float(int((mmq_iqks_load_u32(block_offset + 4 * ib32) & 0xFF) >> 1) - 64);
-#elif defined(DATA_A_IQ4_KSS)
-    uint scale_bits = 0;
-    [[unroll]] for (uint j = 0; j < 4; ++j) {
-        scale_bits |= (mmq_iqks_load_u32(block_offset + 4 * (4 * ib32 + j)) & 0x00010001) << (2 * j);
-    }
-    const uint scale = (scale_bits | (scale_bits >> 15)) & 0xFF;
-    return mmq_iqks_row_scale(row_offset) * float(int(scale & 254) - 127);
-#elif defined(DATA_A_IQ2_KS)
-    const uint half_idx = ib32 / 4;
-    const uint group = ib32 % 4;
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const uint packed_scale = mmq_iqks_load_u8(block_offset + 2 + 2 * half_idx + group / 2);
-    const uint scale = ((packed_scale >> (4 * (group % 2))) & 0x0F) | (((extra >> (8 + group)) & 1) << 4);
-    return mmq_iqks_row_scale(row_offset) * float(int(scale) - 16);
-#elif defined(DATA_A_IQ2_KL)
-    const uint scale_low = (mmq_iqks_load_u8(block_offset + 2 + ib32 % 4) >> (4 * (ib32 / 4))) & 0x0F;
-    const uint scale_high = (mmq_iqks_load_u16(block_offset) >> (2 * ib32)) & 3;
-    return mmq_iqks_row_scale(row_offset) * float(int(scale_low | (scale_high << 4)) - 32);
-#elif defined(DATA_A_IQ3_KS)
-    const uint half_idx = ib32 / 4;
-    const uint group = ib32 % 4;
-    const uint extra = mmq_iqks_load_u16(block_offset) >> (4 * half_idx);
-    const uint scale = ((mmq_iqks_load_u8(block_offset + 2 + group) >> (4 * half_idx)) & 0x0F) | (((extra >> group) & 1) << 4);
-    return mmq_iqks_row_scale(row_offset) * float(int(scale) - 16);
-#else
-    const uint scale = mmq_iqks_load_u8(block_offset + ib32);
-    return mmq_iqks_row_scale(row_offset) * float(int(scale & 254) - 127);
+    value0 = uint(iqks_value4(block_offset, element));
+    value1 = uint(iqks_value4(block_offset, element + 16));
 #endif
 }
 
@@ -867,7 +653,7 @@ void block_a_to_shmem(const uint buf_ib, const uint row_offset, const uint ib, c
     buf_a[buf_ib].qs[iqs + 4] = int32_t(value1);
 
     if (iqs == 0) {
-        buf_a[buf_ib].d_scales = FLOAT_TYPEV2(mmq_iqks_row_scale(row_offset) * d_scale);
+        buf_a[buf_ib].d_scales = FLOAT_TYPEV2(iqks_row_scale(row_offset) * d_scale);
     }
 }
 #endif

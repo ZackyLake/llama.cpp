@@ -686,7 +686,9 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ4_KSS)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
@@ -696,7 +698,8 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ2_KS)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 2
@@ -706,7 +709,8 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ3_KS)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 2
@@ -716,7 +720,9 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ4_KS)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
@@ -727,7 +733,9 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ5_KS)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
@@ -737,7 +745,8 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #if defined(DATA_A_IQ2_KL)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 2
@@ -789,34 +798,52 @@ const int8_t kvalues_iq5_k_const[64] = {
 shared IQK_LUT_TYPE kvalues_iq5_k[64];
 #endif
 
-#if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
+#if defined(DATA_A_IQ1_KT)
 #define QUANT_K QUANT_K_IQKS
 #define QUANT_R 1
-#define A_TYPE uint16_t
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
 #define DATA_A_QUANT_K
 #define DATA_A_IQK_ROW
 #define IQK_ROW_META_SIZE 4
-#endif
-
-#if defined(DATA_A_IQ1_KT)
 #define IQK_BLOCK_SIZE 56
 #endif
 
 #if defined(DATA_A_IQ2_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 68
 #endif
 
 #if defined(DATA_A_IQ3_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 100
 #endif
 
 #if defined(DATA_A_IQ4_KT)
+#define QUANT_K QUANT_K_IQKS
+#define QUANT_R 1
+#define A_TYPE uint8_t
+#define A_TYPE_PACKED16 uint16_t
+#define A_TYPE_PACKED32 uint32_t
+#define DATA_A_QUANT_K
+#define DATA_A_IQK_ROW
+#define IQK_ROW_META_SIZE 4
 #define IQK_BLOCK_SIZE 128
-#endif
-
-#if defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS) || defined(DATA_A_IQ5_KS) || \
-    defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
-#define DATA_A_IQK_ROW_PACKED32
 #endif
 
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)

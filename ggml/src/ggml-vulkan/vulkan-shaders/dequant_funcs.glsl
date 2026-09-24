@@ -738,16 +738,23 @@ vec4 dequantize_iqk4(uint ib, uint element) {
 #endif
 
 uint8_t iqk_row_load_u8(uint offset) {
-    const bool high = bool(offset & 1u);
-    return uint8_t(data_a[offset / 2] >> (high ? 8 : 0));
+    return data_a[offset];
 }
 
 uint16_t iqk_row_load_u16(uint offset) {
-    return data_a[offset / 2];
+#if defined(A_TYPE_PACKED16)
+    return data_a_packed16[offset / 2];
+#else
+    return pack8(u8vec2(iqk_row_load_u8(offset), iqk_row_load_u8(offset + 1)));
+#endif
 }
 
 uint32_t iqk_row_load_u32(uint offset) {
-    return pack32(u16vec2(data_a[offset / 2], data_a[offset / 2 + 1]));
+#if defined(A_TYPE_PACKED32)
+    return data_a_packed32[offset / 4];
+#else
+    return pack32(u16vec2(iqk_row_load_u16(offset), iqk_row_load_u16(offset + 2)));
+#endif
 }
 
 float iqk_row_scale(uint row_offset) {
