@@ -119,11 +119,13 @@ void main() {
         return;
     }
 #endif
-#ifdef NEEDS_INIT_IQ_SHMEM
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL)
     init_iq_shmem(gl_WorkGroupSize);
 #endif
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
     init_iq2k_table();
+#elif defined(DATA_A_IQ2_KL)
+    init_iq2kl_table();
 #elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
     init_iq3k_table();
 #endif

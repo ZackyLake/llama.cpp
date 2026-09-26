@@ -730,6 +730,7 @@ vec4 dequantize_iqk4(uint ib, uint element) {
 #endif
 
 #if defined(DATA_A_IQK_ROW)
+#extension GL_EXT_expect_assume : require
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT) || defined(DATA_A_IQ3_KT) || defined(DATA_A_IQ4_KT)
 #extension GL_EXT_integer_dot_product : require
 #endif
@@ -743,6 +744,8 @@ uint8_t iqk_row_load_u8(uint offset) {
 
 uint16_t iqk_row_load_u16(uint offset) {
 #if defined(A_TYPE_PACKED16)
+    assumeEXT((offset & 1u) == 0u);
+    assumeEXT((offset & uint32_t(-2)) == offset);
     return data_a_packed16[offset / 2];
 #else
     return pack8(u8vec2(iqk_row_load_u8(offset), iqk_row_load_u8(offset + 1)));
@@ -751,6 +754,8 @@ uint16_t iqk_row_load_u16(uint offset) {
 
 uint32_t iqk_row_load_u32(uint offset) {
 #if defined(A_TYPE_PACKED32)
+    assumeEXT((offset & 3u) == 0u);
+    assumeEXT((offset & uint32_t(-4)) == offset);
     return data_a_packed32[offset / 4];
 #else
     return pack32(u16vec2(iqk_row_load_u16(offset), iqk_row_load_u16(offset + 2)));
@@ -769,7 +774,7 @@ float iqk_row_scale(uint row_offset) {
 int8_t iqkt_next(inout uint state) {
     state *= 0xCBAC1FEDu;
     const uint value = state & 0x3F3F3F3Fu;
-    return int8_t(dotPacked4x8EXT(int32_t(value), int32_t(0x01010101u)) - 126);
+    return int8_t(dotPacked4x8EXT(int32_t(value), int32_t(0x01010101u)) + (-126));
 }
 
 float iqkt_d_scale(uint row_offset, uint block_offset, uint ib32) {

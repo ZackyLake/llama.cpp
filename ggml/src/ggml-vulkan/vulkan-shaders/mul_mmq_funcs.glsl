@@ -286,7 +286,7 @@ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
     const uint ql = pack32(u16vec2(data_a_packed16[ib_k].qs[q_idx], data_a_packed16[ib_k].qs[q_idx + 1]));
     const uint qh = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx], data_a_packed16[ib_k].qh[qh_idx + 1]));
 
-    buf_a[buf_ib].qs[iqs8] = unpack_iq3_k(ql, qh, ib32, is_hi_table);
+    buf_a[buf_ib].qs[iqs8] = unpack_iq3_k(ql, qh, uint16_t(ib32), is_hi_table);
 
     if (iqs8 == uint8_t(0)) {
         const uint8_t scales_l = data_a[ib_k].scales_l[ib32];
@@ -573,8 +573,8 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
         d_scale = float(int(scale) - 16);
     }
 
-    value0 = uint(unpack_iq3_k(low0, high0, shift_h, is_hi_table));
-    value1 = uint(unpack_iq3_k(low1, high1, shift_h, is_hi_table));
+    value0 = uint(unpack_iq3_k(low0, high0, uint16_t(shift_h), is_hi_table));
+    value1 = uint(unpack_iq3_k(low1, high1, uint16_t(shift_h), is_hi_table));
 #elif defined(DATA_A_IQ5_KS)
     const uint ib64 = element / 64;
     const uint pos64 = element % 64;
@@ -615,29 +615,28 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     const uint16_t packed1 = iqks_load_u16(block_offset + 6 + 16 * ib64 + next_pos32 / 2);
     const uint16_t high0 = iqks_load_u16(block_offset + 70 + pos32 / 2);
     const uint16_t high1 = iqks_load_u16(block_offset + 70 + next_pos32 / 2);
-    const uint shift = 4 * half_idx;
     const uint high_shift = 2 * ib64 + half_idx;
-    const uint8_t index00 = uint8_t(((packed0 >> shift) & uint16_t(0x0F)) | (((high0 >> high_shift) & uint16_t(1)) << 4));
-    const uint8_t index01 = uint8_t((((packed0 >> 8) >> shift) & uint16_t(0x0F)) | ((((high0 >> 8) >> high_shift) & uint16_t(1)) << 4));
-    const uint8_t index10 = uint8_t(((packed1 >> shift) & uint16_t(0x0F)) | (((high1 >> high_shift) & uint16_t(1)) << 4));
-    const uint8_t index11 = uint8_t((((packed1 >> 8) >> shift) & uint16_t(0x0F)) | ((((high1 >> 8) >> high_shift) & uint16_t(1)) << 4));
+    const bool high_half = bool(half_idx);
+    const bool odd = bool(pos32 & 1u);
+    const uint16_t index_even0 = ((high_half ? packed0 >> 3u : packed0 << 1u) & uint16_t(0x1E1E)) |
+                                 (((high0 >> high_shift) & uint16_t(0x0101)) << 5u);
+    const uint16_t index_even1 = ((high_half ? packed1 >> 3u : packed1 << 1u) & uint16_t(0x1E1E)) |
+                                 (((high1 >> high_shift) & uint16_t(0x0101)) << 5u);
+    const uint16_t index0 = odd ? index_even0 + uint16_t(0x0101) : index_even0;
+    const uint16_t index1 = odd ? index_even1 + uint16_t(0x0101) : index_even1;
+    const u8vec2 indexes0 = unpack8(index0);
+    const u8vec2 indexes1 = unpack8(index1);
     if (element % 32 == 0) {
         const uint8_t scale_low = (iqks_load_u8(block_offset + 2 + ib32_scale % 4) >> (4 * (ib32_scale / 4))) & uint8_t(0x0F);
         const uint8_t scale_high = uint8_t((iqks_load_u16(block_offset) >> (2 * ib32_scale)) & uint16_t(3));
         d_scale = float(int(scale_low | (scale_high << 4)) - 32);
     }
 
-    value0 = pack32(i8vec4(kvalues_iq2_kl[2 * index00 + (pos32 & 1)],
-                           kvalues_iq2_kl[2 * index00 + ((pos32 + 1) & 1)],
-                           kvalues_iq2_kl[2 * index01 + ((pos32 + 2) & 1)],
-                           kvalues_iq2_kl[2 * index01 + ((pos32 + 3) & 1)]));
-    value1 = pack32(i8vec4(kvalues_iq2_kl[2 * index10 + (next_pos32 & 1)],
-                           kvalues_iq2_kl[2 * index10 + ((next_pos32 + 1) & 1)],
-                           kvalues_iq2_kl[2 * index11 + ((next_pos32 + 2) & 1)],
-                           kvalues_iq2_kl[2 * index11 + ((next_pos32 + 3) & 1)]));
+    value0 = pack32(u16vec2(iq2kl_table[indexes0.x], iq2kl_table[indexes0.y]));
+    value1 = pack32(u16vec2(iq2kl_table[indexes1.x], iq2kl_table[indexes1.y]));
 #else
-    value0 = uint(iqks_value4(block_offset, element));
-    value1 = uint(iqks_value4(block_offset, element + 16));
+    value0 = iqks_value4(block_offset, uint8_t(element));
+    value1 = iqks_value4(block_offset, uint8_t(element + 16u));
 #endif
 }
 

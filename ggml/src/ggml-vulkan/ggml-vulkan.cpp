@@ -1591,7 +1591,9 @@ static bool ggml_vk_matmul_int_shmem_support(const vk_device& device, const std:
         lut_size = *iqksize;
         if (src0_type == GGML_TYPE_IQ2_K || src0_type == GGML_TYPE_IQ2_KS)
             lut_size += 512 * sizeof(uint32_t);
-        if (src0_type == GGML_TYPE_IQ3_K || src0_type == GGML_TYPE_IQ3_KS)
+        else if (src0_type == GGML_TYPE_IQ2_KL)
+            lut_size += 64 * sizeof(uint16_t);
+        else if (src0_type == GGML_TYPE_IQ3_K || src0_type == GGML_TYPE_IQ3_KS)
             lut_size += 128 * sizeof(uint16_t);
     }
 

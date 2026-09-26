@@ -752,15 +752,15 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #define IQK_ROW_META_SIZE 2
 #define IQK_BLOCK_SIZE 86
 
-const int8_t kvalues_iq2_kl_const[64] = {
-    int8_t(-63), int8_t(-23), int8_t(-63), int8_t( 13), int8_t(-40), int8_t(-63), int8_t(-40), int8_t(-10),
-    int8_t(-40), int8_t( 13), int8_t(-40), int8_t( 47), int8_t(-23), int8_t(-40), int8_t(-23), int8_t(-23),
-    int8_t(-23), int8_t(  1), int8_t(-23), int8_t( 13), int8_t(-23), int8_t( 28), int8_t(-10), int8_t(-63),
-    int8_t(-10), int8_t(  1), int8_t(-10), int8_t( 13), int8_t(-10), int8_t( 47), int8_t(  1), int8_t(-23),
-    int8_t(  1), int8_t(-10), int8_t(  1), int8_t(  1), int8_t(  1), int8_t( 13), int8_t(  1), int8_t( 28),
-    int8_t( 13), int8_t(-40), int8_t( 13), int8_t(-23), int8_t( 13), int8_t(-10), int8_t( 13), int8_t(  1),
-    int8_t( 13), int8_t( 13), int8_t( 28), int8_t(-63), int8_t( 28), int8_t(-23), int8_t( 28), int8_t(  1),
-    int8_t( 28), int8_t( 28), int8_t( 28), int8_t( 47), int8_t( 47), int8_t(-23), int8_t( 47), int8_t( 13)
+const i8vec4 kvalues_iq2_kl_const[16] = {
+    { int8_t(-63), int8_t(-23), int8_t(-63), int8_t( 13) }, { int8_t(-40), int8_t(-63), int8_t(-40), int8_t(-10) },
+    { int8_t(-40), int8_t( 13), int8_t(-40), int8_t( 47) }, { int8_t(-23), int8_t(-40), int8_t(-23), int8_t(-23) },
+    { int8_t(-23), int8_t(  1), int8_t(-23), int8_t( 13) }, { int8_t(-23), int8_t( 28), int8_t(-10), int8_t(-63) },
+    { int8_t(-10), int8_t(  1), int8_t(-10), int8_t( 13) }, { int8_t(-10), int8_t( 47), int8_t(  1), int8_t(-23) },
+    { int8_t(  1), int8_t(-10), int8_t(  1), int8_t(  1) }, { int8_t(  1), int8_t( 13), int8_t(  1), int8_t( 28) },
+    { int8_t( 13), int8_t(-40), int8_t( 13), int8_t(-23) }, { int8_t( 13), int8_t(-10), int8_t( 13), int8_t(  1) },
+    { int8_t( 13), int8_t( 13), int8_t( 28), int8_t(-63) }, { int8_t( 28), int8_t(-23), int8_t( 28), int8_t(  1) },
+    { int8_t( 28), int8_t( 28), int8_t( 28), int8_t( 47) }, { int8_t( 47), int8_t(-23), int8_t( 47), int8_t( 13) }
 };
 shared IQK_LUT_TYPE kvalues_iq2_kl[64];
 #endif
@@ -860,12 +860,14 @@ shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize) {
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
-        kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
+    // Requires wgsize.x >= 8.
+    if (gl_LocalInvocationIndex.x < 8) {
+        kvalues_iq2_k[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iq2_k_const[gl_LocalInvocationIndex.x]);
     }
 #elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
-        kvalues_iq3_k[i] = IQK_LUT_TYPE(kvalues_iq3_k_const[i]);
+    // Requires wgsize.x >= 16.
+    if (gl_LocalInvocationIndex.x < 16) {
+        kvalues_iq3_k[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iq3_k_const[gl_LocalInvocationIndex.x]);
     }
 #elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
@@ -880,14 +882,21 @@ void init_iq_shmem(uvec3 wgsize) {
         kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
     }
 #elif defined(DATA_A_IQ2_KL)
-    for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
-        kvalues_iq2_kl[i] = IQK_LUT_TYPE(kvalues_iq2_kl_const[i]);
+    // Requires wgsize.x >= 16.
+    if (gl_LocalInvocationIndex.x < 16) {
+        const uint i = gl_LocalInvocationIndex.x;
+        const i8vec4 values = kvalues_iq2_kl_const[i];
+        kvalues_iq2_kl[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq2_kl[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq2_kl[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq2_kl[4 * i + 3] = IQK_LUT_TYPE(values.w);
     }
 #endif
 
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
-    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
-        kvalues_iqkt_scale[i] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[i]);
+    // Requires wgsize.x >= 16.
+    if (gl_LocalInvocationIndex.x < 16) {
+        kvalues_iqkt_scale[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[gl_LocalInvocationIndex.x]);
     }
 #endif
     barrier();

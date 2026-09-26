@@ -516,7 +516,7 @@ i32vec4 repack4(uint ib, uint8_t iqs) {
     [[unroll]] for (uint j = 0; j < 4; ++j) {
         const uint ql = pack32(u16vec2(data_a_packed16[ib_k].qs[q_idx + 2 * j], data_a_packed16[ib_k].qs[q_idx + 2 * j + 1]));
         const uint qh = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 2 * j], data_a_packed16[ib_k].qh[qh_idx + 2 * j + 1]));
-        result[j] = unpack_iq3_k(ql, qh, ib32, is_hi_table);
+        result[j] = unpack_iq3_k(ql, qh, uint16_t(ib32), is_hi_table);
     }
     return result;
 }
@@ -668,39 +668,25 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQK_ROW)
-uint iqks_blocks_per_row() {
-    return p.ncols / QUANT_K_Q8_1;
-}
-
-uint iqks_row_offset(uint ib) {
-    return a_offset + (ib / iqks_blocks_per_row()) * p.stride_a;
-}
-
-uint iqks_block_offset(uint ib) {
-    const uint ib_row = ib % iqks_blocks_per_row();
-    return iqks_row_offset(ib) + IQK_ROW_META_SIZE + (ib_row / 8) * IQK_BLOCK_SIZE;
-}
-
-i32vec4 repack4(uint ib, uint iqs) {
-    const uint element = 32 * ((ib % iqks_blocks_per_row()) % 8) + 16 * iqs;
-    const uint block_offset = iqks_block_offset(ib);
-    i32vec4 result;
-    [[unroll]] for (uint j = 0; j < 4; ++j) {
-        result[j] = iqks_value4(block_offset, element + 4 * j);
-    }
-    return result;
-}
-
 FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
-    const i32vec4 qs_a = repack4(ib_a, iqs);
-    const uint row_offset = iqks_row_offset(ib_a);
-    const uint block_offset = iqks_block_offset(ib_a);
-    const uint ib32 = (ib_a % iqks_blocks_per_row()) % 8;
+    const uint blocks_per_row = p.ncols / QUANT_K_Q8_1;
+    const uint row = ib_a / blocks_per_row;
+    const uint ib_row = ib_a % blocks_per_row;
+    const uint row_offset = a_offset + row * p.stride_a;
+    const uint block_offset = row_offset + IQK_ROW_META_SIZE + (ib_row >> 3u) * IQK_BLOCK_SIZE;
+    const uint8_t ib32 = uint8_t(ib_row & 7u);
+    const uint8_t element = (ib32 << 5) + (iqs != 0u ? uint8_t(16) : uint8_t(0));
+    const float row_scale = iqks_row_scale(row_offset);
+    const i32vec4 qs_a = i32vec4(
+        iqks_value4(block_offset, element),
+        iqks_value4(block_offset, element + uint8_t(4)),
+        iqks_value4(block_offset, element + uint8_t(8)),
+        iqks_value4(block_offset, element + uint8_t(12)));
     int32_t q_sum = dotPacked4x8EXT(qs_a.x, cache_b_qs[0]);
     q_sum += dotPacked4x8EXT(qs_a.y, cache_b_qs[1]);
     q_sum += dotPacked4x8EXT(qs_a.z, cache_b_qs[2]);
     q_sum += dotPacked4x8EXT(qs_a.w, cache_b_qs[3]);
-    return FLOAT_TYPE(float(cache_b_ds.x) * iqks_d_scale(row_offset, block_offset, ib32) * float(q_sum));
+    return FLOAT_TYPE(float(cache_b_ds.x) * iqks_d_scale(row_scale, block_offset, ib32) * float(q_sum));
 }
 #endif
 
