@@ -299,14 +299,6 @@ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQ4_K)
-int32_t unpack_iq4_k(uint32_t values, uint shift, uint table_offset) {
-    const u8vec4 indexes = unpack8((values >> shift) & 0x0F0F0F0F);
-    return pack32(i8vec4(kvalues_iq4_k[indexes.x + table_offset],
-                         kvalues_iq4_k[indexes.y + table_offset],
-                         kvalues_iq4_k[indexes.z + table_offset],
-                         kvalues_iq4_k[indexes.w + table_offset]));
-}
-
 void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
     const uint ib_k = ib / 8;
     const uint ib32 = ib % 8;
@@ -327,16 +319,6 @@ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQ5_K)
-int32_t unpack_iq5_k(uint32_t values, uint32_t qh, uint shift, uint table_offset) {
-    const uint32_t low = (values >> (4 * (shift & 1))) & 0x0F0F0F0Fu;
-    const uint32_t high = ((qh >> shift) & 0x01010101u) << 4u;
-    const u8vec4 indexes = unpack8(low | high);
-    return pack32(i8vec4(kvalues_iq5_k[indexes.x + table_offset],
-                         kvalues_iq5_k[indexes.y + table_offset],
-                         kvalues_iq5_k[indexes.z + table_offset],
-                         kvalues_iq5_k[indexes.w + table_offset]));
-}
-
 void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
     const uint ib_k = ib / 8;
     const uint ib32 = ib % 8;
@@ -357,16 +339,6 @@ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
 #endif
 
 #if defined(DATA_A_IQ6_K)
-int32_t unpack_iq6_k(uint32_t values, uint32_t qh, uint shift, uint table_offset) {
-    const uint32_t low = (values >> (4 * ((shift / 2) & 1))) & 0x0F0F0F0Fu;
-    const uint32_t high = ((qh >> shift) & 0x03030303u) << 4u;
-    const u8vec4 indexes = unpack8(low | high);
-    return pack32(i8vec4(kvalues_iq6_k[indexes.x + table_offset],
-                         kvalues_iq6_k[indexes.y + table_offset],
-                         kvalues_iq6_k[indexes.z + table_offset],
-                         kvalues_iq6_k[indexes.w + table_offset]));
-}
-
 void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
     const uint ib_k = ib / 8;
     const uint ib32 = ib % 8;

@@ -3243,7 +3243,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 if (ggml_vk_iqk_dp4a_support(device)) {
                     const uint32_t subgroup_size_16 = std::max(subgroup_size_int, 16u);
                     const uint32_t wg_size_subgroup_16 = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_16 : (subgroup_size_16 * 4);
-#define X_SG_MMVQ_IQK_FP32(TYPE, tstr) ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][TYPE][i], "mul_mat_vec_" #tstr "_q8_1_f32", arr_dmmv_##tstr##_q8_1_f32_len[reduc], arr_dmmv_##tstr##_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(rm_kq_int, i), 1, 1}, {wg_size_subgroup_16, rm_int_n(rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_16);
+#define X_SG_MMVQ_IQK_FP32(TYPE, tstr) ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][TYPE][i], "mul_mat_vec_" #tstr "_q8_1_f32", arr_dmmv_##tstr##_q8_1_f32_len[reduc], arr_dmmv_##tstr##_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1, 1, 1}, {wg_size_subgroup_16, 1, i+1}, 1, true, use_subgroups, subgroup_size_16);
                     FOR_EACH_IQK_TYPE(X_SG_MMVQ_IQK_FP32)
 #undef X_SG_MMVQ_IQK_FP32
                     // ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_IQ2_K][i], "mul_mat_vec_iq2_k_q8_1_f32", arr_dmmv_iq2_k_q8_1_f32_len[reduc], arr_dmmv_iq2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(rm_kq_int, i), 1, 1}, {wg_size_subgroup_16, rm_int_n(rm_kq_int, i), i+1}, 1, true, use_subgroups, subgroup_size_16);
@@ -3322,7 +3322,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (ggml_vk_iqk_dp4a_support(device)) {
                 const uint32_t subgroup_size_16 = std::max(subgroup_size_int, 16u);
                 const uint32_t wg_size_subgroup_16 = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_16 : (subgroup_size_16 * 4);
-#define X_SG_MMVQ_ID_IQK_FP32(TYPE, tstr) ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][TYPE], "mul_mat_vec_id_" #tstr "_q8_1_f32", arr_dmmv_id_##tstr##_q8_1_f32_len[reduc], arr_dmmv_id_##tstr##_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(rm_kq_int), 1, 1}, {wg_size_subgroup_16, rm_id(rm_kq_int)}, 1, true, use_subgroups, subgroup_size_16);
+#define X_SG_MMVQ_ID_IQK_FP32(TYPE, tstr) ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][TYPE], "mul_mat_vec_id_" #tstr "_q8_1_f32", arr_dmmv_id_##tstr##_q8_1_f32_len[reduc], arr_dmmv_id_##tstr##_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1, 1, 1}, {wg_size_subgroup_16, 1}, 1, true, use_subgroups, subgroup_size_16);
                 FOR_EACH_IQK_TYPE(X_SG_MMVQ_ID_IQK_FP32)
 #undef X_SG_MMVQ_ID_IQK_FP32
                 //ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_IQ2_K], "mul_mat_vec_id_iq2_k_q8_1_f32", arr_dmmv_id_iq2_k_q8_1_f32_len[reduc], arr_dmmv_id_iq2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(rm_kq_int), 1, 1}, {wg_size_subgroup_int, rm_id(rm_kq_int)}, 1, true, use_subgroups, subgroup_size_int);
