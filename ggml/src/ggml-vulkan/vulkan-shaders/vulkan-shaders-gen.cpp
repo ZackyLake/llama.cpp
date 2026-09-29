@@ -934,6 +934,22 @@ void process_shaders() {
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", "mul_mat_vec_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", "mul_mat_vec_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+        if (tname == "iq2_k" || tname == "iq3_k" || tname == "iq4_k" || tname == "iq5_k" || tname == "iq6_k") {
+            for (const uint32_t subgroup_size : {16u, 32u, 64u}) {
+                const std::string subgroup_size_define = std::to_string(subgroup_size);
+                const std::map<std::string, std::string> sg_defines = merge_maps(base_dict, {
+                    {data_a_key, "1"},
+                    {"D_TYPE", "float"},
+                    {"ACC_TYPE", "float"},
+                    {"SUBGROUP_SIZE", subgroup_size_define},
+                });
+                string_to_spv("mul_mat_vec_sg_" + tname + "_q8_1_f32_sg" + subgroup_size_define,
+                              "mul_mat_vec_sg_iqk.comp", sg_defines);
+                string_to_spv("mul_mat_vec_id_sg_" + tname + "_q8_1_f32_sg" + subgroup_size_define,
+                              "mul_mat_vec_sg_iqk.comp", merge_maps(sg_defines, {{"MUL_MAT_ID", "1"}}));
+            }
+        }
     }
 #endif
 
@@ -1463,6 +1479,18 @@ void write_output_files() {
             src << "const uint64_t arr_dmmv_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_" << tname << "_q8_1_f32_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
             src << "const void * arr_dmmv_id_"   << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_data, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_data};\n";
             src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
+        }
+    }
+    for (const std::string& tname : {"iq2_k", "iq3_k", "iq4_k", "iq5_k", "iq6_k"}) {
+        hdr << "extern const void * arr_dmmv_sg_"   << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_sg_" << tname << "_q8_1_f32_len[3];\n";
+        hdr << "extern const void * arr_dmmv_id_sg_"   << tname << "_q8_1_f32_data[3];\n";
+        hdr << "extern const uint64_t arr_dmmv_id_sg_" << tname << "_q8_1_f32_len[3];\n";
+        if (basename(input_filepath) == "mul_mat_vec.comp") {
+            src << "const void * arr_dmmv_sg_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_sg_" << tname << "_q8_1_f32_sg16_data, mul_mat_vec_sg_" << tname << "_q8_1_f32_sg32_data, mul_mat_vec_sg_" << tname << "_q8_1_f32_sg64_data};\n";
+            src << "const uint64_t arr_dmmv_sg_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_sg_" << tname << "_q8_1_f32_sg16_len, mul_mat_vec_sg_" << tname << "_q8_1_f32_sg32_len, mul_mat_vec_sg_" << tname << "_q8_1_f32_sg64_len};\n";
+            src << "const void * arr_dmmv_id_sg_" << tname << "_q8_1_f32_data[3] = {mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg16_data, mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg32_data, mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg64_data};\n";
+            src << "const uint64_t arr_dmmv_id_sg_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg16_len, mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg32_len, mul_mat_vec_id_sg_" << tname << "_q8_1_f32_sg64_len};\n";
         }
     }
 #endif

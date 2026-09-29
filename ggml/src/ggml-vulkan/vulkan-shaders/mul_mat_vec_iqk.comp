@@ -7,9 +7,10 @@
 #define B_TYPE block_q8_1_x4
 
 #include "mul_mat_vec_base.glsl"
-#include "mmq_iqk.glsl"
 
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "mmq_iqk.glsl"
 
 #define K_PER_ITER 32
 
@@ -129,7 +130,7 @@ void compute_outputs(const uint32_t first_row) {
 void main() {
     const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
 
-#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL)
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL) && !defined(DATA_A_IQ3_K) && !defined(DATA_A_IQ3_KS)
     init_iq_shmem(gl_WorkGroupSize);
 #endif
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)

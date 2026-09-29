@@ -250,6 +250,8 @@ struct vk_pipeline_struct {
     uint32_t push_constant_size;
     uint32_t parameter_count;
     std::array<uint32_t, 3> wg_denoms;
+    std::vector<uint32_t> specialization_constants;
+    uint32_t required_subgroup_size {};
     uint32_t align;
     // true if fields have been set by ggml_vk_create_pipeline
     bool initialized {};

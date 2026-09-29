@@ -860,14 +860,12 @@ shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
 #define NEEDS_INIT_IQ_SHMEM
 void init_iq_shmem(uvec3 wgsize) {
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
-    // Requires wgsize.x >= 8.
-    if (gl_LocalInvocationIndex.x < 8) {
-        kvalues_iq2_k[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iq2_k_const[gl_LocalInvocationIndex.x]);
+    for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
+        kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
     }
 #elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
-    // Requires wgsize.x >= 16.
-    if (gl_LocalInvocationIndex.x < 16) {
-        kvalues_iq3_k[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iq3_k_const[gl_LocalInvocationIndex.x]);
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        kvalues_iq3_k[i] = IQK_LUT_TYPE(kvalues_iq3_k_const[i]);
     }
 #elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
@@ -882,7 +880,6 @@ void init_iq_shmem(uvec3 wgsize) {
         kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
     }
 #elif defined(DATA_A_IQ2_KL)
-    // Requires wgsize.x >= 16.
     if (gl_LocalInvocationIndex.x < 16) {
         const uint i = gl_LocalInvocationIndex.x;
         const i8vec4 values = kvalues_iq2_kl_const[i];
@@ -894,9 +891,8 @@ void init_iq_shmem(uvec3 wgsize) {
 #endif
 
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
-    // Requires wgsize.x >= 16.
-    if (gl_LocalInvocationIndex.x < 16) {
-        kvalues_iqkt_scale[gl_LocalInvocationIndex.x] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[gl_LocalInvocationIndex.x]);
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        kvalues_iqkt_scale[i] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[i]);
     }
 #endif
     barrier();

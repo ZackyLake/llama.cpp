@@ -1,5 +1,6 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
 
 uint32_t test_bit_to_mask(uint32_t dat, int idx) {
     return uint32_t(bitfieldExtract(int32_t(dat), idx, 1));
@@ -69,22 +70,24 @@ const uint kpacked_iq2_k_lo = 0x1101F3E1u; // -31, -13, 1, 17
 const uint kpacked_iq2_k_hi = 0x1606F8E6u; // -26,  -8, 6, 22
 
 void init_iq2k_table() {
-    const uint workgroup_size = gl_WorkGroupSize.x; // * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
+    const uint shift1 = (gl_SubgroupInvocationID << 3u) & 0x18u;
+    const uint shift2 = (gl_SubgroupInvocationID << 1u) & 0x18u;
+    const uint8_t val1_lo = uint8_t(kpacked_iq2_k_lo >> shift1);
+    const uint8_t val2_lo = uint8_t(kpacked_iq2_k_lo >> shift2);
+    const uint8_t val1_hi = uint8_t(kpacked_iq2_k_hi >> shift1);
+    const uint8_t val2_hi = uint8_t(kpacked_iq2_k_hi >> shift2);
+    const uint16_t base_lo_u16 = pack16(i8vec2(val1_lo, val2_lo));
+    const uint16_t base_hi_u16 = pack16(i8vec2(val1_hi, val2_hi));
+    const uint32_t base_lo = uint32_t(base_lo_u16) << 8u;
+    const uint32_t base_hi = uint32_t(base_hi_u16) << 8u;
     // assume only gl_WorkGroupSize.x and 256 being multiplies of 4*it.
-    for (uint index_ = gl_LocalInvocationIndex * 4u; index_ < 256u; index_ += workgroup_size * 4u) {
+    for (uint index_ = (gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID) * 4u;
+         index_ < 256u; index_ += gl_WorkGroupSize.x * 4u) {
 
-        const uint shift1 = (index_ << 1u) & 0x18u;
-        const uint shift2 = (index_ >> 1u) & 0x18u;
         const uint shift3 = (index_ >> 3u) & 0x18u;
 
-        const uint32_t pack_lo = pack32(i8vec4(0,
-            uint8_t(kpacked_iq2_k_lo >> shift1),
-            uint8_t(kpacked_iq2_k_lo >> shift2),
-            uint8_t(kpacked_iq2_k_lo >> shift3)));
-        const uint32_t pack_hi = pack32(i8vec4(0,
-            uint8_t(kpacked_iq2_k_hi >> shift1),
-            uint8_t(kpacked_iq2_k_hi >> shift2),
-            uint8_t(kpacked_iq2_k_hi >> shift3)));
+        const uint32_t pack_lo = base_lo | ((kpacked_iq2_k_lo << (24u - shift3)) & 0xff000000u);
+        const uint32_t pack_hi = base_hi | ((kpacked_iq2_k_hi << (24u - shift3)) & 0xff000000u);
 
         iq2k_table[index_] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
         iq2k_table[256u + index_] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
@@ -143,14 +146,36 @@ int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
 #if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
 
 shared uint16_t iq3k_table[128];
+const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
+const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
 
 void init_iq3k_table() {
-    for (uint index = gl_LocalInvocationIndex; index < 64u; index += gl_WorkGroupSize.x) {
-        const i8vec2 values = i8vec2(kvalues_iq3_k[index & 7u], kvalues_iq3_k[index >> 3u]);
-        iq3k_table[index] = uint16_t(pack16(values));
-        iq3k_table[64u + index] = uint16_t(pack16(values + i8vec2(4)));
+#define WG0_INIT 0
+#if WG0_INIT
+    if (gl_SubgroupID == 0) {
+#endif
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint index = laneid * 4u;
+    const i8vec4 low = i8vec4(unpack8(bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo));
+    const uint high_target4 = bool(laneid & 8u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint high_target_shift = ((laneid / 2u) % 4u) * 8u;
+    const int8_t high = int8_t(high_target4 >> high_target_shift);
+    const i8vec4 low_hi = low + i8vec4(4);
+    const int8_t high_hi = high + int8_t(4);
+    if (laneid < 16u) {
+        iq3k_table[index     ] = uint16_t(pack16(i8vec2(low.x, high)));
+        iq3k_table[index + 1u] = uint16_t(pack16(i8vec2(low.y, high)));
+        iq3k_table[index + 2u] = uint16_t(pack16(i8vec2(low.z, high)));
+        iq3k_table[index + 3u] = uint16_t(pack16(i8vec2(low.w, high)));
+        iq3k_table[64u + index     ] = uint16_t(pack16(i8vec2(low_hi.x, high_hi)));
+        iq3k_table[64u + index + 1u] = uint16_t(pack16(i8vec2(low_hi.y, high_hi)));
+        iq3k_table[64u + index + 2u] = uint16_t(pack16(i8vec2(low_hi.z, high_hi)));
+        iq3k_table[64u + index + 3u] = uint16_t(pack16(i8vec2(low_hi.w, high_hi)));
     }
-    barrier();
+#if WG0_INIT
+    }
+    subgroupBarrier();
+#endif
 }
 
 int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, bool is_hi_table) {
@@ -485,6 +510,222 @@ float get_d_scale(uint ib, uint iqs) {
 }
 
 #endif
+
+
+#if defined(SG_IQK)
+
+#if defined(DATA_A_IQ2_K)
+#define SG_IQK_LANES_PER_32       (QUANT_K_Q8_1 / SG_K)
+#define SG_IQK_QS_PER_HALF        (QUANT_K_Q8_1 / 4)
+
+void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale) {
+    const uint16_t lane = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t ib32 = uint16_t(lane / SG_IQK_LANES_PER_32);
+    const uint16_t extra_bit_idx = uint16_t(lane / (SUBGROUP_SIZE / 16u));
+    const uint qs_u32 = data_a_packed32[ib_k].qs[lane % uint16_t(16)];
+
+    const uint16_t q_offset = uint16_t((lane * SG_QS_PER_ITER) % SG_IQK_QS_PER_HALF);
+    const uint16_t qs_base = lane >= (SUBGROUP_SIZE / 2u) ? uint16_t(SG_IQK_QS_PER_HALF) : uint16_t(0);
+    const uint16_t shift_l = uint16_t(2u * (ib32 % 4u));
+    const bool is_hi_table = bool((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1));
+
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+        const uint q32 = q_offset + q;
+        const uint q2 = subgroupShuffle(qs_u32, qs_base + q32);
+        qs_a[q] = unpack_iq2_k((q2 >> shift_l) & 0x03030303u, is_hi_table);
+    }
+
+    const uint8_t scale_l = data_a[ib_k].scales[ib32];
+    const bool scale_high_half = bool(lane & (SG_IQK_LANES_PER_32 / 2u));
+    a_scale = float(data_a[ib_k].d) * float(int32_t((scale_l >> (scale_high_half ? 4 : 0)) & uint8_t(0x0F)) - 8);
+}
+#endif
+
+#if defined(DATA_A_IQ3_K)
+#define SG_IQK_LANES_PER_32      (QUANT_K_Q8_1 / SG_K)
+#define SG_IQK_QS_PER_HALF       (QUANT_K_Q8_1 / 4)
+
+// A 32-element IQ3K sub-block is split across SG_IQK_LANES_PER_32 lanes.
+// Each lane owns SG_K elements and SG_QS_PER_ITER packed int32 values.
+void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale) {
+    const uint16_t lane = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t ib32 = uint16_t(lane / SG_IQK_LANES_PER_32);
+    const uint16_t extra_bit_idx = uint16_t(lane / (SUBGROUP_SIZE / 16u));
+
+    const uint qs_offset = 2u * (lane % uint16_t(16));
+    const uint qs_u32 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_offset],
+                                       data_a_packed16[ib_k].qs[qs_offset + 1u]));
+
+    const uint qh_offset = 2u * (lane % uint16_t(8));
+    const uint qh_u32 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_offset],
+                                       data_a_packed16[ib_k].qh[qh_offset + 1u]));
+
+    const uint16_t q_offset = uint16_t((lane * SG_QS_PER_ITER) % SG_IQK_QS_PER_HALF);
+    const uint16_t qs_base = lane >= (SUBGROUP_SIZE / 2u) ? uint16_t(SG_IQK_QS_PER_HALF) : uint16_t(0);
+    const uint16_t shift_h = uint16_t(ib32);
+    const uint16_t shift_l = uint16_t(2u * (ib32 % 4u));
+    const uint table_offset = ((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1)) << 6;
+
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+        const uint q32 = q_offset + q;
+        const uint ql = subgroupShuffle(qs_u32, qs_base + q32);
+        const uint qh = subgroupShuffle(qh_u32, q32);
+        const uint indexes = ((ql >> shift_l) & 0x03030303u) |
+                             (((qh >> shift_h) & 0x01010101u) << 2u);
+        const uint index0 = table_offset + dotPacked4x8EXT(indexes & 0xffffu, 0x00000801u);
+        const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
+        qs_a[q] = int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
+    }
+
+    const uint16_t scale_l = uint16_t(data_a[ib_k].scales_l[ib32]);
+    const bool scale_high_half = bool(lane & (SG_IQK_LANES_PER_32 / 2u));
+    const uint16_t scale_l_shifted = scale_l >> (scale_high_half ? 4 : 0);
+    const int16_t scale = int16_t((scale_l_shifted & uint16_t(0x0F)) * uint16_t(2) + uint16_t(1));
+    const bool sign = bool((data_a[ib_k].scales_h >> extra_bit_idx) & uint16_t(1));
+    a_scale = float(data_a[ib_k].d) * float(sign ? -scale : scale);
+}
+#endif
+
+#if defined(DATA_A_IQ4_K)
+#define SG_IQK_LANES_PER_32      (QUANT_K_Q8_1 / SG_K)
+#define SG_IQK_QS_PER_32         (QUANT_K_Q8_1 / 8)
+
+void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale) {
+    const uint16_t lane = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t ib32 = uint16_t(lane / SG_IQK_LANES_PER_32);
+    const bool scale_high_half = bool(lane & uint16_t(SG_IQK_LANES_PER_32 / 2u));
+    const uint16_t q_offset = uint16_t((uint(lane) * SG_QS_PER_ITER) % SG_IQK_QS_PER_32);
+
+#if SUBGROUP_SIZE == 16
+    const uvec2 qs_u32 = uvec2(data_a_packed32[ib_k].qs[uint(lane) * 2u],
+                               data_a_packed32[ib_k].qs[uint(lane) * 2u + 1u]);
+#else
+    const uint qs_u32 = data_a_packed32[ib_k].qs[uint(lane) & 31u];
+#endif
+
+    const uint extra_bit_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
+    const uint table_offset = ((uint(data_a[ib_k].extra) >> extra_bit_idx) & 1u) << 4u;
+    const uint shift = scale_high_half ? 4u : 0u;
+
+#if SUBGROUP_SIZE == 16
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; q += 2u) {
+        const uint q_idx = 4u * uint(ib32) + uint(q_offset) + q;
+        const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
+        qs_a[q] = unpack_iq4_k(qs_pair.x, shift, table_offset);
+        qs_a[q + 1u] = unpack_iq4_k(qs_pair.y, shift, table_offset);
+    }
+#else
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+        const uint q_idx = 4u * uint(ib32) + uint(q_offset) + q;
+        const uint q4 = subgroupShuffle(qs_u32, q_idx);
+        qs_a[q] = unpack_iq4_k(q4, shift, table_offset);
+    }
+#endif
+
+    const uint scales_h = uint(data_a[ib_k].scales_h[uint(ib32) / 2u]) >> (4u * (uint(ib32) % 2u));
+    const uint scales_l = uint(data_a[ib_k].scales_l[ib32]);
+    const uint scale = scale_high_half
+        ? ((scales_l >> 4u) | ((scales_h << 2u) & 0x30u))
+        : ((scales_l & 0x0Fu) | ((scales_h << 4u) & 0x30u));
+    a_scale = float(data_a[ib_k].d) * float(int32_t(scale) - 32);
+}
+#endif
+
+#if defined(DATA_A_IQ5_K)
+#define SG_IQK_LANES_PER_32      (QUANT_K_Q8_1 / SG_K)
+#define SG_IQK_QS_PER_32         (QUANT_K_Q8_1 / 4)
+
+void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale) {
+    const uint16_t lane = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t ib32 = uint16_t(lane / SG_IQK_LANES_PER_32);
+    const bool scale_high_half = bool(lane & uint16_t(SG_IQK_LANES_PER_32 / 2u));
+    const uint16_t q_offset = uint16_t((uint(lane) * SG_QS_PER_ITER) % SG_IQK_QS_PER_32);
+
+#if SUBGROUP_SIZE == 16
+    const uvec2 qs_u32 = uvec2(data_a_packed32[ib_k].qs[uint(lane) * 2u],
+                               data_a_packed32[ib_k].qs[uint(lane) * 2u + 1u]);
+#else
+    const uint qs_u32 = data_a_packed32[ib_k].qs[uint(lane) & 31u];
+#endif
+    const uint qh_u32 = data_a_packed32[ib_k].qh[uint(lane) & 7u];
+
+    const uint extra_bit_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
+    const uint table_offset = ((uint(data_a[ib_k].extra) >> extra_bit_idx) & 1u) << 5u;
+
+#if SUBGROUP_SIZE == 16
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; q += 2u) {
+        const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
+        const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
+        const uint qh0 = subgroupShuffle(qh_u32, uint(q_offset) + q);
+        const uint qh1 = subgroupShuffle(qh_u32, uint(q_offset) + q + 1u);
+        qs_a[q] = unpack_iq5_k(qs_pair.x, qh0, uint(ib32), table_offset);
+        qs_a[q + 1u] = unpack_iq5_k(qs_pair.y, qh1, uint(ib32), table_offset);
+    }
+#else
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+        const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
+        const uint qs = subgroupShuffle(qs_u32, q_idx);
+        const uint qh = subgroupShuffle(qh_u32, uint(q_offset) + q);
+        qs_a[q] = unpack_iq5_k(qs, qh, uint(ib32), table_offset);
+    }
+#endif
+
+    const uint scales_h = uint(data_a[ib_k].scales_h[uint(ib32) / 2u]) >> (4u * (uint(ib32) % 2u));
+    const uint scales_l = uint(data_a[ib_k].scales_l[ib32]);
+    const uint scale = scale_high_half
+        ? ((scales_l >> 4u) | ((scales_h << 2u) & 0x30u))
+        : ((scales_l & 0x0Fu) | ((scales_h << 4u) & 0x30u));
+    a_scale = float(data_a[ib_k].d) * float(int32_t(scale) - 32);
+}
+#endif
+
+#if defined(DATA_A_IQ6_K)
+#define SG_IQK_LANES_PER_32      (QUANT_K_Q8_1 / SG_K)
+#define SG_IQK_QS_PER_32         (QUANT_K_Q8_1 / 4)
+
+void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale) {
+    const uint16_t lane = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t ib32 = uint16_t(lane / SG_IQK_LANES_PER_32);
+    const bool scale_high_half = bool(lane & uint16_t(SG_IQK_LANES_PER_32 / 2u));
+    const uint16_t q_offset = uint16_t((uint(lane) * SG_QS_PER_ITER) % SG_IQK_QS_PER_32);
+
+#if SUBGROUP_SIZE == 16
+    const uvec2 qs_u32 = uvec2(data_a_packed32[ib_k].qs[uint(lane) * 2u],
+                               data_a_packed32[ib_k].qs[uint(lane) * 2u + 1u]);
+#else
+    const uint qs_u32 = data_a_packed32[ib_k].qs[uint(lane) & 31u];
+#endif
+    const uint qh_u32 = data_a_packed32[ib_k].qh[uint(lane) & 15u];
+
+    const uint extra_bit_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
+    const uint table_offset = ((uint(data_a[ib_k].extra) >> extra_bit_idx) & 1u) << 6u;
+    const uint shift = 2u * (uint(ib32) % 4u);
+
+#if SUBGROUP_SIZE == 16
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; q += 2u) {
+        const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
+        const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
+        const uint qh0 = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q);
+        const uint qh1 = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q + 1u);
+        qs_a[q] = unpack_iq6_k(qs_pair.x, qh0, shift, table_offset);
+        qs_a[q + 1u] = unpack_iq6_k(qs_pair.y, qh1, shift, table_offset);
+    }
+#else
+    [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
+        const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
+        const uint qs = subgroupShuffle(qs_u32, q_idx);
+        const uint qh = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q);
+        qs_a[q] = unpack_iq6_k(qs, qh, shift, table_offset);
+    }
+#endif
+
+    const uint scale_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
+    a_scale = float(data_a[ib_k].d) * float(data_a[ib_k].scales[scale_idx]);
+}
+#endif
+
+#endif
+
 
 #if defined(DATA_A_IQK_ROW)
 #extension GL_EXT_expect_assume : require
