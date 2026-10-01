@@ -935,7 +935,8 @@ void process_shaders() {
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", "mul_mat_vec_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", "mul_mat_vec_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
 
-        if (tname == "iq2_k" || tname == "iq3_k" || tname == "iq4_k" || tname == "iq5_k" || tname == "iq6_k") {
+        if (tname == "iq2_k" || tname == "iq3_k" || tname == "iq4_k" || tname == "iq5_k" || tname == "iq6_k" ||
+            tname == "iq2_ks" || tname == "iq3_ks" || tname == "iq4_ks" || tname == "iq5_ks") {
             for (const uint32_t subgroup_size : {16u, 32u, 64u}) {
                 const std::string subgroup_size_define = std::to_string(subgroup_size);
                 const std::map<std::string, std::string> sg_defines = merge_maps(base_dict, {
@@ -1481,7 +1482,7 @@ void write_output_files() {
             src << "const uint64_t arr_dmmv_id_" << tname << "_q8_1_f32_len[3] = {mul_mat_vec_id_" << tname << "_q8_1_f32_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_len, mul_mat_vec_id_" << tname << "_q8_1_f32_subgroup_no_shmem_len};\n";
         }
     }
-    for (const std::string& tname : {"iq2_k", "iq3_k", "iq4_k", "iq5_k", "iq6_k"}) {
+    for (const std::string& tname : {"iq2_k", "iq3_k", "iq4_k", "iq5_k", "iq6_k", "iq2_ks", "iq3_ks", "iq4_ks", "iq5_ks"}) {
         hdr << "extern const void * arr_dmmv_sg_"   << tname << "_q8_1_f32_data[3];\n";
         hdr << "extern const uint64_t arr_dmmv_sg_" << tname << "_q8_1_f32_len[3];\n";
         hdr << "extern const void * arr_dmmv_id_sg_"   << tname << "_q8_1_f32_data[3];\n";
