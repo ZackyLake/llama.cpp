@@ -6,9 +6,12 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_clustered: enable
 
+#define IQK_MMQ_LUT
 #define MMQ
 #define SG_IQK 1
 #define B_TYPE block_q8_1_x4
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
 
 #include "mul_mat_vec_base.glsl"
 
@@ -26,11 +29,7 @@
 #error unsupported subgroup size
 #endif
 
-
-layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
-
 #include "mmq_iqk.glsl"
-
 
 uint a_offset, b_offset, d_offset;
 #ifdef DATA_A_IQK_ROW

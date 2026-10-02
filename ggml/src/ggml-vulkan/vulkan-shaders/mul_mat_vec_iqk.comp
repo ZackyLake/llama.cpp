@@ -3,12 +3,13 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
 #extension GL_EXT_integer_dot_product : require
 
+#define IQK_MMQ_LUT
 #define MMQ
 #define B_TYPE block_q8_1_x4
 
-#include "mul_mat_vec_base.glsl"
-
 layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+#include "mul_mat_vec_base.glsl"
 
 #include "mmq_iqk.glsl"
 
@@ -18,8 +19,6 @@ uint a_offset, b_offset, d_offset;
 
 int32_t cache_b_qs[K_PER_ITER / 4];
 vec2 cache_b_ds;
-
-#include "mul_mat_vecq_funcs.glsl"
 
 void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint col) {
     int32_t qs_a[8];

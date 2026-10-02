@@ -3175,6 +3175,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 #define OCP_DMMV_DATA(NAME, REDUC) NAME ## _data[REDUC]
 #endif
 
+    static const auto wgsg  = std::getenv("iqksg");
+    static const bool usesg = (wgsg != nullptr && std::string("true") == wgsg);
+
     for (uint32_t w = 0; w < DMMV_WG_SIZE_COUNT; ++w) {
         const uint32_t wg_size_subgroup   = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size : (subgroup_size * 4);
         const uint32_t wg_size_subgroup16 = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size16 : (subgroup_size16 * 4);
@@ -3274,7 +3277,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 if (ggml_vk_iqk_dp4a_support(device)) {
                     const uint32_t subgroup_size_16 = std::max(subgroup_size_int, 16u);
                     const uint32_t wg_size_subgroup_16 = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_16 : (subgroup_size_16 * 4);
-                    const auto subgroup_idx = get_iqk_sg_index(subgroup_size_16);
+                    const auto subgroup_idx = usesg ? get_iqk_sg_index(subgroup_size_16) : std::nullopt;
                     const char * const subgroup_suffix[] = {"sg16", "sg32", "sg64"};
 #define X_SG_MMVQ_IQK_FP32(TYPE, tstr) \
                     ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][TYPE][i], (std::string("mul_mat_vec_sg_" #tstr "_q8_1_f32_") + subgroup_suffix[*subgroup_idx]).c_str(), arr_dmmv_sg_##tstr##_q8_1_f32_len[*subgroup_idx], arr_dmmv_sg_##tstr##_q8_1_f32_data[*subgroup_idx], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1, 1, 1}, {wg_size_subgroup_16, 1, i+1}, 1, true, use_subgroups, subgroup_size_16);
@@ -3364,7 +3367,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (ggml_vk_iqk_dp4a_support(device)) {
                 const uint32_t subgroup_size_16 = std::max(subgroup_size_int, 16u);
                 const uint32_t wg_size_subgroup_16 = (w == DMMV_WG_SIZE_SUBGROUP) ? subgroup_size_16 : (subgroup_size_16 * 4);
-                const auto subgroup_idx = get_iqk_sg_index(subgroup_size_16);
+                const auto subgroup_idx = usesg ? get_iqk_sg_index(subgroup_size_16) : std::nullopt;
                 const char * const subgroup_suffix[] = {"sg16", "sg32", "sg64"};
 #define X_SG_MMVQ_ID_IQK_FP32(TYPE, tstr) \
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][TYPE], (std::string("mul_mat_vec_id_sg_" #tstr "_q8_1_f32_") + subgroup_suffix[*subgroup_idx]).c_str(), arr_dmmv_id_sg_##tstr##_q8_1_f32_len[*subgroup_idx], arr_dmmv_id_sg_##tstr##_q8_1_f32_data[*subgroup_idx], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1, 1, 1}, {wg_size_subgroup_16, 1}, 1, true, use_subgroups, subgroup_size_16);

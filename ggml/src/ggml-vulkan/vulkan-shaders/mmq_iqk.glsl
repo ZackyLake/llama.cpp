@@ -62,122 +62,14 @@ uint8_t test_bit_to_get_high4(uint8_t dat, int idx, uint8_t val) {
 }
 
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
-
-#if 1
-
-shared uint32_t iq2k_table[512];
-const uint kpacked_iq2_k_lo = 0x1101F3E1u; // -31, -13, 1, 17
-const uint kpacked_iq2_k_hi = 0x1606F8E6u; // -26,  -8, 6, 22
-
-void init_iq2k_table() {
-    const uint shift1 = (gl_SubgroupInvocationID << 3u) & 0x18u;
-    const uint shift2 = (gl_SubgroupInvocationID << 1u) & 0x18u;
-    const uint8_t val1_lo = uint8_t(kpacked_iq2_k_lo >> shift1);
-    const uint8_t val2_lo = uint8_t(kpacked_iq2_k_lo >> shift2);
-    const uint8_t val1_hi = uint8_t(kpacked_iq2_k_hi >> shift1);
-    const uint8_t val2_hi = uint8_t(kpacked_iq2_k_hi >> shift2);
-    const uint16_t base_lo_u16 = pack16(i8vec2(val1_lo, val2_lo));
-    const uint16_t base_hi_u16 = pack16(i8vec2(val1_hi, val2_hi));
-    const uint32_t base_lo = uint32_t(base_lo_u16) << 8u;
-    const uint32_t base_hi = uint32_t(base_hi_u16) << 8u;
-    // assume only gl_WorkGroupSize.x and 256 being multiplies of 4*it.
-    for (uint index_ = (gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID) * 4u;
-         index_ < 256u; index_ += gl_WorkGroupSize.x * 4u) {
-
-        const uint shift3 = (index_ >> 3u) & 0x18u;
-
-        const uint32_t pack_lo = base_lo | ((kpacked_iq2_k_lo << (24u - shift3)) & 0xff000000u);
-        const uint32_t pack_hi = base_hi | ((kpacked_iq2_k_hi << (24u - shift3)) & 0xff000000u);
-
-        iq2k_table[index_] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
-        iq2k_table[256u + index_] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
-
-        iq2k_table[index_ + 1u] = pack_lo + uint8_t(kvalues_iq2_k_const[1]);
-        iq2k_table[256u + index_ + 1u] = pack_hi + uint8_t(kvalues_iq2_k_const[5]);
-
-        iq2k_table[index_ + 2u] = pack_lo + uint8_t(kvalues_iq2_k_const[2]);
-        iq2k_table[256u + index_ + 2u] = pack_hi + uint8_t(kvalues_iq2_k_const[6]);
-
-        iq2k_table[index_ + 3u] = pack_lo + uint8_t(kvalues_iq2_k_const[3]);
-        iq2k_table[256u + index_ + 3u] = pack_hi + uint8_t(kvalues_iq2_k_const[7]);
-    }
-    barrier();
-}
-
 int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
     const uint table_offset = is_hi_table ? 256u : 0u;
     const uint index = table_offset + dotPacked4x8EXT(values, 0x40100401u);
     return int32_t(iq2k_table[index]);
 }
-
-#elif 0
-
-#extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
-#extension GL_EXT_shader_subgroup_extended_types_int8 : require
-
-int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
-    if (is_hi_table) values += 0x04040404u;
-    const u8vec4 indexes = unpack8(values);
-    const int8_t lut = gl_SubgroupInvocationID < 8
-        ? kvalues_iq2_k_const[gl_SubgroupInvocationID]
-        : int8_t(0);
-    return pack32(i8vec4(subgroupShuffle(lut, indexes.x),
-                         subgroupShuffle(lut, indexes.y),
-                         subgroupShuffle(lut, indexes.z),
-                         subgroupShuffle(lut, indexes.w)));
-}
-
-#elif 0
-
-int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
-    if (is_hi_table) values += 0x04040404u;
-    const u8vec4 indexes = unpack8(values);
-    return pack32(i8vec4(kvalues_iq2_k[indexes.x],
-                         kvalues_iq2_k[indexes.y],
-                         kvalues_iq2_k[indexes.z],
-                         kvalues_iq2_k[indexes.w]));
-}
-
-#endif
-
 #endif
 
 #if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
-
-shared uint16_t iq3k_table[128];
-const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
-const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
-
-void init_iq3k_table() {
-#define WG0_INIT 0
-#if WG0_INIT
-    if (gl_SubgroupID == 0) {
-#endif
-    const uint laneid = gl_SubgroupInvocationID;
-    const uint index = laneid * 4u;
-    const i8vec4 low = i8vec4(unpack8(bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo));
-    const uint high_target4 = bool(laneid & 8u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
-    const uint high_target_shift = ((laneid / 2u) % 4u) * 8u;
-    const int8_t high = int8_t(high_target4 >> high_target_shift);
-    const i8vec4 low_hi = low + i8vec4(4);
-    const int8_t high_hi = high + int8_t(4);
-    if (laneid < 16u) {
-        iq3k_table[index     ] = uint16_t(pack16(i8vec2(low.x, high)));
-        iq3k_table[index + 1u] = uint16_t(pack16(i8vec2(low.y, high)));
-        iq3k_table[index + 2u] = uint16_t(pack16(i8vec2(low.z, high)));
-        iq3k_table[index + 3u] = uint16_t(pack16(i8vec2(low.w, high)));
-        iq3k_table[64u + index     ] = uint16_t(pack16(i8vec2(low_hi.x, high_hi)));
-        iq3k_table[64u + index + 1u] = uint16_t(pack16(i8vec2(low_hi.y, high_hi)));
-        iq3k_table[64u + index + 2u] = uint16_t(pack16(i8vec2(low_hi.z, high_hi)));
-        iq3k_table[64u + index + 3u] = uint16_t(pack16(i8vec2(low_hi.w, high_hi)));
-    }
-#if WG0_INIT
-    }
-    subgroupBarrier();
-#endif
-}
-
 int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, bool is_hi_table) {
     const uint16_t shift_l = (shift_h & uint16_t(3)) << 1;
     const uint indexes = ((ql >> shift_l) & 0x03030303u) |
@@ -187,7 +79,6 @@ int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, bool is_hi_tabl
     const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
     return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
 }
-
 int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, uint16_t extra_bit01, int hi_table_bit_idx) {
     const uint16_t shift_l = (shift_h & uint16_t(3)) << 1;
     const uint indexes = ((ql >> shift_l) & 0x03030303u) |
@@ -197,25 +88,9 @@ int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, uint16_t extra_
     const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
     return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
 }
-
 #endif
 
 #if defined(DATA_A_IQ2_KL)
-
-shared uint16_t iq2kl_table[64];
-
-void init_iq2kl_table() {
-    if (gl_LocalInvocationIndex < 16u) {
-        const i8vec4 values = kvalues_iq2_kl_const[gl_LocalInvocationIndex];
-        const uint index = 4u * gl_LocalInvocationIndex;
-        iq2kl_table[index     ] = pack16(values.xy);
-        iq2kl_table[index + 1u] = pack16(values.yx);
-        iq2kl_table[index + 2u] = pack16(values.zw);
-        iq2kl_table[index + 3u] = pack16(values.wz);
-    }
-    barrier();
-}
-
 #endif
 
 #if defined(DATA_A_IQ2_K)
@@ -238,6 +113,33 @@ void prepare_a_k32_iter(uint ib_k, uint8_t ib32, out int32_t qs_a[8], out vec2 a
     const float d = float(data_a[ib_k].d);
     a_scales = vec2(d * float(int32_t(scale & uint8_t(0x0F)) - 8),
                     d * float(int32_t(scale >> uint8_t(4)) - 8));
+}
+
+void prepare_a_k16x_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const bool is_high_half = bool(laneid & uint16_t(2));
+    const uint16_t sub4x16_idx = laneid & uint16_t(3);
+    const uint16_t qs_idx = sub4x16_idx << 2u;
+    const uvec4 qs = uvec4(data_a_packed32[ib_k].qs[qs_idx     ],
+                           data_a_packed32[ib_k].qs[qs_idx + 1u],
+                           data_a_packed32[ib_k].qs[qs_idx + 2u],
+                           data_a_packed32[ib_k].qs[qs_idx + 3u]);
+    const uint32_t scale_packed = data_a_packed32[ib_k].scales[is_high_half ? 1u : 0u];
+    const uint32_t scale_shifted = scale_packed >> (is_high_16 ? 4 : 0);
+    const uint32_t scale_sub8 = ((scale_shifted | 0xF0F0F0F0u) - 0x78787878u) ^ 0x80808080u;
+    a_scales = unpack8(int32_t(scale_sub8)); // unpack8(int32_t(scale_shifted & 0x0F0F0F0Fu)) - i8vec4(-8)
+
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
+        const uint16_t shift = i << 1u;
+        const uint16_t extra_shift_idx = i * uint16_t(2) + (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
+        const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq2_k((qs.x >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.y >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.z >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.w >> shift) & 0x03030303u, is_hi_table));
+    }
 }
 #endif
 
@@ -625,8 +527,8 @@ void prepare_a_sg_scatter2(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out int8
     const uint8_t scale_l = data_a[ib_k].scales[ib32];
     qscale_a = int8_t((scale_l >> (scale_high_half ? 4u : 0u)) & uint8_t(0x0F)) - int8_t(8);
 }
-#define SG_SUB_SCALE 1
-#define SG_SCATTER_K 1
+//#define SG_SUB_SCALE 1
+//#define SG_SCATTER_K 1
 #endif
 
 #if defined(DATA_A_IQ3_K)
@@ -747,7 +649,7 @@ void prepare_a_sg_scatter2(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out int8
     qscale_a = sign ? -scale_shifted : scale_shifted;
 }
 
-#define SG_SCATTER_K 1
+//#define SG_SCATTER_K 1
 #endif
 
 #if defined(DATA_A_IQ4_K)

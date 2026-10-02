@@ -762,14 +762,25 @@ const i8vec4 kvalues_iq2_kl_const[16] = {
     { int8_t( 13), int8_t( 13), int8_t( 28), int8_t(-63) }, { int8_t( 28), int8_t(-23), int8_t( 28), int8_t(  1) },
     { int8_t( 28), int8_t( 28), int8_t( 28), int8_t( 47) }, { int8_t( 47), int8_t(-23), int8_t( 47), int8_t( 13) }
 };
+
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq2kl_table[64];
+#else
 shared IQK_LUT_TYPE kvalues_iq2_kl[64];
 #endif
+#endif
+
 
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
 const int8_t kvalues_iq2_k_const[8] = {
     int8_t(-31), int8_t(-13), int8_t(1), int8_t(17), int8_t(-26), int8_t(-8), int8_t(6), int8_t(22)
 };
+
+#if defined(IQK_MMQ_LUT)
+shared uint32_t iq2k_table[512];
+#else
 shared IQK_LUT_TYPE kvalues_iq2_k[8];
+#endif
 #endif
 
 #if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
@@ -777,7 +788,12 @@ const int8_t kvalues_iq3_k_const[16] = {
     int8_t(-63), int8_t(-40), int8_t(-23), int8_t(-10), int8_t(1), int8_t(13), int8_t(28), int8_t(47),
     int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
 };
+
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq3k_table[128];
+#else
 shared IQK_LUT_TYPE kvalues_iq3_k[16];
+#endif
 #endif
 
 #if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
@@ -854,6 +870,97 @@ const int8_t kvalues_iqkt_scale_const[16] = {
 shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
 #endif
 
+#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL))
+#extension GL_KHR_shader_subgroup_basic : require
+
+#if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
+const uint kpacked_iq2_k_lo = 0x1101F3E1u; // -31, -13, 1, 17
+const uint kpacked_iq2_k_hi = 0x1606F8E6u; // -26,  -8, 6, 22
+void init_iq2k_table() {
+    const uint shift1 = (gl_SubgroupInvocationID << 3u) & 0x18u;
+    const uint shift2 = (gl_SubgroupInvocationID << 1u) & 0x18u;
+    const uint8_t val1_lo = uint8_t(kpacked_iq2_k_lo >> shift1);
+    const uint8_t val2_lo = uint8_t(kpacked_iq2_k_lo >> shift2);
+    const uint8_t val1_hi = uint8_t(kpacked_iq2_k_hi >> shift1);
+    const uint8_t val2_hi = uint8_t(kpacked_iq2_k_hi >> shift2);
+    const uint16_t base_lo_u16 = pack16(i8vec2(val1_lo, val2_lo));
+    const uint16_t base_hi_u16 = pack16(i8vec2(val1_hi, val2_hi));
+    const uint32_t base_lo = uint32_t(base_lo_u16) << 8u;
+    const uint32_t base_hi = uint32_t(base_hi_u16) << 8u;
+    // assume only gl_WorkGroupSize.x and 256 being multiplies of 4*it.
+    for (uint index_ = (gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID) * 4u;
+         index_ < 256u; index_ += gl_WorkGroupSize.x * 4u) {
+
+        const uint shift3 = (index_ >> 3u) & 0x18u;
+
+        const uint32_t pack_lo = base_lo | ((kpacked_iq2_k_lo << (24u - shift3)) & 0xff000000u);
+        const uint32_t pack_hi = base_hi | ((kpacked_iq2_k_hi << (24u - shift3)) & 0xff000000u);
+
+        iq2k_table[index_] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
+        iq2k_table[256u + index_] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
+
+        iq2k_table[index_ + 1u] = pack_lo + uint8_t(kvalues_iq2_k_const[1]);
+        iq2k_table[256u + index_ + 1u] = pack_hi + uint8_t(kvalues_iq2_k_const[5]);
+
+        iq2k_table[index_ + 2u] = pack_lo + uint8_t(kvalues_iq2_k_const[2]);
+        iq2k_table[256u + index_ + 2u] = pack_hi + uint8_t(kvalues_iq2_k_const[6]);
+
+        iq2k_table[index_ + 3u] = pack_lo + uint8_t(kvalues_iq2_k_const[3]);
+        iq2k_table[256u + index_ + 3u] = pack_hi + uint8_t(kvalues_iq2_k_const[7]);
+    }
+    barrier();
+}
+#endif
+
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
+const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
+void init_iq3k_table() {
+#define WG0_INIT 0
+#if WG0_INIT
+    if (gl_SubgroupID == 0) {
+#endif
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint index = laneid * 4u;
+    const i8vec4 low = i8vec4(unpack8(bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo));
+    const uint high_target4 = bool(laneid & 8u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint high_target_shift = ((laneid / 2u) % 4u) * 8u;
+    const int8_t high = int8_t(high_target4 >> high_target_shift);
+    const i8vec4 low_hi = low + i8vec4(4);
+    const int8_t high_hi = high + int8_t(4);
+    if (laneid < 16u) {
+        iq3k_table[index     ] = uint16_t(pack16(i8vec2(low.x, high)));
+        iq3k_table[index + 1u] = uint16_t(pack16(i8vec2(low.y, high)));
+        iq3k_table[index + 2u] = uint16_t(pack16(i8vec2(low.z, high)));
+        iq3k_table[index + 3u] = uint16_t(pack16(i8vec2(low.w, high)));
+        iq3k_table[64u + index     ] = uint16_t(pack16(i8vec2(low_hi.x, high_hi)));
+        iq3k_table[64u + index + 1u] = uint16_t(pack16(i8vec2(low_hi.y, high_hi)));
+        iq3k_table[64u + index + 2u] = uint16_t(pack16(i8vec2(low_hi.z, high_hi)));
+        iq3k_table[64u + index + 3u] = uint16_t(pack16(i8vec2(low_hi.w, high_hi)));
+    }
+#if WG0_INIT
+    }
+    subgroupBarrier();
+#endif
+}
+#endif
+
+#if defined(DATA_A_IQ2_KL)
+void init_iq2kl_table() {
+    if (gl_LocalInvocationIndex < 16u) {
+        const i8vec4 values = kvalues_iq2_kl_const[gl_LocalInvocationIndex];
+        const uint index = 4u * gl_LocalInvocationIndex;
+        iq2kl_table[index     ] = pack16(values.xy);
+        iq2kl_table[index + 1u] = pack16(values.yx);
+        iq2kl_table[index + 2u] = pack16(values.zw);
+        iq2kl_table[index + 3u] = pack16(values.wz);
+    }
+    barrier();
+}
+#endif
+
+#else
+
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ6_K) || \
     defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ4_KS) || \
     defined(DATA_A_IQ5_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
@@ -863,23 +970,13 @@ void init_iq_shmem(uvec3 wgsize) {
     for (uint i = gl_LocalInvocationIndex.x; i < 8; i += wgsize.x) {
         kvalues_iq2_k[i] = IQK_LUT_TYPE(kvalues_iq2_k_const[i]);
     }
-#elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
+#endif
+#if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
     for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
         kvalues_iq3_k[i] = IQK_LUT_TYPE(kvalues_iq3_k_const[i]);
     }
-#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
-        kvalues_iq4_k[i] = IQK_LUT_TYPE(kvalues_iq4_k_const[i]);
-    }
-#elif defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
-        kvalues_iq5_k[i] = IQK_LUT_TYPE(kvalues_iq5_k_const[i]);
-    }
-#elif defined(DATA_A_IQ6_K)
-    for (uint i = gl_LocalInvocationIndex.x; i < 128; i += wgsize.x) {
-        kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
-    }
-#elif defined(DATA_A_IQ2_KL)
+#endif
+#if defined(DATA_A_IQ2_KL)
     if (gl_LocalInvocationIndex.x < 16) {
         const uint i = gl_LocalInvocationIndex.x;
         const i8vec4 values = kvalues_iq2_kl_const[i];
@@ -889,7 +986,21 @@ void init_iq_shmem(uvec3 wgsize) {
         kvalues_iq2_kl[4 * i + 3] = IQK_LUT_TYPE(values.w);
     }
 #endif
-
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 32; i += wgsize.x) {
+        kvalues_iq4_k[i] = IQK_LUT_TYPE(kvalues_iq4_k_const[i]);
+    }
+#endif
+#if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+    for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
+        kvalues_iq5_k[i] = IQK_LUT_TYPE(kvalues_iq5_k_const[i]);
+    }
+#endif
+#if defined(DATA_A_IQ6_K)
+    for (uint i = gl_LocalInvocationIndex.x; i < 128; i += wgsize.x) {
+        kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
+    }
+#endif
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)
     for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
         kvalues_iqkt_scale[i] = IQK_LUT_TYPE(kvalues_iqkt_scale_const[i]);
@@ -897,6 +1008,7 @@ void init_iq_shmem(uvec3 wgsize) {
 #endif
     barrier();
 }
+#endif
 #endif
 
 // IQuants
