@@ -927,7 +927,7 @@ void process_shaders() {
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
     for (const auto& tname : iqk_type_names) {
         const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
-        const std::string shader = tname == "iq2_k" ? "mul_mat_vec_iqk2.comp" : "mul_mat_vec_iqk.comp";
+        const std::string shader = (tname == "iq2_k" || tname == "iq3_k") ? "mul_mat_vec_iqk2.comp" : "mul_mat_vec_iqk.comp";
         string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
         string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
         string_to_spv("mul_mat_vec_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
@@ -935,6 +935,9 @@ void process_shaders() {
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
         string_to_spv("mul_mat_vec_id_" + tname + "_q8_1_f32_subgroup_no_shmem", shader, merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
+        string_to_spv("mul_mat_vec_sgrow_" + tname + "_q8_1_f32", "mul_mat_vec_sgrow_iqk.comp", merge_maps(base_dict, {{data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
+        string_to_spv("mul_mat_vec_id_sgrow_" + tname + "_q8_1_f32", "mul_mat_vec_sgrow_iqk.comp", merge_maps(base_dict, {{"MUL_MAT_ID", "1"}, {data_a_key, "1"}, {"D_TYPE", "float"}, {"ACC_TYPE", "float"}}));
 
         if (tname == "iq2_k" || tname == "iq3_k" || tname == "iq4_k" || tname == "iq5_k" || tname == "iq6_k" ||
             tname == "iq2_ks" || tname == "iq3_ks" || tname == "iq4_ks" || tname == "iq5_ks") {

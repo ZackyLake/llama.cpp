@@ -678,6 +678,12 @@ const int8_t kvalues_iq6_k_const[128] = {
     int8_t(-1), int8_t(1), int8_t(4), int8_t(7), int8_t(10), int8_t(13), int8_t(15), int8_t(18), int8_t(21), int8_t(24), int8_t(28), int8_t(31), int8_t(34), int8_t(37), int8_t(41), int8_t(45),
     int8_t(48), int8_t(52), int8_t(56), int8_t(60), int8_t(64), int8_t(69), int8_t(73), int8_t(78), int8_t(83), int8_t(88), int8_t(93), int8_t(99), int8_t(104), int8_t(110), int8_t(116), int8_t(122)
 };
+const uint32_t kpacked32_iq6_k_const[16] = {
+    0x938D8781u, 0xA8A39E98u, 0xBAB6B1ACu, 0xCAC6C2BEu,
+    0xD8D4D1CDu, 0xE4E1DEDBu, 0xF0EDEAE7u, 0xFBF8F5F3u,
+    0x060300FEu, 0x110E0C09u, 0x1E1B1714u, 0x2C282421u,
+    0x3B37332Fu, 0x4D48443Fu, 0x625C5752u, 0x79736D67u
+};
 shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #endif
 
@@ -789,7 +795,9 @@ const int8_t kvalues_iq3_k_const[16] = {
     int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
 };
 
-#if defined(IQK_MMQ_LUT)
+#if defined(IQK_MMQ_LUT_LARGE)
+shared uint32_t iq3k_table4[4096];
+#elif defined(IQK_MMQ_LUT)
 shared uint16_t iq3k_table[128];
 #else
 shared IQK_LUT_TYPE kvalues_iq3_k[16];
@@ -801,7 +809,11 @@ const int8_t kvalues_iq4_k_const[32] = {
     int8_t(-127), int8_t(-104), int8_t(-83), int8_t(-65), int8_t(-49), int8_t(-35), int8_t(-22), int8_t(-10), int8_t(1), int8_t(13), int8_t(25), int8_t(38), int8_t(53), int8_t(69), int8_t(89), int8_t(113),
     int8_t(-123), int8_t(-100), int8_t(-79), int8_t(-61), int8_t(-45), int8_t(-31), int8_t(-18), int8_t(-6), int8_t(5), int8_t(17), int8_t(29), int8_t(42), int8_t(57), int8_t(73), int8_t(93), int8_t(117)
 };
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq4k_table[512];
+#else
 shared IQK_LUT_TYPE kvalues_iq4_k[32];
+#endif
 #endif
 
 #if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
@@ -810,6 +822,12 @@ const int8_t kvalues_iq5_k_const[64] = {
     int8_t(-1), int8_t(5), int8_t(11), int8_t(17), int8_t(23), int8_t(29), int8_t(36), int8_t(43), int8_t(51), int8_t(59), int8_t(68), int8_t(77), int8_t(87), int8_t(97), int8_t(109), int8_t(121),
     int8_t(-124), int8_t(-112), int8_t(-101), int8_t(-90), int8_t(-81), int8_t(-72), int8_t(-63), int8_t(-55), int8_t(-48), int8_t(-41), int8_t(-34), int8_t(-28), int8_t(-22), int8_t(-16), int8_t(-10), int8_t(-4),
     int8_t(1), int8_t(7), int8_t(13), int8_t(19), int8_t(25), int8_t(31), int8_t(38), int8_t(45), int8_t(53), int8_t(61), int8_t(70), int8_t(79), int8_t(89), int8_t(99), int8_t(111), int8_t(123)
+};
+const uint32_t kpacked32_iq5_k_const[16] = {
+    0xA4998E82u, 0xC7BFB6ADu, 0xE2DCD5CEu, 0xFAF4EEE8u,
+    0x110B05FFu, 0x2B241D17u, 0x4D443B33u, 0x796D6157u,
+    0xA69B9084u, 0xC9C1B8AFu, 0xE4DED7D0u, 0xFCF6F0EAu,
+    0x130D0701u, 0x2D261F19u, 0x4F463D35u, 0x7B6F6359u
 };
 shared IQK_LUT_TYPE kvalues_iq5_k[64];
 #endif
@@ -870,7 +888,7 @@ const int8_t kvalues_iqkt_scale_const[16] = {
 shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
 #endif
 
-#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL))
+#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS))
 #extension GL_KHR_shader_subgroup_basic : require
 
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
@@ -896,17 +914,14 @@ void init_iq2k_table() {
         const uint32_t pack_lo = base_lo | ((kpacked_iq2_k_lo << (24u - shift3)) & 0xff000000u);
         const uint32_t pack_hi = base_hi | ((kpacked_iq2_k_hi << (24u - shift3)) & 0xff000000u);
 
-        iq2k_table[index_] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
-        iq2k_table[256u + index_] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
-
-        iq2k_table[index_ + 1u] = pack_lo + uint8_t(kvalues_iq2_k_const[1]);
-        iq2k_table[256u + index_ + 1u] = pack_hi + uint8_t(kvalues_iq2_k_const[5]);
-
-        iq2k_table[index_ + 2u] = pack_lo + uint8_t(kvalues_iq2_k_const[2]);
-        iq2k_table[256u + index_ + 2u] = pack_hi + uint8_t(kvalues_iq2_k_const[6]);
-
-        iq2k_table[index_ + 3u] = pack_lo + uint8_t(kvalues_iq2_k_const[3]);
-        iq2k_table[256u + index_ + 3u] = pack_hi + uint8_t(kvalues_iq2_k_const[7]);
+        iq2k_table[index_    ] = pack_lo + uint8_t(kvalues_iq2_k_const[0]);
+        iq2k_table[index_ + 1] = pack_lo + uint8_t(kvalues_iq2_k_const[1]);
+        iq2k_table[index_ + 2] = pack_lo + uint8_t(kvalues_iq2_k_const[2]);
+        iq2k_table[index_ + 3] = pack_lo + uint8_t(kvalues_iq2_k_const[3]);
+        iq2k_table[256u + index_    ] = pack_hi + uint8_t(kvalues_iq2_k_const[4]);
+        iq2k_table[256u + index_ + 1] = pack_hi + uint8_t(kvalues_iq2_k_const[5]);
+        iq2k_table[256u + index_ + 2] = pack_hi + uint8_t(kvalues_iq2_k_const[6]);
+        iq2k_table[256u + index_ + 3] = pack_hi + uint8_t(kvalues_iq2_k_const[7]);
     }
     barrier();
 }
@@ -915,6 +930,65 @@ void init_iq2k_table() {
 #if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
 const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
 const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
+
+#if defined(IQK_MMQ_LUT_LARGE)
+
+void init_iq3k_table4() {
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint z_index = laneid >> 1u;
+    const uint z_target = bool(z_index & 4u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint z_value = ((z_target >> ((z_index & 3u) << 3u)) & 0xffu) << 16u;
+    const uint y_target = bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint y_value0 = (y_target & 0xffu) << 8u;
+    const uint y_value1 = ((y_target >> 8u) & 0xffu) << 8u;
+    const uint y_value2 = ((y_target >> 16u) & 0xffu) << 8u;
+    const uint y_value3 = ((y_target >> 24u) & 0xffu) << 8u;
+
+    for (uint index_ = (laneid + gl_SubgroupSize * gl_SubgroupID) * 32u;
+         index_ < 4096u; index_ += gl_WorkGroupSize.x * 32u) {
+        const uint w_shift = (index_ >> 6u) & 0x18u;
+        const uint w_target = bool(index_ & 0x800u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+        const uint w_value = ((w_target >> w_shift) & 0xffu) << 24u;
+        const uint base = z_value | w_value;
+
+        iq3k_table4[index_      ] = base | y_value0 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ +  1u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ +  2u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ +  3u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ +  4u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ +  5u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ +  6u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ +  7u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ +  8u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ +  9u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 10u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 11u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 12u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 13u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 14u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 15u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ + 16u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ + 17u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 18u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 19u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 20u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 21u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 22u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 23u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table4[index_ + 24u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[0]);
+        iq3k_table4[index_ + 25u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[1]);
+        iq3k_table4[index_ + 26u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[2]);
+        iq3k_table4[index_ + 27u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[3]);
+        iq3k_table4[index_ + 28u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[4]);
+        iq3k_table4[index_ + 29u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[5]);
+        iq3k_table4[index_ + 30u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[6]);
+        iq3k_table4[index_ + 31u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[7]);
+    }
+    barrier();
+}
+
+#else
+
 void init_iq3k_table() {
 #define WG0_INIT 0
 #if WG0_INIT
@@ -942,6 +1016,35 @@ void init_iq3k_table() {
     }
     subgroupBarrier();
 #endif
+}
+
+#endif
+
+#endif
+
+#if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+const uint32_t kpacked32_iq4_k_0 = 0xBFAD9881u;
+const uint32_t kpacked32_iq4_k_1 = 0xF6EADDCFu;
+const uint32_t kpacked32_iq4_k_2 = 0x26190D01u;
+const uint32_t kpacked32_iq4_k_3 = 0x71594535u;
+
+void init_iq4k_table() {
+    const uint laneid = gl_SubgroupInvocationID;
+    if (laneid < 16u) {
+        const uint32_t packed = bool(laneid & 0x8u) ? 
+            (bool(laneid & 0x4u) ? kpacked32_iq4_k_3 : kpacked32_iq4_k_2) :
+            (bool(laneid & 0x4u) ? kpacked32_iq4_k_1 : kpacked32_iq4_k_0);
+        const uint16_t high_value_lo = uint16_t(packed >> ((laneid & 0x3u) << 3u)) << 8u;
+        const uint16_t high_value_hi = high_value_lo + uint16_t(0x0400u);
+
+        const uint index = laneid * 16u;
+        [[unroll]] for (uint i = 0; i < 16u; ++i) {
+            iq4k_table[index + i] = high_value_lo | uint16_t(uint8_t(kvalues_iq4_k_const[i]));
+        }
+        [[unroll]] for (uint i = 0; i < 16u; ++i) {
+            iq4k_table[256u + index + i] = high_value_hi | uint16_t(uint8_t(kvalues_iq4_k_const[i + 16u]));
+        }
+    }
 }
 #endif
 
@@ -992,13 +1095,28 @@ void init_iq_shmem(uvec3 wgsize) {
     }
 #endif
 #if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
-    for (uint i = gl_LocalInvocationIndex.x; i < 64; i += wgsize.x) {
-        kvalues_iq5_k[i] = IQK_LUT_TYPE(kvalues_iq5_k_const[i]);
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        const i8vec4 values = unpack8(int32_t(kpacked32_iq5_k_const[i]));
+        kvalues_iq5_k[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq5_k[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq5_k[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq5_k[4 * i + 3] = IQK_LUT_TYPE(values.w);
     }
 #endif
 #if defined(DATA_A_IQ6_K)
-    for (uint i = gl_LocalInvocationIndex.x; i < 128; i += wgsize.x) {
-        kvalues_iq6_k[i] = IQK_LUT_TYPE(kvalues_iq6_k_const[i]);
+    for (uint i = gl_LocalInvocationIndex.x; i < 16; i += wgsize.x) {
+        const uint32_t packed = kpacked32_iq6_k_const[i];
+        const i8vec4 values = unpack8(int32_t(packed));
+        kvalues_iq6_k[4 * i    ] = IQK_LUT_TYPE(values.x);
+        kvalues_iq6_k[4 * i + 1] = IQK_LUT_TYPE(values.y);
+        kvalues_iq6_k[4 * i + 2] = IQK_LUT_TYPE(values.z);
+        kvalues_iq6_k[4 * i + 3] = IQK_LUT_TYPE(values.w);
+
+        const i8vec4 values_hi = unpack8(int32_t(packed + 0x01010101u));
+        kvalues_iq6_k[64 + 4 * i    ] = IQK_LUT_TYPE(values_hi.x);
+        kvalues_iq6_k[64 + 4 * i + 1] = IQK_LUT_TYPE(values_hi.y);
+        kvalues_iq6_k[64 + 4 * i + 2] = IQK_LUT_TYPE(values_hi.z);
+        kvalues_iq6_k[64 + 4 * i + 3] = IQK_LUT_TYPE(values_hi.w);
     }
 #endif
 #if defined(DATA_A_IQ1_KT) || defined(DATA_A_IQ2_KT)

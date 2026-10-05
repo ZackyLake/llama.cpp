@@ -121,7 +121,7 @@ void main() {
         return;
     }
 #endif
-#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL)
+#if defined(NEEDS_INIT_IQ_SHMEM) && !defined(DATA_A_IQ2_K) && !defined(DATA_A_IQ2_KS) && !defined(DATA_A_IQ2_KL) && !defined(DATA_A_IQ4_K) && !defined(DATA_A_IQ4_KS) && !defined(DATA_A_IQ4_KSS)
     init_iq_shmem(gl_WorkGroupSize);
 #endif
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
@@ -130,6 +130,8 @@ void main() {
     init_iq2kl_table();
 #elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
     init_iq3k_table();
+#elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
+    init_iq4k_table();
 #endif
 
 #ifndef MUL_MAT_ID
