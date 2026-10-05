@@ -6522,8 +6522,11 @@ bool ggml_vk_dim01_contiguous(const ggml_tensor * tensor) {
         (tensor->ne[3] == 1 || tensor->nb[3] == tensor->nb[2]*tensor->ne[2]);
 }
 
-// Batch stride in elements of a tensor read in place.
+// Batch stride of a tensor read in place: bytes for row-meta types, logical elements otherwise.
 static uint32_t ggml_vk_batch_stride(const ggml_tensor * tensor) {
+    if (ggml_get_type_traits(tensor->type)->row_meta_size != 0) {
+        return (uint32_t)tensor->nb[2];
+    }
     return (uint32_t)(tensor->nb[2] / ggml_type_size(tensor->type) * ggml_blck_size(tensor->type));
 }
 
@@ -7054,10 +7057,6 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
     uint32_t stride_batch_y = (qy_needs_dequant || quantize_y) ? ne10*ne11 : ggml_vk_batch_stride(src1);
     const bool x_byte_strides = !qx_needs_dequant && has_src0_row_meta;
     const uint32_t stride_x = x_byte_strides ? (uint32_t)src0->nb[1] : (uint32_t)ne10;
-    if (x_byte_strides) {
-        GGML_ASSERT(qy_needs_dequant || quantize_y);
-        stride_batch_x = (uint32_t)src0->nb[2];
-    }
 
     if (!ggml_vk_dim01_contiguous(src0) && !qx_needs_dequant) {
         stride_batch_x = src0->nb[0] / ggml_type_size(src0->type);
@@ -7353,13 +7352,8 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
     uint32_t stride_batch_y = batch_n ? ne10 : ((qy_needs_dequant || quantize_y) ? ne10*ne11 : ggml_vk_batch_stride(src1));
     uint32_t stride_batch_d = batch_n ? ne20 : (ne20*ne21);
 
-    const bool x_byte_strides = !x_non_contig && has_src0_row_meta;
+    const bool x_byte_strides = !qx_needs_dequant && has_src0_row_meta;
     const uint32_t stride_x = x_byte_strides ? (uint32_t)src0->nb[1] : (uint32_t)ne10;
-    if (x_byte_strides) {
-        GGML_ASSERT(qy_needs_dequant || quantize_y);
-        stride_batch_x = (uint32_t)src0->nb[2];
-    }
-
 
     if (!ggml_vk_dim01_contiguous(src0) && !qx_needs_dequant) {
         stride_batch_x = src0->nb[0] / ggml_type_size(src0->type);
@@ -8211,10 +8205,6 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
 
     const bool x_byte_strides = !qx_needs_dequant && has_src0_row_meta;
     const uint32_t stride_x = x_byte_strides ? (uint32_t)src0->nb[1] : (uint32_t)ne10;
-    if (x_byte_strides) {
-        GGML_ASSERT(qx_needs_dequant);
-        stride_batch_x = (uint32_t)src0->nb[2];
-    }
 
     if (!ggml_vk_dim01_contiguous(src0) && !qx_needs_dequant) {
         stride_batch_x = src0->nb[0] / ggml_type_size(src0->type);
@@ -8422,12 +8412,8 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
     uint32_t stride_batch_x = qx_needs_dequant ? ne00*ne01 : ggml_vk_batch_stride(src0);
     uint32_t stride_batch_y = (qy_needs_dequant || quantize_y) ? ne10*ne11 : ggml_vk_batch_stride(src1);
 
-    const bool x_byte_strides = !x_non_contig && has_src0_row_meta;
+    const bool x_byte_strides = !qx_needs_dequant && has_src0_row_meta;
     const uint32_t stride_x = x_byte_strides ? (uint32_t)src0->nb[1] : (uint32_t)ne10;
-    if (x_byte_strides) {
-        GGML_ASSERT(qx_needs_dequant);
-        stride_batch_x = (uint32_t)src0->nb[2];
-    }
 
     if (!ggml_vk_dim01_contiguous(src1) && !qy_needs_dequant) {
         stride_batch_y = src1->nb[2] / ggml_type_size(src1->type);
@@ -10324,7 +10310,6 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
 }
 
 void ggml_vk_get_rows(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    const uint32_t src0_type_size = ggml_type_size(src0->type);
     const uint32_t src0_stride_unit = (uint32_t) ggml_vk_tensor_storage_unit_size(src0->type);
     const uint32_t src1_type_size = ggml_type_size(src1->type);
     const uint32_t dst_type_size = ggml_type_size(dst->type);
