@@ -590,8 +590,7 @@ void mmq_iqks_pack8(uint block_offset, uint element, out uint value0, out uint v
     value0 = pack32(u16vec2(iq2kl_table[indexes0.x], iq2kl_table[indexes0.y]));
     value1 = pack32(u16vec2(iq2kl_table[indexes1.x], iq2kl_table[indexes1.y]));
 #else
-    value0 = iqks_value4(block_offset, uint8_t(element));
-    value1 = iqks_value4(block_offset, uint8_t(element + 16u));
+#error "Unsupported DATA_A_IQK_ROW type in mmq_iqks_pack8"
 #endif
 }
 
