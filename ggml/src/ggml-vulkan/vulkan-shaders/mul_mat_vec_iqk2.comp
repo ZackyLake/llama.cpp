@@ -28,7 +28,7 @@ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const
     const uint16_t subid = laneid >> uint16_t(2);
     const uint a_ib_lane = a_ib_k + (laneid & uint16_t(3));
     const float a_blk_scale = float(data_a[a_ib_lane].d);
-    prepare_a_k16x_iter(a_ib_lane, qs_a, a_scales);
+    prepare_a_k16x4_iter(a_ib_lane, qs_a, a_scales);
     const uint b_ib_base = first_col / (QUANT_K_Q8_1 * 4u) + b_offset / 4u;
     const uint b_ib_lane = b_ib_base + 2u * (laneid & uint16_t(3)) + (subid >> uint16_t(1));
     const uint b_blocks_per_col = p.batch_stride_b / (QUANT_K_Q8_1 * 4u);

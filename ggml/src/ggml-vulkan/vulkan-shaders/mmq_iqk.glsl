@@ -216,7 +216,7 @@ void prepare_a_k32_iter(uint ib_k, uint8_t ib32, out int32_t qs_a[8], out vec2 a
                     d * float(int32_t(scale >> uint8_t(4)) - 8));
 }
 
-void prepare_a_k16x_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+void prepare_a_k16x4_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t subid = laneid >> 2;
     const bool is_high_16 = bool(subid & uint16_t(1));
@@ -317,7 +317,7 @@ void prepare_a_k32_iter(uint ib_k, uint8_t ib32, out int32_t qs_a[8], out vec2 a
                     d * float(sign1 ? -scale1 : scale1));
 }
 
-void prepare_a_k16x_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+void prepare_a_k16x4_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t subid = laneid >> uint16_t(2);
     const bool is_high_16 = bool(subid & uint16_t(1));
