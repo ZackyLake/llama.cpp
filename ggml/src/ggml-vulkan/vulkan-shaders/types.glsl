@@ -830,7 +830,11 @@ const uint32_t kpacked32_iq5_k_const[16] = {
     0xA69B9084u, 0xC9C1B8AFu, 0xE4DED7D0u, 0xFCF6F0EAu,
     0x130D0701u, 0x2D261F19u, 0x4F463D35u, 0x7B6F6359u
 };
+#if defined(IQK_MMQ_LUT)
+shared uint16_t iq5k_table_xor[1024];
+#else
 shared IQK_LUT_TYPE kvalues_iq5_k[64];
+#endif
 #endif
 
 #if defined(DATA_A_IQ1_KT)
@@ -889,7 +893,7 @@ const int8_t kvalues_iqkt_scale_const[16] = {
 shared IQK_LUT_TYPE kvalues_iqkt_scale[16];
 #endif
 
-#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS))
+#if defined(IQK_MMQ_LUT) && (defined(DATA_A_IQ2_K) || defined(DATA_A_IQ3_K) || defined(DATA_A_IQ2_KS) || defined(DATA_A_IQ3_KS) || defined(DATA_A_IQ2_KL) || defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS) || defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS))
 #extension GL_KHR_shader_subgroup_basic : require
 
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
@@ -1046,6 +1050,29 @@ void init_iq4k_table() {
             iq4k_table[256u + index + i] = high_value_hi | uint16_t(uint8_t(kvalues_iq4_k_const[i + 16u]));
         }
     }
+}
+#endif
+
+#if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+void init_iq5k_table() {
+    const uint invocation_id = gl_LocalInvocationIndex.x;
+    for (uint i = invocation_id; i < 32u; i += gl_WorkGroupSize.x) {
+        const uint32_t packed = bool(i & 0x10u) ?
+            (bool(i & 0x8u) ?
+                (bool(i & 0x4u) ? kpacked32_iq5_k_const[7] : kpacked32_iq5_k_const[6]) :
+                (bool(i & 0x4u) ? kpacked32_iq5_k_const[5] : kpacked32_iq5_k_const[4])) :
+            (bool(i & 0x8u) ?
+                (bool(i & 0x4u) ? kpacked32_iq5_k_const[3] : kpacked32_iq5_k_const[2]) :
+                (bool(i & 0x4u) ? kpacked32_iq5_k_const[1] : kpacked32_iq5_k_const[0]));
+        const uint16_t high_value =
+            (uint16_t(packed >> ((i & 0x3u) << 3u)) << 8u) ^ uint16_t(0x8000u);
+
+        const uint index = i * 32u;
+        [[unroll]] for (uint j = 0; j < 32u; ++j) {
+            iq5k_table_xor[index + j] = high_value | uint16_t(uint8_t(kvalues_iq5_k_const[j]) ^ uint8_t(0x80u));
+        }
+    }
+    barrier();
 }
 #endif
 

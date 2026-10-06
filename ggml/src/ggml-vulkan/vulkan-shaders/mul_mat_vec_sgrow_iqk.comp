@@ -323,6 +323,8 @@ void main() {
 # endif
 #elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
     init_iq4k_table();
+#elif defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+    init_iq5k_table();
 #elif defined(NEEDS_INIT_IQ_SHMEM)
     init_iq_shmem(gl_WorkGroupSize);
 #endif

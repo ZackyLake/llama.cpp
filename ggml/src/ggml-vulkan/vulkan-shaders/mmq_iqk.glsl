@@ -147,6 +147,7 @@ int32_t unpack_iq4_k(uint32_t values, uint shift, bool is_hi_table) {
 #endif
 
 #if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
+/*
 int32_t unpack_iq5_k(uint32_t values, uint32_t qh, uint shift, uint table_offset) {
     const uint32_t low = (values >> (4 * (shift & 1))) & 0x0F0F0F0Fu;
     const uint32_t high = ((qh >> shift) & 0x01010101u) << 4u;
@@ -155,6 +156,31 @@ int32_t unpack_iq5_k(uint32_t values, uint32_t qh, uint shift, uint table_offset
                          kvalues_iq5_k[indexes.y + table_offset],
                          kvalues_iq5_k[indexes.z + table_offset],
                          kvalues_iq5_k[indexes.w + table_offset]));
+}
+*/
+int32_t unpack_iq5_k(uint32_t ql, uint32_t qh, bool is_high_table) {
+    const uint32_t indexes = (ql & 0x0F0F0F0Fu) | (qh & 0x10101010u);
+    const uint index0 = dotPacked4x8EXT(indexes & 0x1f1fu, 0x00002001u); // WA for intel bug
+    const uint index1 = dotPacked4x8EXT(indexes, 0x20010000u);
+    const uint32_t values_lut = pack32(u16vec2(iq5k_table_xor[index0], iq5k_table_xor[index1]));
+    return int32_t((values_lut + (is_high_table ? 0x02020202u : 0u)) ^ 0x80808080u);
+}
+
+int32_t unpack_iq5_k(uint32_t values, uint32_t qh, uint shift, bool is_high_table) {
+    return unpack_iq5_k(values >> (4 * (shift & 1)), (qh >> shift) << 4u, is_high_table);
+}
+#endif
+
+#if defined(DATA_A_IQ6_K)
+int32_t unpack_iq6_k(uint32_t values, uint32_t qh, uint shift, bool is_hi_table) {
+    const uint32_t low = (values >> (4 * ((shift / 2) & 1))) & 0x0F0F0F0Fu;
+    const uint32_t high = ((qh >> shift) & 0x03030303u) << 4u;
+    const u8vec4 indexes = unpack8(low | high);
+    const u8vec4 values_lut = u8vec4(kvalues_iq6_k[indexes.x],
+                                     kvalues_iq6_k[indexes.y],
+                                     kvalues_iq6_k[indexes.z],
+                                     kvalues_iq6_k[indexes.w]);
+    return int32_t(pack32(values_lut) + (is_hi_table ? 0x01010101u : 0u));
 }
 #endif
 
@@ -454,17 +480,17 @@ void prepare_a_k32_iter(uint ib_k, uint8_t ib32, out int32_t qs_a[8], out vec2 a
     const uint ib32_u = uint(ib32);
     const uint qs_idx = 8 * (ib32_u / 2);
     const uint qh_idx = 0;
-    const uint table_offset0 = 32 * ((data_a[ib_k].extra >> (2 * ib32_u)) & uint16_t(1));
-    const uint table_offset1 = 32 * ((data_a[ib_k].extra >> (2 * ib32_u + 1)) & uint16_t(1));
+    const bool is_high_table0 = bool((data_a[ib_k].extra >> (2 * ib32_u)) & uint16_t(1));
+    const bool is_high_table1 = bool((data_a[ib_k].extra >> (2 * ib32_u + 1)) & uint16_t(1));
 
-    qs_a[0] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], ib32_u, table_offset0);
-    qs_a[1] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], ib32_u, table_offset0);
-    qs_a[2] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], ib32_u, table_offset0);
-    qs_a[3] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], ib32_u, table_offset0);
-    qs_a[4] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 4], data_a_packed32[ib_k].qh[qh_idx + 4], ib32_u, table_offset1);
-    qs_a[5] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 5], data_a_packed32[ib_k].qh[qh_idx + 5], ib32_u, table_offset1);
-    qs_a[6] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 6], data_a_packed32[ib_k].qh[qh_idx + 6], ib32_u, table_offset1);
-    qs_a[7] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 7], data_a_packed32[ib_k].qh[qh_idx + 7], ib32_u, table_offset1);
+    qs_a[0] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], ib32_u, is_high_table0);
+    qs_a[1] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], ib32_u, is_high_table0);
+    qs_a[2] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], ib32_u, is_high_table0);
+    qs_a[3] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], ib32_u, is_high_table0);
+    qs_a[4] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 4], data_a_packed32[ib_k].qh[qh_idx + 4], ib32_u, is_high_table1);
+    qs_a[5] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 5], data_a_packed32[ib_k].qh[qh_idx + 5], ib32_u, is_high_table1);
+    qs_a[6] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 6], data_a_packed32[ib_k].qh[qh_idx + 6], ib32_u, is_high_table1);
+    qs_a[7] = unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 7], data_a_packed32[ib_k].qh[qh_idx + 7], ib32_u, is_high_table1);
     const uint scales_h = uint(data_a[ib_k].scales_h[ib32_u / 2]) >> (4 * (ib32_u % 2));
     const uint scales_l = uint(data_a[ib_k].scales_l[ib32]);
     const int32_t scale0 = int32_t((scales_l & 0x0F) | ((scales_h << 4) & 0x30)) - 32;
@@ -503,27 +529,27 @@ void prepare_a_k32x2_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
     const uint16_t block0 = ib32 + ((row & uint16_t(2)) >> 1);
     const uint16_t block1 = ib32 + (((row ^ uint16_t(2)) & uint16_t(2)) >> 1);
     const uint16_t table_offset_bits = data_a[ib_k].extra >> (ib32 << 1);
-    const uint table_offset0 = ((table_offset_bits >> row) & 1u) << 5u;
-    const uint table_offset1 = ((table_offset_bits >> (row ^ uint16_t(1))) & 1u) << 5u;
-    const uint table_offset2 = ((table_offset_bits >> (row ^ uint16_t(2))) & 1u) << 5u;
-    const uint table_offset3 = ((table_offset_bits >> (row ^ uint16_t(3))) & 1u) << 5u;
+    const bool is_high_table0 = bool((table_offset_bits >> row) & 1u);
+    const bool is_high_table1 = bool((table_offset_bits >> (row ^ uint16_t(1))) & 1u);
+    const bool is_high_table2 = bool((table_offset_bits >> (row ^ uint16_t(2))) & 1u);
+    const bool is_high_table3 = bool((table_offset_bits >> (row ^ uint16_t(3))) & 1u);
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, table_offset0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, table_offset0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, table_offset0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, table_offset0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, table_offset1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, table_offset1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, table_offset1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, table_offset1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, table_offset2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, table_offset2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, table_offset2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, table_offset2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, table_offset3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, table_offset3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, table_offset3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, table_offset3));
+    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
+                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
+                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
+                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
+                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
+                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
+                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
+                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
+                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
+                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
+                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
+                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
+                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
 
     const uint16_t scale_l = uint16_t(data_a_packed32[ib_k].scales_l[subid >> 1] >>
                                       ((subid & uint16_t(1)) << 4));
@@ -535,32 +561,23 @@ void prepare_a_k32x2_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
 #endif
 
 #if defined(DATA_A_IQ6_K)
-int32_t unpack_iq6_k(uint32_t values, uint32_t qh, uint shift, uint table_offset) {
-    const uint32_t low = (values >> (4 * ((shift / 2) & 1))) & 0x0F0F0F0Fu;
-    const uint32_t high = ((qh >> shift) & 0x03030303u) << 4u;
-    const u8vec4 indexes = unpack8(low | high);
-    return pack32(i8vec4(kvalues_iq6_k[indexes.x + table_offset],
-                         kvalues_iq6_k[indexes.y + table_offset],
-                         kvalues_iq6_k[indexes.z + table_offset],
-                         kvalues_iq6_k[indexes.w + table_offset]));
-}
 
 void prepare_a_k32_iter(uint ib_k, uint8_t ib32, out int32_t qs_a[8], out vec2 a_scales) {
     const uint ib32_u = uint(ib32);
     const uint qs_idx = 8 * (ib32_u / 2);
     const uint qh_idx = 8 * (ib32_u / 4);
     const uint shift = 2 * (ib32_u % 4);
-    const uint table_offset0 = 64 * ((data_a[ib_k].extra >> (2 * ib32_u)) & uint16_t(1));
-    const uint table_offset1 = 64 * ((data_a[ib_k].extra >> (2 * ib32_u + 1)) & uint16_t(1));
+    const bool is_hi_table0 = bool((data_a[ib_k].extra >> (2 * ib32_u)) & uint16_t(1));
+    const bool is_hi_table1 = bool((data_a[ib_k].extra >> (2 * ib32_u + 1)) & uint16_t(1));
 
-    qs_a[0] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], shift, table_offset0);
-    qs_a[1] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], shift, table_offset0);
-    qs_a[2] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], shift, table_offset0);
-    qs_a[3] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], shift, table_offset0);
-    qs_a[4] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 4], data_a_packed32[ib_k].qh[qh_idx + 4], shift, table_offset1);
-    qs_a[5] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 5], data_a_packed32[ib_k].qh[qh_idx + 5], shift, table_offset1);
-    qs_a[6] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 6], data_a_packed32[ib_k].qh[qh_idx + 6], shift, table_offset1);
-    qs_a[7] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 7], data_a_packed32[ib_k].qh[qh_idx + 7], shift, table_offset1);
+    qs_a[0] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], shift, is_hi_table0);
+    qs_a[1] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], shift, is_hi_table0);
+    qs_a[2] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], shift, is_hi_table0);
+    qs_a[3] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], shift, is_hi_table0);
+    qs_a[4] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 4], data_a_packed32[ib_k].qh[qh_idx + 4], shift, is_hi_table1);
+    qs_a[5] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 5], data_a_packed32[ib_k].qh[qh_idx + 5], shift, is_hi_table1);
+    qs_a[6] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 6], data_a_packed32[ib_k].qh[qh_idx + 6], shift, is_hi_table1);
+    qs_a[7] = unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 7], data_a_packed32[ib_k].qh[qh_idx + 7], shift, is_hi_table1);
     const float d = float(data_a[ib_k].d);
     a_scales = vec2(d * float(data_a[ib_k].scales[2 * ib32_u]),
                     d * float(data_a[ib_k].scales[2 * ib32_u + 1]));
@@ -598,27 +615,27 @@ void prepare_a_k32x2_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
     const uint16_t shift0 = (block0 & uint16_t(3)) << 1;
     const uint16_t shift1 = (block1 & uint16_t(3)) << 1;
     const uint16_t table_offset_bits = data_a[ib_k].extra >> (ib32 << 1);
-    const uint table_offset0 = ((table_offset_bits >> row) & 1u) << 6u;
-    const uint table_offset1 = ((table_offset_bits >> (row ^ uint16_t(1))) & 1u) << 6u;
-    const uint table_offset2 = ((table_offset_bits >> (row ^ uint16_t(2))) & 1u) << 6u;
-    const uint table_offset3 = ((table_offset_bits >> (row ^ uint16_t(3))) & 1u) << 6u;
+    const bool is_hi_table0 = bool((table_offset_bits >> row) & 1u);
+    const bool is_hi_table1 = bool((table_offset_bits >> (row ^ uint16_t(1))) & 1u);
+    const bool is_hi_table2 = bool((table_offset_bits >> (row ^ uint16_t(2))) & 1u);
+    const bool is_hi_table3 = bool((table_offset_bits >> (row ^ uint16_t(3))) & 1u);
 
-    qs_a[0] = i32vec4(unpack_iq6_k(qs0.x, qh0.x, shift0, table_offset0),
-                      unpack_iq6_k(qs0.y, qh0.y, shift0, table_offset0),
-                      unpack_iq6_k(qs0.z, qh0.z, shift0, table_offset0),
-                      unpack_iq6_k(qs0.w, qh0.w, shift0, table_offset0));
-    qs_a[1] = i32vec4(unpack_iq6_k(qs1.x, qh1.x, shift0, table_offset1),
-                      unpack_iq6_k(qs1.y, qh1.y, shift0, table_offset1),
-                      unpack_iq6_k(qs1.z, qh1.z, shift0, table_offset1),
-                      unpack_iq6_k(qs1.w, qh1.w, shift0, table_offset1));
-    qs_a[2] = i32vec4(unpack_iq6_k(qs0.x, qh0.x, shift1, table_offset2),
-                      unpack_iq6_k(qs0.y, qh0.y, shift1, table_offset2),
-                      unpack_iq6_k(qs0.z, qh0.z, shift1, table_offset2),
-                      unpack_iq6_k(qs0.w, qh0.w, shift1, table_offset2));
-    qs_a[3] = i32vec4(unpack_iq6_k(qs1.x, qh1.x, shift1, table_offset3),
-                      unpack_iq6_k(qs1.y, qh1.y, shift1, table_offset3),
-                      unpack_iq6_k(qs1.z, qh1.z, shift1, table_offset3),
-                      unpack_iq6_k(qs1.w, qh1.w, shift1, table_offset3));
+    qs_a[0] = i32vec4(unpack_iq6_k(qs0.x, qh0.x, shift0, is_hi_table0),
+                      unpack_iq6_k(qs0.y, qh0.y, shift0, is_hi_table0),
+                      unpack_iq6_k(qs0.z, qh0.z, shift0, is_hi_table0),
+                      unpack_iq6_k(qs0.w, qh0.w, shift0, is_hi_table0));
+    qs_a[1] = i32vec4(unpack_iq6_k(qs1.x, qh1.x, shift0, is_hi_table1),
+                      unpack_iq6_k(qs1.y, qh1.y, shift0, is_hi_table1),
+                      unpack_iq6_k(qs1.z, qh1.z, shift0, is_hi_table1),
+                      unpack_iq6_k(qs1.w, qh1.w, shift0, is_hi_table1));
+    qs_a[2] = i32vec4(unpack_iq6_k(qs0.x, qh0.x, shift1, is_hi_table2),
+                      unpack_iq6_k(qs0.y, qh0.y, shift1, is_hi_table2),
+                      unpack_iq6_k(qs0.z, qh0.z, shift1, is_hi_table2),
+                      unpack_iq6_k(qs0.w, qh0.w, shift1, is_hi_table2));
+    qs_a[3] = i32vec4(unpack_iq6_k(qs1.x, qh1.x, shift1, is_hi_table3),
+                      unpack_iq6_k(qs1.y, qh1.y, shift1, is_hi_table3),
+                      unpack_iq6_k(qs1.z, qh1.z, shift1, is_hi_table3),
+                      unpack_iq6_k(qs1.w, qh1.w, shift1, is_hi_table3));
 
     a_scales = unpack8(int32_t(data_a_packed32[ib_k].scales[subid]));
 }
@@ -708,12 +725,12 @@ i32vec4 repack4(uint ib, uint iqs) {
     const uint ib32 = ib % 8;
     const uint qs_idx = 8 * (ib32 / 2) + 4 * iqs;
     const uint qh_idx = 4 * iqs;
-    const uint table_offset = 32 * ((data_a[ib_k].extra >> (2 * ib32 + iqs)) & uint16_t(1));
+    const bool is_high_table = bool((data_a[ib_k].extra >> (2 * ib32 + iqs)) & uint16_t(1));
 
-    return i32vec4(unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], ib32, table_offset),
-                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], ib32, table_offset),
-                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], ib32, table_offset),
-                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], ib32, table_offset));
+    return i32vec4(unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], ib32, is_high_table),
+                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], ib32, is_high_table),
+                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], ib32, is_high_table),
+                   unpack_iq5_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], ib32, is_high_table));
 }
 
 float get_d_scale(uint ib, uint iqs) {
@@ -735,12 +752,12 @@ i32vec4 repack4(uint ib, uint iqs) {
     const uint qs_idx = 8 * (ib32 / 2) + 4 * iqs;
     const uint qh_idx = 8 * (ib32 / 4) + 4 * iqs;
     const uint shift = 2 * (ib32 % 4);
-    const uint table_offset = 64 * ((data_a[ib_k].extra >> (2 * ib32 + iqs)) & uint16_t(1));
+    const bool is_hi_table = bool((data_a[ib_k].extra >> (2 * ib32 + iqs)) & uint16_t(1));
 
-    return i32vec4(unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], shift, table_offset),
-                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], shift, table_offset),
-                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], shift, table_offset),
-                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], shift, table_offset));
+    return i32vec4(unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx    ], data_a_packed32[ib_k].qh[qh_idx    ], shift, is_hi_table),
+                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 1], data_a_packed32[ib_k].qh[qh_idx + 1], shift, is_hi_table),
+                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 2], data_a_packed32[ib_k].qh[qh_idx + 2], shift, is_hi_table),
+                   unpack_iq6_k(data_a_packed32[ib_k].qs[qs_idx + 3], data_a_packed32[ib_k].qh[qh_idx + 3], shift, is_hi_table));
 }
 
 float get_d_scale(uint ib, uint iqs) {
@@ -892,7 +909,7 @@ void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale
     const uint16_t qs_base = lane >= (SUBGROUP_SIZE / 2u) ? uint16_t(SG_IQK_QS_PER_HALF) : uint16_t(0);
     const uint16_t shift_h = uint16_t(ib32);
     const uint16_t shift_l = uint16_t(2u * (ib32 % 4u));
-    const uint table_offset = ((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1)) << 6;
+    const uint table_offset = ((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1)) << 6u;
 
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
         const uint q32 = q_offset + q;
@@ -1054,7 +1071,7 @@ void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale
     const uint qh_u32 = data_a_packed32[ib_k].qh[uint(lane) & 7u];
 
     const uint extra_bit_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
-    const uint table_offset = ((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1)) << 5u;
+    const bool is_high_table = bool((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1));
 
 #if SUBGROUP_SIZE == 16
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; q += 2u) {
@@ -1062,15 +1079,15 @@ void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale
         const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
         const uint qh0 = subgroupShuffle(qh_u32, uint(q_offset) + q);
         const uint qh1 = subgroupShuffle(qh_u32, uint(q_offset) + q + 1u);
-        qs_a[q] = unpack_iq5_k(qs_pair.x, qh0, uint(ib32), table_offset);
-        qs_a[q + 1u] = unpack_iq5_k(qs_pair.y, qh1, uint(ib32), table_offset);
+        qs_a[q] = unpack_iq5_k(qs_pair.x, qh0, uint(ib32), is_high_table);
+        qs_a[q + 1u] = unpack_iq5_k(qs_pair.y, qh1, uint(ib32), is_high_table);
     }
 #else
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
         const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
         const uint qs = subgroupShuffle(qs_u32, q_idx);
         const uint qh = subgroupShuffle(qh_u32, uint(q_offset) + q);
-        qs_a[q] = unpack_iq5_k(qs, qh, uint(ib32), table_offset);
+        qs_a[q] = unpack_iq5_k(qs, qh, uint(ib32), is_high_table);
     }
 #endif
 
@@ -1102,7 +1119,7 @@ void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale
     const uint qh_u32 = data_a_packed32[ib_k].qh[uint(lane) & 15u];
 
     const uint extra_bit_idx = 2u * uint(ib32) + (scale_high_half ? 1u : 0u);
-    const uint table_offset = ((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1)) << 6u;
+    const bool is_hi_table = bool((data_a[ib_k].extra >> extra_bit_idx) & uint16_t(1));
     const uint shift = 2u * (uint(ib32) % 4u);
 
 #if SUBGROUP_SIZE == 16
@@ -1111,15 +1128,15 @@ void prepare_a_sg(uint ib_k, out int32_t qs_a[SG_QS_PER_ITER], out float a_scale
         const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
         const uint qh0 = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q);
         const uint qh1 = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q + 1u);
-        qs_a[q] = unpack_iq6_k(qs_pair.x, qh0, shift, table_offset);
-        qs_a[q + 1u] = unpack_iq6_k(qs_pair.y, qh1, shift, table_offset);
+        qs_a[q] = unpack_iq6_k(qs_pair.x, qh0, shift, is_hi_table);
+        qs_a[q + 1u] = unpack_iq6_k(qs_pair.y, qh1, shift, is_hi_table);
     }
 #else
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
         const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
         const uint qs = subgroupShuffle(qs_u32, q_idx);
         const uint qh = subgroupShuffle(qh_u32, 8u * (uint(ib32) / 4u) + uint(q_offset) + q);
-        qs_a[q] = unpack_iq6_k(qs, qh, shift, table_offset);
+        qs_a[q] = unpack_iq6_k(qs, qh, shift, is_hi_table);
     }
 #endif
 
@@ -1309,14 +1326,8 @@ int32_t iqks_value4(uint block_offset, uint8_t element) {
     const uint high = iqks_load_u32(block_offset + 136 + pos32);
     const uint value_shift = high_half ? 4u : 0u;
     const uint high_shift = 2 * ib64 + (high_half ? 1u : 0u);
-    const uint table_offset = bool(scale & uint8_t(1)) ? 32u : 0u;
-    const uint packed = ((values >> value_shift) & 0x0F0F0F0Fu) |
-                        (((high >> high_shift) & 0x01010101u) << 4);
-    const u8vec4 indexes = unpack8(packed);
-    return pack32(i8vec4(kvalues_iq5_k[indexes.x + table_offset],
-                         kvalues_iq5_k[indexes.y + table_offset],
-                         kvalues_iq5_k[indexes.z + table_offset],
-                         kvalues_iq5_k[indexes.w + table_offset]));
+    const bool is_high_table = bool(scale & uint8_t(1));
+    return unpack_iq5_k(values >> value_shift, (high >> high_shift) << 4u, is_high_table);
 #endif
 }
 
@@ -1480,8 +1491,8 @@ void rm_prepare_a_k16x4_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     const uint scale_group_offset = is_high_half ? 4u : 0u;
     const uint scale_packed = iqks_load_u32(block_byte_offset + 2u);
     const uint scale_lo4 = (scale_packed >> (is_high_half ? 4u : 0u)) & 0x0f0f0f0fu;
-    const uint e = extra >> (is_high_half ? 4u : 0u);
-    const uint neg_scale_hi4bit = (~e) & 0x0fu;
+    const uint16_t e = extra >> (is_high_half ? 4u : 0u);
+    const uint16_t neg_scale_hi4bit = (~e) & uint16_t(0x0f);
     const uint scale_hi4 = ((neg_scale_hi4bit * 0x00204081u) & 0x01010101u) * 0xf0u;
     a_scales = unpack8(int32_t(scale_lo4 | scale_hi4));
     const uint16_t row = laneid & uint16_t(3);
@@ -1718,27 +1729,27 @@ void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     a_scales = unpack8(int32_t((scale_repeated & 0xfefefefeu) ^ 0x81818181u));
 
     const uint16_t scale_table_bits = (scale_packed | (scale_packed >> 7u)) & uint16_t(3);
-    const uint table_offset0 = ((scale_table_bits >> (block0 - ib32)) & uint16_t(1)) << 5u;
-    const uint table_offset1 = table_offset0;
-    const uint table_offset2 = ((scale_table_bits >> (block1 - ib32)) & uint16_t(1)) << 5u;
-    const uint table_offset3 = table_offset2;
+    const bool is_high_table0 = bool((scale_table_bits >> (block0 - ib32)) & uint16_t(1));
+    const bool is_high_table1 = is_high_table0;
+    const bool is_high_table2 = bool((scale_table_bits >> (block1 - ib32)) & uint16_t(1));
+    const bool is_high_table3 = is_high_table2;
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, table_offset0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, table_offset0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, table_offset0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, table_offset0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, table_offset1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, table_offset1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, table_offset1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, table_offset1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, table_offset2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, table_offset2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, table_offset2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, table_offset2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, table_offset3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, table_offset3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, table_offset3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, table_offset3));
+    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
+                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
+                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
+                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
+                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
+                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
+                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
+                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
+                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
+                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
+                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
+                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
+                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
 }
 #define SG_A_SHAPE_32x2
 #endif
@@ -1870,7 +1881,7 @@ void rm_prepare_a_sg(uint block_byte_offset, ROW_META_TYPE row_meta, out int32_t
 #endif
     const uint qh_u32 = iqks_load_u32(block_byte_offset + 136u + 4u * (uint(lane) & 7u));
 
-    const uint table_offset = (uint(scale) & 1u) << 5u;
+    const bool is_high_table = bool(uint(scale) & 1u);
 
 #if SUBGROUP_SIZE == 16
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; q += 2u) {
@@ -1878,15 +1889,15 @@ void rm_prepare_a_sg(uint block_byte_offset, ROW_META_TYPE row_meta, out int32_t
         const uvec2 qs_pair = subgroupShuffle(qs_u32, q_idx >> 1u);
         const uint qh0 = subgroupShuffle(qh_u32, uint(q_offset) + q);
         const uint qh1 = subgroupShuffle(qh_u32, uint(q_offset) + q + 1u);
-        qs_a[q] = unpack_iq5_k(qs_pair.x, qh0, uint(ib32), table_offset);
-        qs_a[q + 1u] = unpack_iq5_k(qs_pair.y, qh1, uint(ib32), table_offset);
+        qs_a[q] = unpack_iq5_k(qs_pair.x, qh0, uint(ib32), is_high_table);
+        qs_a[q + 1u] = unpack_iq5_k(qs_pair.y, qh1, uint(ib32), is_high_table);
     }
 #else
     [[unroll]] for (uint q = 0; q < SG_QS_PER_ITER; ++q) {
         const uint q_idx = 8u * (uint(ib32) / 2u) + uint(q_offset) + q;
         const uint qs = subgroupShuffle(qs_u32, q_idx);
         const uint qh = subgroupShuffle(qh_u32, uint(q_offset) + q);
-        qs_a[q] = unpack_iq5_k(qs, qh, uint(ib32), table_offset);
+        qs_a[q] = unpack_iq5_k(qs, qh, uint(ib32), is_high_table);
     }
 #endif
 

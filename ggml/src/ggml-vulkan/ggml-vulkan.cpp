@@ -1457,17 +1457,23 @@ static std::vector<uint32_t> get_fa_spec_constants(const vk_fa_pipeline_state& s
 
 static std::optional<uint32_t> get_iqk_lut_size(ggml_type type) {
     switch (type) {
-    case GGML_TYPE_IQ2_K:   return 8;
-    case GGML_TYPE_IQ3_K:   return 16;
-    case GGML_TYPE_IQ4_K:   return 32;
-    case GGML_TYPE_IQ5_K:   return 64;
-    case GGML_TYPE_IQ6_K:   return 128;
-    case GGML_TYPE_IQ4_KSS: return 32;
-    case GGML_TYPE_IQ2_KS:  return 8;
-    case GGML_TYPE_IQ3_KS:  return 16;
-    case GGML_TYPE_IQ4_KS:  return 32;
-    case GGML_TYPE_IQ5_KS:  return 64;
-    case GGML_TYPE_IQ2_KL:  return 64;
+    case GGML_TYPE_IQ2_K:
+    case GGML_TYPE_IQ2_KS:
+        return 8;
+    case GGML_TYPE_IQ2_KL:
+        return 64;
+    case GGML_TYPE_IQ3_K:
+    case GGML_TYPE_IQ3_KS:
+        return 16;
+    case GGML_TYPE_IQ4_K:
+    case GGML_TYPE_IQ4_KS:
+    case GGML_TYPE_IQ4_KSS:
+        return 32;
+    case GGML_TYPE_IQ5_K:
+    case GGML_TYPE_IQ5_KS:
+        return 64;
+    case GGML_TYPE_IQ6_K:
+        return 128;
     case GGML_TYPE_IQ1_KT:  return 16;
     case GGML_TYPE_IQ2_KT:  return 16;
     case GGML_TYPE_IQ3_KT:  return 0;
@@ -1475,6 +1481,29 @@ static std::optional<uint32_t> get_iqk_lut_size(ggml_type type) {
     default:                return std::nullopt;
     }
 }
+
+static std::optional<uint32_t> get_iqk_table_size(ggml_type type) {
+    switch (type) {
+    case GGML_TYPE_IQ2_K:
+    case GGML_TYPE_IQ2_KS:
+        return uint32_t(512 * sizeof(uint32_t));
+    case GGML_TYPE_IQ2_KL:
+        return uint32_t(64 * sizeof(uint16_t));
+    case GGML_TYPE_IQ3_K:
+    case GGML_TYPE_IQ3_KS:
+        return uint32_t(128 * sizeof(uint16_t));
+    case GGML_TYPE_IQ4_K:
+    case GGML_TYPE_IQ4_KS:
+    case GGML_TYPE_IQ4_KSS:
+        return uint32_t(512 * sizeof(uint16_t));
+    case GGML_TYPE_IQ5_K:
+    case GGML_TYPE_IQ5_KS:
+        return uint32_t(1024 * sizeof(uint16_t));
+    default:
+        return std::nullopt;
+    }
+}
+
 
 static std::optional<uint32_t> get_iqk_sg_index(uint32_t subgroup_size) {
     switch (subgroup_size) {
@@ -1641,16 +1670,10 @@ static bool ggml_vk_matmul_int_shmem_support(const vk_device& device, const std:
 
     // IQ3_S also copies its 512-entry grid into shared memory (types.glsl, init_iq_shmem)
     uint32_t lut_size = (src0_type == GGML_TYPE_IQ3_S) ? 4*512 : 0;
-    if (const auto iqksize = get_iqk_lut_size(src0_type); iqksize) {
+    if (const auto iqksize = get_iqk_table_size(src0_type); iqksize) {
         lut_size = *iqksize;
-        if (src0_type == GGML_TYPE_IQ2_K || src0_type == GGML_TYPE_IQ2_KS)
-            lut_size += 512 * sizeof(uint32_t);
-        else if (src0_type == GGML_TYPE_IQ2_KL)
-            lut_size += 64 * sizeof(uint16_t);
-        else if (src0_type == GGML_TYPE_IQ3_K || src0_type == GGML_TYPE_IQ3_KS)
-            lut_size += 128 * sizeof(uint16_t);
-        else if (src0_type == GGML_TYPE_IQ4_K || src0_type == GGML_TYPE_IQ4_KS || src0_type == GGML_TYPE_IQ4_KSS)
-            lut_size += 512 * sizeof(uint16_t);
+    } else if (const auto iqksize = get_iqk_lut_size(src0_type); iqksize) {
+        lut_size = *iqksize;
     }
 
     // block_b_cache: { int32_t qs[8]; FLOAT_TYPEV2 ds; }
