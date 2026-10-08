@@ -3,7 +3,11 @@
 #extension GL_EXT_control_flow_attributes : enable
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_ballot : enable
 #extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#extension GL_EXT_shader_subgroup_extended_types_int8 : require
+#extension GL_EXT_shader_subgroup_extended_types_int16 : require
 
 #extension GL_EXT_integer_dot_product : require
 
@@ -13,11 +17,6 @@
 
 #ifdef FLOAT16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#endif
-
-#if defined(MUL_MAT_ID_USE_SUBGROUPS)
-#extension GL_KHR_shader_subgroup_basic : enable
-#extension GL_KHR_shader_subgroup_ballot : enable
 #endif
 
 #ifdef MUL_MAT_ID
@@ -91,25 +90,16 @@ layout (constant_id = 10) const uint WARP = 32;
 #define BK 32
 
 #define BK_STEP 8
-struct block_a_qs_cache {
-    i32vec4 qs[16];
-};
-struct block_a_ds_cache {
-    FLOAT_TYPE d_scales[16];
-};
-struct block_a_register_cache {
-    i32vec4 qs[2];
-    FLOAT_TYPEV2 d_scales;
-};
 
 #include "mul_mmq_shmem_types.glsl"
 
 // Shared memory cache
-shared block_a_qs_cache buf_a_qs[BM];
-shared block_a_ds_cache buf_a_ds[BM];
+shared i32vec4 buf_a_qs[BM][16]; // BM * 256
+shared int8_t buf_a_s[BM][16]; // BM * 16
 shared block_b_cache buf_b[BN * BK_STEP];
 // Register cache
-block_a_register_cache cache_a;
+i32vec4 cache_a_qs[2];
+int16_t cache_a_s[2];
 block_b_cache cache_b;
 
 #define LOAD_VEC_B 16
@@ -121,7 +111,7 @@ block_b_cache cache_b;
 #include "mul_mmq_funcs.glsl"
 
 #ifdef DATA_A_IQK_ROW
-void block_a_to_shmem(const uint16_t row_begin, const uint block_byte_offset, const uint a_row_begin) {
+void block_a_to_shmem(const uint16_t row_begin, const uint block_byte_offset) {
 #else
 void block_a_to_shmem(const uint16_t row_begin, const uint ib_k) {
 #endif
@@ -133,10 +123,8 @@ void block_a_to_shmem(const uint16_t row_begin, const uint ib_k) {
 #if defined(SG_A_SHAPE_16x4)
 #ifdef DATA_A_IQK_ROW
     rm_prepare_a_k16x4_iter(block_byte_offset, qs_a, a_scales);
-    const float a_scale = iqks_row_scale(a_row_begin);
 #else
     prepare_a_k16x4_iter(ib_k, qs_a, a_scales);
-    const float a_scale = float(data_a[ib_k].d);
 #endif
     const uint16_t subid = laneid >> uint16_t(2);
     const uint16_t is_high_16 = subid & uint16_t(1);
@@ -144,32 +132,30 @@ void block_a_to_shmem(const uint16_t row_begin, const uint ib_k) {
     const uint16_t cache_base = cache_half * uint16_t(4);
     const uint qs_base = uint(cache_base) * 2u + uint(is_high_16);
 
-    buf_a_qs[row].qs[qs_base + 0u] = qs_a[0];
-    buf_a_qs[row].qs[qs_base + 2u] = qs_a[1];
-    buf_a_qs[row].qs[qs_base + 4u] = qs_a[2];
-    buf_a_qs[row].qs[qs_base + 6u] = qs_a[3];
-    buf_a_ds[row].d_scales[qs_base + 0u] = FLOAT_TYPE(a_scale * float(a_scales[0]));
-    buf_a_ds[row].d_scales[qs_base + 2u] = FLOAT_TYPE(a_scale * float(a_scales[1]));
-    buf_a_ds[row].d_scales[qs_base + 4u] = FLOAT_TYPE(a_scale * float(a_scales[2]));
-    buf_a_ds[row].d_scales[qs_base + 6u] = FLOAT_TYPE(a_scale * float(a_scales[3]));
+    buf_a_qs[row][qs_base + 0u] = qs_a[0];
+    buf_a_qs[row][qs_base + 2u] = qs_a[1];
+    buf_a_qs[row][qs_base + 4u] = qs_a[2];
+    buf_a_qs[row][qs_base + 6u] = qs_a[3];
+    buf_a_s[row][qs_base + 0u] = a_scales[0];
+    buf_a_s[row][qs_base + 2u] = a_scales[1];
+    buf_a_s[row][qs_base + 4u] = a_scales[2];
+    buf_a_s[row][qs_base + 6u] = a_scales[3];
 #elif defined(SG_A_SHAPE_32x2)
 #ifdef DATA_A_IQK_ROW
     rm_prepare_a_k32x2_iter(block_byte_offset, qs_a, a_scales);
-    const float a_scale = iqks_row_scale(a_row_begin);
 #else
     prepare_a_k32x2_iter(ib_k, qs_a, a_scales);
-    const float a_scale = float(data_a[ib_k].d);
 #endif
     const uint qs_base = uint(laneid >> uint16_t(2)) * 4u;
 
-    buf_a_qs[row].qs[qs_base + 0u] = qs_a[0];
-    buf_a_qs[row].qs[qs_base + 1u] = qs_a[1];
-    buf_a_qs[row].qs[qs_base + 2u] = qs_a[2];
-    buf_a_qs[row].qs[qs_base + 3u] = qs_a[3];
-    buf_a_ds[row].d_scales[qs_base + 0u] = FLOAT_TYPE(a_scale * float(a_scales[0]));
-    buf_a_ds[row].d_scales[qs_base + 1u] = FLOAT_TYPE(a_scale * float(a_scales[1]));
-    buf_a_ds[row].d_scales[qs_base + 2u] = FLOAT_TYPE(a_scale * float(a_scales[2]));
-    buf_a_ds[row].d_scales[qs_base + 3u] = FLOAT_TYPE(a_scale * float(a_scales[3]));
+    buf_a_qs[row][qs_base + 0u] = qs_a[0];
+    buf_a_qs[row][qs_base + 1u] = qs_a[1];
+    buf_a_qs[row][qs_base + 2u] = qs_a[2];
+    buf_a_qs[row][qs_base + 3u] = qs_a[3];
+    buf_a_s[row][qs_base + 0u] = a_scales[0];
+    buf_a_s[row][qs_base + 1u] = a_scales[1];
+    buf_a_s[row][qs_base + 2u] = a_scales[2];
+    buf_a_s[row][qs_base + 3u] = a_scales[3];
 #else
 #error "Unsupported IQK subgroup shape in block_a_to_shmem"
 #endif
@@ -179,29 +165,66 @@ void block_a_to_registers(const uint buf_row) {
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t qs_base = (laneid % uint16_t(BK_STEP)) * uint16_t(2);
 
-    cache_a.d_scales = FLOAT_TYPEV2(buf_a_ds[buf_row].d_scales[qs_base + 0u], buf_a_ds[buf_row].d_scales[qs_base + 1u]);
-
     [[unroll]] for (uint q = 0; q < 2; ++q) {
-        cache_a.qs[q] = buf_a_qs[buf_row].qs[qs_base + q];
+        cache_a_qs[q] = buf_a_qs[buf_row][qs_base + q];
+        cache_a_s[q] = buf_a_s[buf_row][qs_base + q];
     }
 }
 
-ACC_TYPE mmq_dot_product(const i32vec4 qs0, const i32vec4 qs1, const FLOAT_TYPEV2 d_scales) {
-    int32_t sum0 = 0;
-    int32_t sum1 = 0;
+ACC_TYPE mmq_dot_product(const i32vec4 qs0, const i32vec4 qs1, const int16_t s0, const int16_t s1) {
+    int32_t sum0 = dotPacked4x8EXT(qs0.x, cache_b.qs[0])
+                 + dotPacked4x8EXT(qs0.y, cache_b.qs[1])
+                 + dotPacked4x8EXT(qs0.z, cache_b.qs[2])
+                 + dotPacked4x8EXT(qs0.w, cache_b.qs[3]);
+    int32_t sum1 = dotPacked4x8EXT(qs1.x, cache_b.qs[4])
+                 + dotPacked4x8EXT(qs1.y, cache_b.qs[5])
+                 + dotPacked4x8EXT(qs1.z, cache_b.qs[6])
+                 + dotPacked4x8EXT(qs1.w, cache_b.qs[7]);
+    sum0 = sum0 * s0;
+    sum1 = sum1 * s1;
 
-    sum0 += dotPacked4x8EXT(qs0.x, cache_b.qs[0]);
-    sum0 += dotPacked4x8EXT(qs0.y, cache_b.qs[1]);
-    sum0 += dotPacked4x8EXT(qs0.z, cache_b.qs[2]);
-    sum0 += dotPacked4x8EXT(qs0.w, cache_b.qs[3]);
-    sum1 += dotPacked4x8EXT(qs1.x, cache_b.qs[4]);
-    sum1 += dotPacked4x8EXT(qs1.y, cache_b.qs[5]);
-    sum1 += dotPacked4x8EXT(qs1.z, cache_b.qs[6]);
-    sum1 += dotPacked4x8EXT(qs1.w, cache_b.qs[7]);
-
-    return ACC_TYPE(float(cache_b.ds.x) * (float(d_scales.x) * float(sum0) +
-                                           float(d_scales.y) * float(sum1)));
+    return ACC_TYPE(float(cache_b.ds.x) * float(sum0 + sum1));
 }
+
+
+#ifdef DATA_A_IQK_ROW
+void load_a(uint16_t sgid, uint32_t ir, uint32_t block, uint bytes_in_k, uint a_offset) {
+#else
+void load_a(uint16_t sgid, uint32_t ir, uint32_t block, uint blk256_in_k, uint a_ib_offset) {
+#endif
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t row_begin = sgid * uint16_t(4);
+    const uint first_row = ir * BM + row_begin;
+    const uint first_col = block;
+    const uint16_t row = laneid & uint16_t(3);
+#ifdef DATA_A_IQK_ROW
+    const uint a_offset_in_row = IQK_ROW_META_SIZE + (first_col / QUANT_K) * IQK_BLOCK_SIZE;
+    const uint a_row_begin = a_offset + (first_row + row) * bytes_in_k;
+    block_a_to_shmem(row_begin, a_row_begin + a_offset_in_row);
+#else
+    const uint a_ib_row = a_ib_offset + first_row * blk256_in_k;
+    const uint a_ib_k = a_ib_row + first_col / QUANT_K;
+    const uint a_ib_lane = a_ib_k + row * blk256_in_k;
+    block_a_to_shmem(row_begin, a_ib_lane);
+#endif
+}
+
+void load_b(uint16_t sgid, uint16_t sgsize, uint32_t pos_b_ib) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const uint16_t k_step = laneid / uint16_t(BK / LOAD_VEC_B);
+    const uint16_t iqs = laneid % uint16_t(BK / LOAD_VEC_B);
+
+    [[unroll]] for (uint buf_ib = sgid; buf_ib < BN; buf_ib += sgsize) {
+#ifdef MUL_MAT_ID
+        const u16vec2 row_idx = row_ids[buf_ib];
+        const uint ib = pos_b_ib + row_idx.y * p.batch_stride_b / BK + (row_idx.x % p.ne11) * p.stride_b / BK;
+#else
+        const uint ib = pos_b_ib + buf_ib * p.stride_b / BK;
+#endif
+        block_b_to_shmem(k_step * BN + buf_ib, ib + k_step, iqs, true);
+    }
+}
+
 
 void main() {
     const uint ic = gl_WorkGroupID.y;
@@ -247,7 +270,8 @@ void main() {
     const uint WSUBN = WN / WNITER;
     const uint16_t subgroup_id = uint16_t(gl_SubgroupID);
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
-    const uint16_t half_subgroup_count = uint16_t(BLOCK_SIZE / (2u * WARP));
+    const uint16_t subgroup_count = uint16_t(BLOCK_SIZE / WARP);
+    const uint16_t load_a_count = uint16_t(BM / 4);
 
     const uint16_t tiwr = laneid % uint16_t(WSUBM / TM);
     const uint16_t tiwc = laneid / uint16_t(WSUBM / TM);
@@ -304,36 +328,15 @@ void main() {
 #endif
 
     for (uint block = start_k; block < end_k; block += BK * BK_STEP) {
-        if (subgroup_id < half_subgroup_count) {
-            const uint16_t row_begin = subgroup_id * uint16_t(4);
-            const uint first_row = ir * BM + row_begin;
-            const uint first_col = block;
-            const uint16_t row = laneid & uint16_t(3);
+
+        if (subgroup_id < load_a_count) {
 #ifdef DATA_A_IQK_ROW
-            const uint a_offset_in_row = IQK_ROW_META_SIZE + (first_col / QUANT_K) * IQK_BLOCK_SIZE;
-            const uint a_row_begin = a_offset + (first_row + row) * bytes_in_k;
-            block_a_to_shmem(uint16_t(row_begin), a_row_begin + a_offset_in_row, a_row_begin);
+            load_a(subgroup_id, ir, block, bytes_in_k, a_offset);
 #else
-            const uint a_ib_row = a_ib_offset + first_row * blk256_in_k;
-            const uint a_ib_k = a_ib_row + first_col / QUANT_K;
-            const uint a_ib_lane = a_ib_k + row * blk256_in_k;
-            block_a_to_shmem(uint16_t(row_begin), a_ib_lane);
+            load_a(subgroup_id, ir, block, blk256_in_k, a_ib_offset);
 #endif
         } else {
-            const uint16_t b_subgroup_id = subgroup_id - half_subgroup_count;
-            const uint16_t k_step = laneid / uint16_t(BK / LOAD_VEC_B);
-            const uint16_t iqs = laneid % uint16_t(BK / LOAD_VEC_B);
-
-            [[unroll]] for (uint buf_ib = b_subgroup_id; buf_ib < BN; buf_ib += half_subgroup_count) {
-
-#ifdef MUL_MAT_ID
-                const u16vec2 row_idx = row_ids[buf_ib];
-                const uint ib = pos_b_ib + row_idx.y * p.batch_stride_b / BK + (row_idx.x % p.ne11) * p.stride_b / BK;
-#else
-                const uint ib = pos_b_ib + buf_ib * p.stride_b / BK;
-#endif
-                block_b_to_shmem(k_step * BN + buf_ib, ib + k_step, iqs, true);
-            }
+            load_b(subgroup_id - load_a_count, subgroup_count - load_a_count, pos_b_ib);
         }
 
         barrier();
@@ -343,17 +346,19 @@ void main() {
         const uint buf_row = warp_r * WM + laneid / uint16_t(BK_STEP);
         block_a_to_registers(buf_row);
 
+        ACC_TYPE block_sums[WMITER * TM * WNITER * TN];
+        [[unroll]] for (uint i = 0; i < WMITER*TM*WNITER*TN; i++) {
+            block_sums[i] = ACC_TYPE(0.0f);
+        }
         [[unroll]] for (uint k_step = 0; k_step < BK_STEP; k_step++) {
-            const i32vec4 qs0 = subgroupBroadcast(cache_a.qs[0], k_step);
-            const i32vec4 qs1 = subgroupBroadcast(cache_a.qs[1], k_step);
-            const FLOAT_TYPEV2 d_scales = FLOAT_TYPEV2(
-                subgroupBroadcast(cache_a.d_scales.x, k_step),
-                subgroupBroadcast(cache_a.d_scales.y, k_step));
-            const i32vec4 qs2 = subgroupBroadcast(cache_a.qs[0], BK_STEP + k_step);
-            const i32vec4 qs3 = subgroupBroadcast(cache_a.qs[1], BK_STEP + k_step);
-            const FLOAT_TYPEV2 d_scales2 = FLOAT_TYPEV2(
-                subgroupBroadcast(cache_a.d_scales.x, BK_STEP + k_step),
-                subgroupBroadcast(cache_a.d_scales.y, BK_STEP + k_step));
+            const i32vec4 qs0 = subgroupBroadcast(cache_a_qs[0], k_step);
+            const i32vec4 qs1 = subgroupBroadcast(cache_a_qs[1], k_step);
+            const int16_t s0 = subgroupBroadcast(cache_a_s[0], k_step);
+            const int16_t s1 = subgroupBroadcast(cache_a_s[1], k_step);
+            const i32vec4 qs2 = subgroupBroadcast(cache_a_qs[0], BK_STEP + k_step);
+            const i32vec4 qs3 = subgroupBroadcast(cache_a_qs[1], BK_STEP + k_step);
+            const int16_t s2 = subgroupBroadcast(cache_a_s[0], BK_STEP + k_step);
+            const int16_t s3 = subgroupBroadcast(cache_a_s[1], BK_STEP + k_step);
 
             [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
                 [[unroll]] for (uint cc = 0; cc < TN; cc++) {
@@ -363,15 +368,51 @@ void main() {
                     [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
                         const uint sums_idx = (wsic * TN + cc) * (WMITER * TM) + wsir * TM;
 
-                        sums[sums_idx + 0u] += mmq_dot_product(qs0, qs1, d_scales);
-                        sums[sums_idx + 1u] += mmq_dot_product(qs2, qs3, d_scales2);
+                        block_sums[sums_idx + 0u] += mmq_dot_product(qs0, qs1, s0, s1);
+                        block_sums[sums_idx + 1u] += mmq_dot_product(qs2, qs3, s2, s3);
                     }
                 }
             }
         }
 
+#ifndef DATA_A_IQK_ROW
+        const uint a_ib_row = a_ib_offset + (ir * BM + warp_r * WM) * blk256_in_k;
+        const uint a_ib_k = a_ib_row + block / QUANT_K;
+        const float a_scale0 = float(data_a[a_ib_k].d);
+        const float a_scale1 = float(data_a[a_ib_k + blk256_in_k].d);
+
+        [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+            [[unroll]] for (uint cc = 0; cc < TN; cc++) {
+                [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+                    const uint sums_idx = (wsic * TN + cc) * (WMITER * TM) + wsir * TM;
+                    block_sums[sums_idx + 0u] *= a_scale0;
+                    block_sums[sums_idx + 1u] *= a_scale1;
+                }
+            }
+        }
+#endif
+
+        [[unroll]] for (uint i = 0; i < WMITER*TM*WNITER*TN; i++) {
+            sums[i] += block_sums[i];
+        }
         barrier();
     }
+
+#ifdef DATA_A_IQK_ROW
+    const uint a_row = ir * BM + warp_r * WM;
+    const float a_scale0 = iqks_row_scale(a_offset + a_row * bytes_in_k);
+    const float a_scale1 = iqks_row_scale(a_offset + (a_row + 1u) * bytes_in_k);
+
+    [[unroll]] for (uint wsic = 0; wsic < WNITER; wsic++) {
+        [[unroll]] for (uint cc = 0; cc < TN; cc++) {
+            [[unroll]] for (uint wsir = 0; wsir < WMITER; wsir++) {
+                const uint sums_idx = (wsic * TN + cc) * (WMITER * TM) + wsir * TM;
+                sums[sums_idx + 0u] *= a_scale0;
+                sums[sums_idx + 1u] *= a_scale1;
+            }
+        }
+    }
+#endif
 
     const uint dr = ir * BM + warp_r * WM;
     const uint dc = ic * BN + warp_c * WN;
