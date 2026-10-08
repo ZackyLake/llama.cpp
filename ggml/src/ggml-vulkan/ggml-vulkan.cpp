@@ -1622,6 +1622,19 @@ static bool ggml_vk_iqk_mmq_support(const vk_device& device) {
 #endif
 }
 
+static bool ggml_vk_iqk_mmq_cm1_support(const vk_device& device) {
+#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT) && defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    return !device->coopmat2 && device->fp16 && device->coopmat_support &&
+           device->coopmat_int_support && device->coopmat_int_m == 8 &&
+           device->coopmat_int_n == 16 && device->coopmat_int_k == 32 &&
+           device->coopmat_acc_f32_support && device->coopmat_m == 8 && device->coopmat_n == 16 &&
+           ggml_vk_iqk_mmq_support(device);
+#else
+    GGML_UNUSED(device);
+    return false;
+#endif
+}
+
 static bool ggml_vk_matmul_int_shmem_support(const vk_device& device, const std::vector<uint32_t>& warptile, bool mul_mat_id, ggml_type src0_type) {
 
     // FLOAT_TYPE in the shader is float16_t with fp16 support, otherwise float.
@@ -1701,7 +1714,15 @@ static bool ggml_vk_matmul_int_shmem_support(const vk_device& device, const std:
     const uint32_t warps = warptile[0] / warptile[10];
     const uint32_t ballots_sh = mul_mat_id ? (warps * 4u * (uint32_t)sizeof(uint32_t)) : 0u;
 
-    const uint32_t total_size = buf_a_size + buf_b_size + mmid_row_ids + ballots_sh + lut_size;
+    uint32_t total_size = buf_a_size + buf_b_size + mmid_row_ids + ballots_sh + lut_size;
+    if (ggml_vk_is_iqk_type(src0_type) && warptile[7] == 8 && warptile[8] == 16 && warptile[9] == 32) {
+        const uint32_t k16_stride = 16;
+        total_size = (BM + BN) * k16_stride * 4u * (uint32_t)sizeof(int32_t) +
+                     BM * k16_stride * (uint32_t)sizeof(float) +
+                     BN * BK_STEP * (uint32_t)sizeof(float) +
+                     warptile[9] * (uint32_t)sizeof(int8_t) +
+                     mmid_row_ids + ballots_sh + lut_size;
+    }
     const bool supported = total_size <= device->properties.limits.maxComputeSharedMemorySize;
 
     VK_LOG_DEBUG("ggml_vk_matmul_int_shmem_support(warptile=(" << warptile[0] << "," << warptile[1] << "," << warptile[2] << "), "
@@ -1845,6 +1866,17 @@ static bool ggml_vk_fa_scalar_uses_mmq(const vk_device& device, ggml_type k_type
 void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     VK_LOG_DEBUG("ggml_vk_load_shaders(" << device->name << ")");
 
+    static const int iqkcm = [] {
+        const auto value = std::getenv("iqkcm");
+        if (value != nullptr && std::string("no") == value) {
+            return 0;
+        }
+        if (value != nullptr && std::string("dmm") == value) {
+            return 2;
+        }
+        return 1;
+    }();
+
     // some shaders have a minimum subgroup size
     const uint32_t subgroup_size_8 = std::max(device->subgroup_size, 8u);
     const uint32_t subgroup_size_16 = std::max(device->subgroup_size, 16u);
@@ -1893,6 +1925,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     const std::vector<uint32_t> s_iqk_warptile = { 256, 32, 32, 32, 2, 32, 1, 2, 2, 1, 16 };
     const std::vector<uint32_t> m_iqk_warptile = { 512, 64, 32, 32, 2, 32, 1, 2, 2, 1, 16 };
     const std::vector<uint32_t> l_iqk_warptile = { 512, 64, 64, 32, 2, 64, 1, 2, 2, 1, 16 };
+    const std::vector<uint32_t> s_iqk_cm1_warptile = { 128, 32, 32, 32, 8, 16, 1, 8, 16, 32, 16 };
+    const std::vector<uint32_t> m_iqk_cm1_warptile = { 256, 64, 32, 32, 8, 16, 1, 8, 16, 32, 16 };
+    const std::vector<uint32_t> l_iqk_cm1_warptile = { 512, 64, 64, 32, 8, 16, 1, 8, 16, 32, 16 };
+    const bool use_iqk_cm1 = ggml_vk_iqk_mmq_cm1_support(device) && iqkcm != 0;
+    const auto & s_iqk_mmq_warptile = use_iqk_cm1 ? s_iqk_cm1_warptile : s_iqk_warptile;
+    const auto & m_iqk_mmq_warptile = use_iqk_cm1 ? m_iqk_cm1_warptile : m_iqk_warptile;
+    const auto & l_iqk_mmq_warptile = use_iqk_cm1 ? l_iqk_cm1_warptile : l_iqk_warptile;
     const std::array<uint32_t, 3> s_iqk_wg_denoms = { 32, 32, 1 };
     const std::array<uint32_t, 3> m_iqk_wg_denoms = { 64, 32, 1 };
     const std::array<uint32_t, 3> l_iqk_wg_denoms = { 64, 64, 1 };
@@ -2091,17 +2130,17 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             const bool cm1_k_tile = (t == GGML_TYPE_Q3_K || t == GGML_TYPE_Q6_K ||
                                      t == GGML_TYPE_NVFP4);
 
-            const auto & s_int   = is_iqk ? s_iqk_warptile : use_cm1_int ? (cm1_k_tile ? s_warptile_mmq_cm1_int_k : s_warptile_mmq_cm1_int)
+            const auto & s_int   = is_iqk ? s_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? s_warptile_mmq_cm1_int_k : s_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? s_warptile_mmq_int_k     : s_warptile_mmq_int);
-            const auto & m_int   = is_iqk ? m_iqk_warptile : use_cm1_int ? (cm1_k_tile ? m_warptile_mmq_cm1_int_k : m_warptile_mmq_cm1_int)
+            const auto & m_int   = is_iqk ? m_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? m_warptile_mmq_cm1_int_k : m_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? m_warptile_mmq_int_k     : m_warptile_mmq_int);
-            const auto & l_int   = is_iqk ? l_iqk_warptile : use_cm1_int ? (cm1_k_tile ? l_warptile_mmq_cm1_int_k : l_warptile_mmq_cm1_int)
+            const auto & l_int   = is_iqk ? l_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? l_warptile_mmq_cm1_int_k : l_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? l_warptile_mmq_int_k     : l_warptile_mmq_int);
-            const auto & s_intid = is_iqk ? s_iqk_warptile : use_cm1_int ? (cm1_k_tile ? s_warptile_mmq_cm1_int_k : s_warptile_mmq_cm1_int)
+            const auto & s_intid = is_iqk ? s_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? s_warptile_mmq_cm1_int_k : s_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? s_warptile_mmqid_int_k   : s_warptile_mmqid_int);
-            const auto & m_intid = is_iqk ? m_iqk_warptile : use_cm1_int ? (cm1_k_tile ? m_warptile_mmq_cm1_int_k : m_warptile_mmq_cm1_int)
+            const auto & m_intid = is_iqk ? m_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? m_warptile_mmq_cm1_int_k : m_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? m_warptile_mmqid_int_k   : m_warptile_mmqid_int);
-            const auto & l_intid = is_iqk ? l_iqk_warptile : use_cm1_int ? (cm1_k_tile ? l_warptile_mmq_cm1_int_k : l_warptile_mmq_cm1_int)
+            const auto & l_intid = is_iqk ? l_iqk_mmq_warptile : use_cm1_int ? (cm1_k_tile ? l_warptile_mmq_cm1_int_k : l_warptile_mmq_cm1_int)
                                                : (is_k_quant  ? l_warptile_mmqid_int_k   : l_warptile_mmqid_int);
 
             const auto int_shmem_support = [&](const std::vector<uint32_t>& wt, bool id) {
@@ -2475,9 +2514,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         GGML_UNUSED(type);
         GGML_UNUSED(mul_mat_id);
         std::vector<vk_tile_config> configs = {
-            {s_iqk_warptile, s_iqk_wg_denoms, 32},
-            {m_iqk_warptile, m_iqk_wg_denoms, 32},
-            {l_iqk_warptile, l_iqk_wg_denoms, 32},
+            {s_iqk_mmq_warptile, s_iqk_wg_denoms, 32},
+            {m_iqk_mmq_warptile, m_iqk_wg_denoms, 32},
+            {l_iqk_mmq_warptile, l_iqk_wg_denoms, 32},
         };
         return configs;
     };
@@ -2694,7 +2733,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         {
             FOR_EACH_LUT_FP4_TYPE(X_CM1)
         }
-        // FOR_EACH_IQK_TYPE(X_CM1)
+        if (iqkcm == 2) {
+            FOR_EACH_IQK_TYPE(X_CM1)
+        }
 #undef X_CM1
 
         if (device->coopmat_int_support && (rdna3 || rdna4)) {
@@ -2768,7 +2809,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         {
             FOR_EACH_LUT_FP4_TYPE(X_CM1_ID)
         }
-        // FOR_EACH_IQK_TYPE(X_CM1_ID)
+        if (iqkcm == 2) {
+            FOR_EACH_IQK_TYPE(X_CM1_ID)
+        }
 #undef X_CM1_ID
 
         if (device->coopmat_int_support && (rdna3 || rdna4)) {
@@ -2788,7 +2831,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
-    if (ggml_vk_iqk_mmq_support(device)) {
+    if (iqkcm != 2 && ggml_vk_iqk_mmq_support(device)) {
         auto iqk_create_mmq = [&](vk_matmul_pipeline_key key, const std::string & name,
                                   size_t len, const void * data, uint32_t pc_size, uint32_t pc) {
             auto tc = filter_tc(get_iqk_mmq_tc(key.type_a, key.mul_mat_id), key.type_a, key.mul_mat_id, true);
@@ -2799,13 +2842,17 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         };
 
 #define X_CM1_IQK_MMQ(TYPE, tstr) \
-        iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, false, false}, "matmul_" #tstr "_q8_1", matmul_##tstr##_q8_1_len, matmul_##tstr##_q8_1_data, sizeof(vk_mat_mat_push_constants), 3);
-        FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ)
+    iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, false, false}, use_iqk_cm1 ? "matmul_" #tstr "_q8_1_cm1" : "matmul_" #tstr "_q8_1", use_iqk_cm1 ? matmul_##tstr##_q8_1_cm1_len : matmul_##tstr##_q8_1_len, use_iqk_cm1 ? matmul_##tstr##_q8_1_cm1_data : matmul_##tstr##_q8_1_data, sizeof(vk_mat_mat_push_constants), 3);
+        if (iqkcm != 2) {
+            FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ)
+        }
 #undef X_CM1_IQK_MMQ
 
 #define X_CM1_IQK_MMQ_ID(TYPE, tstr) \
-        iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, true, false}, "matmul_id_" #tstr "_q8_1", matmul_id_##tstr##_q8_1_len, matmul_id_##tstr##_q8_1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
-        FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ_ID)
+    iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, true, false}, use_iqk_cm1 ? "matmul_id_subgroup_" #tstr "_q8_1_cm1" : "matmul_id_" #tstr "_q8_1", use_iqk_cm1 ? matmul_id_subgroup_##tstr##_q8_1_cm1_len : matmul_id_##tstr##_q8_1_len, use_iqk_cm1 ? matmul_id_subgroup_##tstr##_q8_1_cm1_data : matmul_id_##tstr##_q8_1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
+        if (iqkcm != 2) {
+            FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ_ID)
+        }
 #undef X_CM1_IQK_MMQ_ID
     }
 #endif
@@ -2834,6 +2881,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         auto sg_create_mmq = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config>& tc_base,
                                  const std::string& name, size_t len, const void* data, uint32_t pc_size, uint32_t pc,
                                  uint32_t rsgs = 0) {
+            if (iqkcm == 2 && ggml_vk_is_iqk_type(key.type_a)) {
+                return;
+            }
             auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id, true);
             if (!tc.empty()) {
                 spec_fn_t identity = [](const std::vector<uint32_t>& wt, bool) { return wt; };
@@ -7941,24 +7991,24 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context& 
 #else
     const bool y_decode_vector_staging = false;
 #endif
+    const bool prefer_iqk_mmq = ggml_vk_is_iqk_type(src0->type) &&
+                                nei1 > mul_mat_vec_max_cols && !ctx->device->coopmat2 &&
+                                src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) &&
+                                (ne11 * ne10) % 4 == 0;
+    const std::vector<vk_matmul_pipeline_pair>* iqk_mmq_map = prefer_iqk_mmq ?
+        ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0], true) : nullptr;
+    const bool use_iqk_mmq = iqk_mmq_map != nullptr;
+
     const bool y_non_contig = y_decode_vector_staging ||
                               (ctx->device->coopmat2 && src1->type == GGML_TYPE_F32) ||
                               // Intel: force f32->f16 conversion so the f16 B-type quant pipeline is used.
-                              (ctx->device->fp16 && !ctx->device->coopmat2 &&
+                              (ctx->device->fp16 && !ctx->device->coopmat2 && !use_iqk_mmq &&
                                ctx->device->vendor_id == VK_VENDOR_ID_INTEL &&
                                ggml_is_quantized(src0->type) && src1->type == GGML_TYPE_F32) ||
                               (src0->type == GGML_TYPE_BF16 && src1->type != GGML_TYPE_BF16) ||
                               !ggml_vk_dim01_contiguous(src1);
 
     const bool y_f32_kernel = src1->type == GGML_TYPE_F32 && !y_non_contig;
-
-    const bool prefer_iqk_mmq = ggml_vk_is_iqk_type(src0->type) &&
-                                nei1 > mul_mat_vec_max_cols && !ctx->device->coopmat2 &&
-                                src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig &&
-                                (ne11 * ne10) % 4 == 0;
-    const std::vector<vk_matmul_pipeline_pair>* iqk_mmq_map = prefer_iqk_mmq ?
-        ggml_vk_get_mul_mat_mat_pipeline_map(ctx, src0->type, GGML_TYPE_Q8_1, (ggml_prec)dst->op_params[0], true) : nullptr;
-    const bool use_iqk_mmq = iqk_mmq_map != nullptr;
 
     bool quantize_y = use_iqk_mmq || (ctx->device->integer_dot_product && src1->type == GGML_TYPE_F32 && ggml_is_contiguous(src1) && !y_non_contig && (ne11 * ne10) % 4 == 0);
 
