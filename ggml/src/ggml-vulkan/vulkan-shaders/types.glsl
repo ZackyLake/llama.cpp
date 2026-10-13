@@ -759,19 +759,19 @@ shared IQK_LUT_TYPE kvalues_iq6_k[128];
 #define IQK_ROW_META_SIZE 2
 #define IQK_BLOCK_SIZE 86
 
-const i8vec4 kvalues_iq2_kl_const[16] = {
-    { int8_t(-63), int8_t(-23), int8_t(-63), int8_t( 13) }, { int8_t(-40), int8_t(-63), int8_t(-40), int8_t(-10) },
-    { int8_t(-40), int8_t( 13), int8_t(-40), int8_t( 47) }, { int8_t(-23), int8_t(-40), int8_t(-23), int8_t(-23) },
-    { int8_t(-23), int8_t(  1), int8_t(-23), int8_t( 13) }, { int8_t(-23), int8_t( 28), int8_t(-10), int8_t(-63) },
-    { int8_t(-10), int8_t(  1), int8_t(-10), int8_t( 13) }, { int8_t(-10), int8_t( 47), int8_t(  1), int8_t(-23) },
-    { int8_t(  1), int8_t(-10), int8_t(  1), int8_t(  1) }, { int8_t(  1), int8_t( 13), int8_t(  1), int8_t( 28) },
-    { int8_t( 13), int8_t(-40), int8_t( 13), int8_t(-23) }, { int8_t( 13), int8_t(-10), int8_t( 13), int8_t(  1) },
-    { int8_t( 13), int8_t( 13), int8_t( 28), int8_t(-63) }, { int8_t( 28), int8_t(-23), int8_t( 28), int8_t(  1) },
-    { int8_t( 28), int8_t( 28), int8_t( 28), int8_t( 47) }, { int8_t( 47), int8_t(-23), int8_t( 47), int8_t( 13) }
+const uint32_t kvalues_iq2_kl_const[16] = {
+    0x0DC1E9C1u, 0xF6D8C1D8u, 0x2FD80DD8u, 0xE9E9D8E9u,
+    0x0DE901E9u, 0xC1F61CE9u, 0x0DF601F6u, 0xE9012FF6u,
+    0x0101F601u, 0x1C010D01u, 0xE90DD80Du, 0x010DF60Du,
+    0xC11C0D0Du, 0x011CE91Cu, 0x2F1C1C1Cu, 0x0D2FE92Fu
 };
 
 #if defined(IQK_MMQ_LUT)
-shared uint16_t iq2kl_table[64];
+#if defined(IQK_MMQ_LUT_LARGE)
+shared uint32_t iq2kl_table[1024];
+#else
+shared uint16_t iq2kl_table[32];
+#endif
 #else
 shared IQK_LUT_TYPE kvalues_iq2_kl[64];
 #endif
@@ -796,10 +796,8 @@ const int8_t kvalues_iq3_k_const[16] = {
     int8_t(-59), int8_t(-36), int8_t(-19), int8_t(-6), int8_t(5), int8_t(17), int8_t(32), int8_t(51)
 };
 
-#if defined(IQK_MMQ_LUT_LARGE)
-shared uint32_t iq3k_table4[4096];
-#elif defined(IQK_MMQ_LUT)
-shared uint16_t iq3k_table[128];
+#if defined(IQK_MMQ_LUT)
+shared uint32_t iq3k_table[512];
 #else
 shared IQK_LUT_TYPE kvalues_iq3_k[16];
 #endif
@@ -936,95 +934,30 @@ void init_iq2k_table() {
 const uint32_t kpacked32_iq3_k_lo = 0xF6E9D8C1u;
 const uint32_t kpacked32_iq3_k_hi = 0x2F1C0D01u;
 
-#if defined(IQK_MMQ_LUT_LARGE)
-
-void init_iq3k_table4() {
+void init_iq3k_table() {
     const uint laneid = gl_SubgroupInvocationID;
-    const uint z_index = laneid >> 1u;
-    const uint z_target = bool(z_index & 4u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
-    const uint z_value = ((z_target >> ((z_index & 3u) << 3u)) & 0xffu) << 16u;
-    const uint y_target = bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
-    const uint y_value0 = (y_target & 0xffu) << 8u;
-    const uint y_value1 = ((y_target >> 8u) & 0xffu) << 8u;
-    const uint y_value2 = ((y_target >> 16u) & 0xffu) << 8u;
-    const uint y_value3 = ((y_target >> 24u) & 0xffu) << 8u;
+    const uint y_target = bool(laneid & 4u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint y_shift = (laneid & 3u) << 3;
+    const uint y_value = ((y_target >> y_shift) & 0xffu) << 16;
 
-    for (uint index_ = (laneid + gl_SubgroupSize * gl_SubgroupID) * 32u;
-         index_ < 4096u; index_ += gl_WorkGroupSize.x * 32u) {
-        const uint w_shift = (index_ >> 6u) & 0x18u;
-        const uint w_target = bool(index_ & 0x800u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
-        const uint w_value = ((w_target >> w_shift) & 0xffu) << 24u;
-        const uint base = z_value | w_value;
+    for (uint index_ = (laneid + gl_SubgroupSize * gl_SubgroupID) * 8u;
+         index_ < 512u; index_ += gl_WorkGroupSize.x * 8u) {
+        const uint z_shift = 24u - ((index_ >> 3u) & 0x18u);
+        const uint z_target = bool(index_ & 0x100u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+        const uint z_value = (z_target << z_shift) & 0xff000000u;
+        const uint base = z_value | y_value;
 
-        iq3k_table4[index_      ] = base | y_value0 | uint8_t(kvalues_iq3_k_const[0]);
-        iq3k_table4[index_ +  1u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[1]);
-        iq3k_table4[index_ +  2u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[2]);
-        iq3k_table4[index_ +  3u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[3]);
-        iq3k_table4[index_ +  4u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[4]);
-        iq3k_table4[index_ +  5u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[5]);
-        iq3k_table4[index_ +  6u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[6]);
-        iq3k_table4[index_ +  7u] = base | y_value0 | uint8_t(kvalues_iq3_k_const[7]);
-        iq3k_table4[index_ +  8u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[0]);
-        iq3k_table4[index_ +  9u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[1]);
-        iq3k_table4[index_ + 10u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[2]);
-        iq3k_table4[index_ + 11u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[3]);
-        iq3k_table4[index_ + 12u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[4]);
-        iq3k_table4[index_ + 13u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[5]);
-        iq3k_table4[index_ + 14u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[6]);
-        iq3k_table4[index_ + 15u] = base | y_value1 | uint8_t(kvalues_iq3_k_const[7]);
-        iq3k_table4[index_ + 16u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[0]);
-        iq3k_table4[index_ + 17u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[1]);
-        iq3k_table4[index_ + 18u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[2]);
-        iq3k_table4[index_ + 19u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[3]);
-        iq3k_table4[index_ + 20u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[4]);
-        iq3k_table4[index_ + 21u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[5]);
-        iq3k_table4[index_ + 22u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[6]);
-        iq3k_table4[index_ + 23u] = base | y_value2 | uint8_t(kvalues_iq3_k_const[7]);
-        iq3k_table4[index_ + 24u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[0]);
-        iq3k_table4[index_ + 25u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[1]);
-        iq3k_table4[index_ + 26u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[2]);
-        iq3k_table4[index_ + 27u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[3]);
-        iq3k_table4[index_ + 28u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[4]);
-        iq3k_table4[index_ + 29u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[5]);
-        iq3k_table4[index_ + 30u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[6]);
-        iq3k_table4[index_ + 31u] = base | y_value3 | uint8_t(kvalues_iq3_k_const[7]);
+        iq3k_table[index_      ] = base | (uint16_t(kvalues_iq3_k_const[0]) << 8);
+        iq3k_table[index_ +  1u] = base | (uint16_t(kvalues_iq3_k_const[1]) << 8);
+        iq3k_table[index_ +  2u] = base | (uint16_t(kvalues_iq3_k_const[2]) << 8);
+        iq3k_table[index_ +  3u] = base | (uint16_t(kvalues_iq3_k_const[3]) << 8);
+        iq3k_table[index_ +  4u] = base | (uint16_t(kvalues_iq3_k_const[4]) << 8);
+        iq3k_table[index_ +  5u] = base | (uint16_t(kvalues_iq3_k_const[5]) << 8);
+        iq3k_table[index_ +  6u] = base | (uint16_t(kvalues_iq3_k_const[6]) << 8);
+        iq3k_table[index_ +  7u] = base | (uint16_t(kvalues_iq3_k_const[7]) << 8);
     }
     barrier();
 }
-
-#else
-
-void init_iq3k_table() {
-#define WG0_INIT 0
-#if WG0_INIT
-    if (gl_SubgroupID == 0) {
-#endif
-    const uint laneid = gl_SubgroupInvocationID;
-    const uint index = laneid * 4u;
-    const i8vec4 low = i8vec4(unpack8(bool(laneid & 1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo));
-    const uint high_target4 = bool(laneid & 8u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
-    const uint high_target_shift = ((laneid / 2u) % 4u) * 8u;
-    const int8_t high = int8_t(high_target4 >> high_target_shift);
-    const i8vec4 low_hi = low + i8vec4(4);
-    const int8_t high_hi = high + int8_t(4);
-    if (laneid < 16u) {
-        iq3k_table[index     ] = uint16_t(pack16(i8vec2(low.x, high)));
-        iq3k_table[index + 1u] = uint16_t(pack16(i8vec2(low.y, high)));
-        iq3k_table[index + 2u] = uint16_t(pack16(i8vec2(low.z, high)));
-        iq3k_table[index + 3u] = uint16_t(pack16(i8vec2(low.w, high)));
-        iq3k_table[64u + index     ] = uint16_t(pack16(i8vec2(low_hi.x, high_hi)));
-        iq3k_table[64u + index + 1u] = uint16_t(pack16(i8vec2(low_hi.y, high_hi)));
-        iq3k_table[64u + index + 2u] = uint16_t(pack16(i8vec2(low_hi.z, high_hi)));
-        iq3k_table[64u + index + 3u] = uint16_t(pack16(i8vec2(low_hi.w, high_hi)));
-    }
-#if WG0_INIT
-    }
-    subgroupBarrier();
-#endif
-}
-
-#endif
-
 #endif
 
 #if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
@@ -1077,15 +1010,38 @@ void init_iq5k_table() {
 #endif
 
 #if defined(DATA_A_IQ2_KL)
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_subgroup_extended_types_int16 : require
 void init_iq2kl_table() {
-    if (gl_LocalInvocationIndex < 16u) {
-        const i8vec4 values = kvalues_iq2_kl_const[gl_LocalInvocationIndex];
-        const uint index = 4u * gl_LocalInvocationIndex;
-        iq2kl_table[index     ] = pack16(values.xy);
-        iq2kl_table[index + 1u] = pack16(values.yx);
-        iq2kl_table[index + 2u] = pack16(values.zw);
-        iq2kl_table[index + 3u] = pack16(values.wz);
+#if defined(IQK_MMQ_LUT_LARGE)
+    const uint laneid = gl_SubgroupInvocationID;
+    const uint sgid = gl_SubgroupID;
+    const uint sgsize = gl_SubgroupSize;
+    const uint32_t lane_val = kvalues_iq2_kl_const[laneid % 16u];
+    //const u16vec2 lane_val = unpack16(kvalues_iq2_kl_const[laneid % 16u]);
+
+    for (uint i = sgid * sgsize + laneid; i < 32u; i += gl_WorkGroupSize.x) {
+        const uint32_t val = subgroupShuffle(lane_val, i / 2u);
+        const uint32_t high_val = bool(i & 1u) ? (val & 0xffff0000u) : (val << 16u);
+        //const u16vec2 val = subgroupShuffle(lane_val, i / 2u);
+        //const uint32_t high_val = uint32_t(val[i & 1u]) << 16u;
+        const uint table_base = i * 32u;
+
+        [[unroll]] for (uint j = 0; j < 16u; ++j) {
+            const u16vec2 low_pair = unpack16(subgroupBroadcast(lane_val, j));
+            iq2kl_table[table_base + 2u * j     ] = high_val | low_pair.x;
+            iq2kl_table[table_base + 2u * j + 1u] = high_val | low_pair.y;
+        }
     }
+#else
+    if (gl_LocalInvocationIndex < 16u) {
+        const uint i = gl_LocalInvocationIndex;
+        const i8vec4 values = unpack8(int32_t(kvalues_iq2_kl_const[i]));
+        const uint index = 2u * i;
+        iq2kl_table[index     ] = pack16(values.xy);
+        iq2kl_table[index + 1u] = pack16(values.zw);
+    }
+#endif
     barrier();
 }
 #endif
@@ -1110,7 +1066,7 @@ void init_iq_shmem(uvec3 wgsize) {
 #if defined(DATA_A_IQ2_KL)
     if (gl_LocalInvocationIndex.x < 16) {
         const uint i = gl_LocalInvocationIndex.x;
-        const i8vec4 values = kvalues_iq2_kl_const[i];
+        const i8vec4 values = unpack8(int32_t(kvalues_iq2_kl_const[i]));
         kvalues_iq2_kl[4 * i    ] = IQK_LUT_TYPE(values.x);
         kvalues_iq2_kl[4 * i + 1] = IQK_LUT_TYPE(values.y);
         kvalues_iq2_kl[4 * i + 2] = IQK_LUT_TYPE(values.z);

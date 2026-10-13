@@ -1,5 +1,6 @@
 
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_basic : require
 
 uint32_t u4x4_to_u8x4(uint32_t x) {
@@ -76,6 +77,9 @@ uint8_t test_bit_to_get_high4(uint8_t dat, int idx, uint8_t val) {
     return shift_to_get_high4(shift, val);
 }
 
+#define READ16x2(src, idx) pack32(u16vec2(src[idx], src[idx + 1u]))
+//#define READ16x2(src, idx) bitfieldInsert(uint(src[idx]), uint(src[idx + 1u]), 16, 16)
+
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
 int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
     const uint table_offset = is_hi_table ? 256u : 0u;
@@ -85,11 +89,13 @@ int32_t unpack_iq2_k(uint32_t values, bool is_hi_table) {
 #endif
 
 #if defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
-#if defined(IQK_MMQ_LUT_LARGE)
 int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, bool is_hi_table) {
     const uint indexes = (ql & 0x03030303u) | ((qh & 0x01010101u) << 2u);
-    const uint index = (dotPacked4x8EXT(indexes, 0x40080100u) << 3u) | (indexes & 0x7u);
-    return int32_t(iq3k_table4[index] + (is_hi_table ? 0x04040404u : 0u));
+    const uint index = dotPacked4x8EXT(indexes, 0x40080100u);
+    const uint low_target = bool(qh & 0x1u) ? kpacked32_iq3_k_hi : kpacked32_iq3_k_lo;
+    const uint low_shift = (ql & 0x3u) << 3u;
+    const uint low_value = (low_target >> low_shift) & 0xffu;
+    return int32_t((iq3k_table[index] | low_value) + (is_hi_table ? 0x04040404u : 0u));
 }
 
 int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, bool is_hi_table) {
@@ -102,34 +108,6 @@ int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, uint16_t extra_
     const bool is_hi_table = bool(test_bit_to_get_bit(extra_bit01, hi_table_bit_idx, 6));
     return unpack_iq3_k(ql >> shift_l, qh >> shift_h, is_hi_table);
 }
-
-#else
-int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, bool is_hi_table) {
-    const uint indexes = (ql & 0x03030303u) | ((qh & 0x01010101u) << 2u);
-    const uint table_offset = is_hi_table ? 64u : 0u;
-    const uint index0 = table_offset + dotPacked4x8EXT(indexes & 0xffffu, 0x00000801u); // WA for intel bug
-    const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
-    return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
-}
-int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, bool is_hi_table) {
-    const uint16_t shift_l = (shift_h & uint16_t(3)) << 1;
-    const uint indexes = ((ql >> shift_l) & 0x03030303u) |
-                         (((qh >> shift_h) & 0x01010101u) << 2u);
-    const uint table_offset = is_hi_table ? 64u : 0u;
-    const uint index0 = table_offset + dotPacked4x8EXT(indexes & 0xffffu, 0x00000801u); // WA for intel bug
-    const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
-    return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
-}
-int32_t unpack_iq3_k(uint32_t ql, uint32_t qh, uint16_t shift_h, uint16_t extra_bit01, int hi_table_bit_idx) {
-    const uint16_t shift_l = (shift_h & uint16_t(3)) << 1;
-    const uint indexes = ((ql >> shift_l) & 0x03030303u) |
-                         (((qh >> shift_h) & 0x01010101u) << 2u);
-    const uint table_offset = test_bit_to_get_bit(extra_bit01, hi_table_bit_idx, 6);
-    const uint index0 = table_offset + dotPacked4x8EXT(indexes & 0xffffu, 0x00000801u); // WA for intel bug
-    const uint index1 = table_offset + dotPacked4x8EXT(indexes, 0x08010000u);
-    return int32_t(pack32(u16vec2(iq3k_table[index0], iq3k_table[index1])));
-}
-#endif
 #endif
 
 #if defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
@@ -147,17 +125,6 @@ int32_t unpack_iq4_k(uint32_t values, uint shift, bool is_hi_table) {
 #endif
 
 #if defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
-/*
-int32_t unpack_iq5_k(uint32_t values, uint32_t qh, uint shift, uint table_offset) {
-    const uint32_t low = (values >> (4 * (shift & 1))) & 0x0F0F0F0Fu;
-    const uint32_t high = ((qh >> shift) & 0x01010101u) << 4u;
-    const u8vec4 indexes = unpack8(low | high);
-    return pack32(i8vec4(kvalues_iq5_k[indexes.x + table_offset],
-                         kvalues_iq5_k[indexes.y + table_offset],
-                         kvalues_iq5_k[indexes.z + table_offset],
-                         kvalues_iq5_k[indexes.w + table_offset]));
-}
-*/
 int32_t unpack_iq5_k(uint32_t ql, uint32_t qh, bool is_high_table) {
     const uint32_t indexes = (ql & 0x0F0F0F0Fu) | (qh & 0x10101010u);
     const uint index0 = dotPacked4x8EXT(indexes & 0x1f1fu, 0x00002001u); // WA for intel bug
@@ -185,12 +152,17 @@ int32_t unpack_iq6_k(uint32_t values, uint32_t qh, uint shift, bool is_hi_table)
 #endif
 
 #if defined(DATA_A_IQ2_KL)
-i32vec2 unpack_iq2_kl(uint values, uint high, uint16_t ib32) {
-    const uint16_t shift_values = (ib32 & uint16_t(1)) << 2u;
-    const u8vec4 indexes = (unpack8((values >> shift_values) & 0x0F0F0F0Fu) << 1u) |
-                           (unpack8((high >> ib32) & 0x01010101u) << 5u);
+i32vec2 unpack_iq2_kl(uint values, uint high) {
+#if defined(IQK_MMQ_LUT_LARGE)
+    const uint32_t indexes = (values & 0x0F0F0F0Fu) | ((high & 0x01010101u) << 4u);
+    const uint index0 = dotPacked4x8EXT(indexes & 0x1f1fu, 0x00002001u); // WA for intel bug
+    const uint index1 = dotPacked4x8EXT(indexes, 0x20010000u);
+    return i32vec2(int32_t(iq2kl_table[index0]), int32_t(iq2kl_table[index1]));
+#else
+    const u8vec4 indexes = unpack8((values & 0x0F0F0F0Fu) | ((high & 0x01010101u) << 4u));
     return i32vec2(int32_t(pack32(u16vec2(iq2kl_table[indexes.x], iq2kl_table[indexes.y]))),
                    int32_t(pack32(u16vec2(iq2kl_table[indexes.z], iq2kl_table[indexes.w]))));
+#endif
 }
 #endif
 
@@ -259,21 +231,23 @@ void prepare_a_k16x4_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t subid = laneid >> uint16_t(2);
     const bool is_high_16 = bool(subid & uint16_t(1));
     const bool is_high_half = bool(subid & uint16_t(2));
-    const uint16_t qs_idx = (is_high_half ? uint16_t(16) : uint16_t(0)) +
-                            (is_high_16 ? uint16_t(8) : uint16_t(0));
+    const uint16_t qs_idx = subid << 3;
     const uint16_t qh_idx = is_high_16 ? uint16_t(8) : uint16_t(0);
-    const uint ql0 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx     ], data_a_packed16[ib_k].qs[qs_idx + 1u]));
-    const uint ql1 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 2u], data_a_packed16[ib_k].qs[qs_idx + 3u]));
-    const uint ql2 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 4u], data_a_packed16[ib_k].qs[qs_idx + 5u]));
-    const uint ql3 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 6u], data_a_packed16[ib_k].qs[qs_idx + 7u]));
-    const uint qh0 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx     ], data_a_packed16[ib_k].qh[qh_idx + 1u]));
-    const uint qh1 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 2u], data_a_packed16[ib_k].qh[qh_idx + 3u]));
-    const uint qh2 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 4u], data_a_packed16[ib_k].qh[qh_idx + 5u]));
-    const uint qh3 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 6u], data_a_packed16[ib_k].qh[qh_idx + 7u]));
+    const uint ql0 = READ16x2(data_a_packed16[ib_k].qs, qs_idx);
+    const uint ql1 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 2u);
+    const uint ql2 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 4u);
+    const uint ql3 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 6u);
+    const uint h_0 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + (is_high_half ? 4u : 0u));
+    const uint h_1 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + (is_high_half ? 6u : 2u));
+    const uint h_0_xor = subgroupShuffleXor(h_0, 8u);
+    const uint h_1_xor = subgroupShuffleXor(h_1, 8u);
+    const uint qh0 = is_high_half ? h_0_xor : h_0;
+    const uint qh1 = is_high_half ? h_1_xor : h_1;
+    const uint qh2 = is_high_half ? h_0 : h_0_xor;
+    const uint qh3 = is_high_half ? h_1 : h_1_xor;
     const uint16_t scale_shift = (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
     const uint scale_idx = is_high_half ? 2u : 0u;
-    const uint scale_packed = pack32(u16vec2(data_a_packed16[ib_k].scales_l[scale_idx],
-                                             data_a_packed16[ib_k].scales_l[scale_idx + 1u]));
+    const uint scale_packed = READ16x2(data_a_packed16[ib_k].scales_l, scale_idx);
     const uint scale_nibbles = (scale_packed >> (is_high_16 ? 4u : 0u)) & 0x0F0F0F0Fu;
     const uint scale_shifted = (scale_nibbles << 1u) | 0x01010101u;
     const uint16_t scale_h = data_a_packed16[ib_k].scales_h >> scale_shift;
@@ -298,21 +272,23 @@ void prepare_a_k16x4_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
     const uint16_t subid = laneid >> uint16_t(2);
     const bool is_high_16 = bool(subid & uint16_t(1));
     const bool is_high_half = bool(subid & uint16_t(2));
-    const uint16_t qs_idx = (is_high_half ? uint16_t(16) : uint16_t(0)) +
-                            (is_high_16 ? uint16_t(8) : uint16_t(0));
+    const uint16_t qs_idx = subid << 3;
     const uint16_t qh_idx = is_high_16 ? uint16_t(8) : uint16_t(0);
-    const uint ql0 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx     ], data_a_packed16[ib_k].qs[qs_idx + 1u]));
-    const uint ql1 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 2u], data_a_packed16[ib_k].qs[qs_idx + 3u]));
-    const uint ql2 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 4u], data_a_packed16[ib_k].qs[qs_idx + 5u]));
-    const uint ql3 = pack32(u16vec2(data_a_packed16[ib_k].qs[qs_idx + 6u], data_a_packed16[ib_k].qs[qs_idx + 7u]));
-    const uint qh0 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx     ], data_a_packed16[ib_k].qh[qh_idx + 1u]));
-    const uint qh1 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 2u], data_a_packed16[ib_k].qh[qh_idx + 3u]));
-    const uint qh2 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 4u], data_a_packed16[ib_k].qh[qh_idx + 5u]));
-    const uint qh3 = pack32(u16vec2(data_a_packed16[ib_k].qh[qh_idx + 6u], data_a_packed16[ib_k].qh[qh_idx + 7u]));
+    const uint ql0 = READ16x2(data_a_packed16[ib_k].qs, qs_idx);
+    const uint ql1 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 2u);
+    const uint ql2 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 4u);
+    const uint ql3 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 6u);
+    const uint h_0 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + (is_high_half ? 4u : 0u));
+    const uint h_1 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + (is_high_half ? 6u : 2u));
+    const uint h_0_xor = subgroupShuffleXor(h_0, 8u);
+    const uint h_1_xor = subgroupShuffleXor(h_1, 8u);
+    const uint qh0 = is_high_half ? h_0_xor : h_0;
+    const uint qh1 = is_high_half ? h_1_xor : h_1;
+    const uint qh2 = is_high_half ? h_0 : h_0_xor;
+    const uint qh3 = is_high_half ? h_1 : h_1_xor;
     const uint16_t scale_shift = (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
     const uint scale_idx = is_high_half ? 2u : 0u;
-    const uint scale_packed = pack32(u16vec2(data_a_packed16[ib_k].scales_l[scale_idx],
-                                             data_a_packed16[ib_k].scales_l[scale_idx + 1u]));
+    const uint scale_packed = READ16x2(data_a_packed16[ib_k].scales_l, scale_idx);
     const uint scale_nibbles = (scale_packed >> (is_high_16 ? 4u : 0u)) & 0x0F0F0F0Fu;
     const uint scale_shifted = (scale_nibbles << 1u) | 0x01010101u;
     const uint16_t scale_h = data_a_packed16[ib_k].scales_h >> scale_shift;
@@ -442,11 +418,10 @@ void prepare_a_k32x2_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t subid = laneid >> 2u;
     const uint16_t ib32 = subid << 1u;
     const uint16_t qs_idx = ib32 << 2u;
-    const uint16_t qh_idx = uint16_t(0);
+    const bool is_high_half = bool(laneid & uint16_t(8));
+    const uint16_t qh_idx = is_high_half ? uint16_t(4) : uint16_t(0);
     const uint16_t qs_idx0 = qs_idx;
     const uint16_t qs_idx1 = qs_idx + uint16_t(4);
-    const uint16_t qh_idx0 = qh_idx;
-    const uint16_t qh_idx1 = qh_idx + uint16_t(4);
     const uvec4 qs0 = uvec4(data_a_packed32[ib_k].qs[qs_idx0 + 0u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 1u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 2u],
@@ -455,38 +430,37 @@ void prepare_a_k32x2_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
                             data_a_packed32[ib_k].qs[qs_idx1 + 1u],
                             data_a_packed32[ib_k].qs[qs_idx1 + 2u],
                             data_a_packed32[ib_k].qs[qs_idx1 + 3u]);
-    const uvec4 qh0 = uvec4(data_a_packed32[ib_k].qh[qh_idx0 + 0u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 1u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 2u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 3u]);
-    const uvec4 qh1 = uvec4(data_a_packed32[ib_k].qh[qh_idx1 + 0u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 1u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 2u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 3u]);
-    const uint16_t block0 = ib32;
-    const uint16_t block1 = ib32 + uint16_t(1);
+    const uvec4 qh_raw = uvec4(data_a_packed32[ib_k].qh[qh_idx + 0u],
+                               data_a_packed32[ib_k].qh[qh_idx + 1u],
+                               data_a_packed32[ib_k].qh[qh_idx + 2u],
+                               data_a_packed32[ib_k].qh[qh_idx + 3u]);
+    const uvec4 qh_raw_xor = subgroupShuffleXor(qh_raw, 8u);
+    const uvec4 qh0 = is_high_half ? qh_raw_xor : qh_raw;
+    const uvec4 qh1 = is_high_half ? qh_raw : qh_raw_xor;
+    const uvec4 qh_shifted0 = qh0 >> ib32;
+    const uvec4 qh_shifted1 = qh1 >> ib32;
     const uint16_t table_offset_bits = data_a[ib_k].extra >> (ib32 << 1u);
     const bool is_high_table0 = bool((table_offset_bits >> uint16_t(0)) & uint16_t(1));
     const bool is_high_table1 = bool((table_offset_bits >> uint16_t(1)) & uint16_t(1));
     const bool is_high_table2 = bool((table_offset_bits >> uint16_t(2)) & uint16_t(1));
     const bool is_high_table3 = bool((table_offset_bits >> uint16_t(3)) & uint16_t(1));
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
+    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh_shifted0.x << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.y, qh_shifted0.y << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.z, qh_shifted0.z << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.w, qh_shifted0.w << 4u, is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh_shifted1.x << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.y, qh_shifted1.y << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.z, qh_shifted1.z << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.w, qh_shifted1.w << 4u, is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x >> 4u, qh_shifted0.x << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.y >> 4u, qh_shifted0.y << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.z >> 4u, qh_shifted0.z << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.w >> 4u, qh_shifted0.w << 3u, is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x >> 4u, qh_shifted1.x << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.y >> 4u, qh_shifted1.y << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.z >> 4u, qh_shifted1.z << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.w >> 4u, qh_shifted1.w << 3u, is_high_table3));
 
     const uint16_t scale_l = uint16_t(data_a_packed32[ib_k].scales_l[subid >> 1] >>
                                       ((subid & uint16_t(1)) << 4));
@@ -502,10 +476,11 @@ void prepare_a_k32x2_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
     const uint16_t ib32 = subid << 1u;
     const uint16_t qs_idx = ib32 << 2u;
     const uint16_t qh_idx = uint16_t(0);
-    const uint16_t qs_idx0 = qs_idx + ((row & uint16_t(1)) << 2);
-    const uint16_t qs_idx1 = qs_idx + (((row ^ uint16_t(1)) & uint16_t(1)) << 2);
-    const uint16_t qh_idx0 = qh_idx + ((row & uint16_t(1)) << 2);
-    const uint16_t qh_idx1 = qh_idx + (((row ^ uint16_t(1)) & uint16_t(1)) << 2);
+    const bool is_odd_row = bool(row & uint16_t(1));
+    const uint16_t qs_idx0 = qs_idx + (is_odd_row ? uint16_t(4) : uint16_t(0));
+    const uint16_t qs_idx1 = qs_idx + (is_odd_row ? uint16_t(0) : uint16_t(4));
+    const uint16_t qh_idx0 = qh_idx + (is_odd_row ? uint16_t(4) : uint16_t(0));
+    const uint16_t qh_idx1 = qh_idx + (is_odd_row ? uint16_t(0) : uint16_t(4));
     const uvec4 qs0 = uvec4(data_a_packed32[ib_k].qs[qs_idx0 + 0u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 1u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 2u],
@@ -522,30 +497,31 @@ void prepare_a_k32x2_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_s
                             data_a_packed32[ib_k].qh[qh_idx1 + 1u],
                             data_a_packed32[ib_k].qh[qh_idx1 + 2u],
                             data_a_packed32[ib_k].qh[qh_idx1 + 3u]);
-    const uint16_t block0 = ib32 + ((row & uint16_t(2)) >> 1);
-    const uint16_t block1 = ib32 + (((row ^ uint16_t(2)) & uint16_t(2)) >> 1);
+    const bool is_high_first = bool(row & uint16_t(2));
+    const uvec4 qh_shifted0 = qh0 >> ib32;
+    const uvec4 qh_shifted1 = qh1 >> ib32;
     const uint16_t table_offset_bits = data_a[ib_k].extra >> (ib32 << 1);
     const bool is_high_table0 = bool((table_offset_bits >> row) & 1u);
     const bool is_high_table1 = bool((table_offset_bits >> (row ^ uint16_t(1))) & 1u);
     const bool is_high_table2 = bool((table_offset_bits >> (row ^ uint16_t(2))) & 1u);
     const bool is_high_table3 = bool((table_offset_bits >> (row ^ uint16_t(3))) & 1u);
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
+    qs_a[0] = i32vec4(unpack_iq5_k(is_high_first ? (qs0.x >> 4u) : qs0.x, is_high_first ? (qh_shifted0.x << 3u) : (qh_shifted0.x << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.y >> 4u) : qs0.y, is_high_first ? (qh_shifted0.y << 3u) : (qh_shifted0.y << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.z >> 4u) : qs0.z, is_high_first ? (qh_shifted0.z << 3u) : (qh_shifted0.z << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.w >> 4u) : qs0.w, is_high_first ? (qh_shifted0.w << 3u) : (qh_shifted0.w << 4u), is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(is_high_first ? (qs1.x >> 4u) : qs1.x, is_high_first ? (qh_shifted1.x << 3u) : (qh_shifted1.x << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.y >> 4u) : qs1.y, is_high_first ? (qh_shifted1.y << 3u) : (qh_shifted1.y << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.z >> 4u) : qs1.z, is_high_first ? (qh_shifted1.z << 3u) : (qh_shifted1.z << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.w >> 4u) : qs1.w, is_high_first ? (qh_shifted1.w << 3u) : (qh_shifted1.w << 4u), is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(is_high_first ? qs0.x : (qs0.x >> 4u), is_high_first ? (qh_shifted0.x << 4u) : (qh_shifted0.x << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.y : (qs0.y >> 4u), is_high_first ? (qh_shifted0.y << 4u) : (qh_shifted0.y << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.z : (qs0.z >> 4u), is_high_first ? (qh_shifted0.z << 4u) : (qh_shifted0.z << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.w : (qs0.w >> 4u), is_high_first ? (qh_shifted0.w << 4u) : (qh_shifted0.w << 3u), is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(is_high_first ? qs1.x : (qs1.x >> 4u), is_high_first ? (qh_shifted1.x << 4u) : (qh_shifted1.x << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.y : (qs1.y >> 4u), is_high_first ? (qh_shifted1.y << 4u) : (qh_shifted1.y << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.z : (qs1.z >> 4u), is_high_first ? (qh_shifted1.z << 4u) : (qh_shifted1.z << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.w : (qs1.w >> 4u), is_high_first ? (qh_shifted1.w << 4u) : (qh_shifted1.w << 3u), is_high_table3));
 
     const uint16_t scale_l = uint16_t(data_a_packed32[ib_k].scales_l[subid >> 1] >>
                                       ((subid & uint16_t(1)) << 4));
@@ -562,11 +538,10 @@ void prepare_a_k32x2_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t subid = laneid >> 2;
     const uint16_t ib32 = subid << 1;
     const uint16_t qs_idx = ib32 << 2;
-    const uint16_t qh_idx = (ib32 >> 2) << 3;
+    const bool is_high_qh = bool(laneid & uint16_t(0x4));
+    const uint16_t qh_idx = laneid & uint16_t(0xc);
     const uint16_t qs_idx0 = qs_idx;
     const uint16_t qs_idx1 = qs_idx + uint16_t(4);
-    const uint16_t qh_idx0 = qh_idx;
-    const uint16_t qh_idx1 = qh_idx + uint16_t(4);
     const uvec4 qs0 = uvec4(data_a_packed32[ib_k].qs[qs_idx0 + 0u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 1u],
                             data_a_packed32[ib_k].qs[qs_idx0 + 2u],
@@ -575,14 +550,13 @@ void prepare_a_k32x2_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
                             data_a_packed32[ib_k].qs[qs_idx1 + 1u],
                             data_a_packed32[ib_k].qs[qs_idx1 + 2u],
                             data_a_packed32[ib_k].qs[qs_idx1 + 3u]);
-    const uvec4 qh0 = uvec4(data_a_packed32[ib_k].qh[qh_idx0 + 0u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 1u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 2u],
-                            data_a_packed32[ib_k].qh[qh_idx0 + 3u]);
-    const uvec4 qh1 = uvec4(data_a_packed32[ib_k].qh[qh_idx1 + 0u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 1u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 2u],
-                            data_a_packed32[ib_k].qh[qh_idx1 + 3u]);
+    const uvec4 qh_raw = uvec4(data_a_packed32[ib_k].qh[qh_idx + 0u],
+                               data_a_packed32[ib_k].qh[qh_idx + 1u],
+                               data_a_packed32[ib_k].qh[qh_idx + 2u],
+                               data_a_packed32[ib_k].qh[qh_idx + 3u]);
+    const uvec4 qh_raw_xor = subgroupShuffleXor(qh_raw, 4u);
+    const uvec4 qh0 = is_high_qh ? qh_raw_xor : qh_raw;
+    const uvec4 qh1 = is_high_qh ? qh_raw : qh_raw_xor;
     const uint16_t block0 = ib32;
     const uint16_t block1 = ib32 + uint16_t(1);
     const uint16_t shift0 = (block0 & uint16_t(3)) << 1;
@@ -1496,10 +1470,16 @@ void rm_prepare_a_k16x4_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
     const uint ql1 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  4u), iqks_load_u16(qs_offset_bytes +  6u)));
     const uint ql2 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  8u), iqks_load_u16(qs_offset_bytes + 10u)));
     const uint ql3 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 12u), iqks_load_u16(qs_offset_bytes + 14u)));
-    const uint qh0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes      ), iqks_load_u16(qh_offset_bytes +  2u)));
-    const uint qh1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  4u), iqks_load_u16(qh_offset_bytes +  6u)));
-    const uint qh2 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  8u), iqks_load_u16(qh_offset_bytes + 10u)));
-    const uint qh3 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 12u), iqks_load_u16(qh_offset_bytes + 14u)));
+    const uint h_0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + (is_high_half ?  8u :  0u)),
+                                      iqks_load_u16(qh_offset_bytes + (is_high_half ? 10u :  2u))));
+    const uint h_1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + (is_high_half ? 12u :  4u)),
+                                      iqks_load_u16(qh_offset_bytes + (is_high_half ? 14u :  6u))));
+    const uint h_0_xor = subgroupShuffleXor(h_0, 8u);
+    const uint h_1_xor = subgroupShuffleXor(h_1, 8u);
+    const uint qh0 = is_high_half ? h_0_xor : h_0;
+    const uint qh1 = is_high_half ? h_1_xor : h_1;
+    const uint qh2 = is_high_half ? h_0 : h_0_xor;
+    const uint qh3 = is_high_half ? h_1 : h_1_xor;
     const uint16_t extra = iqks_load_u16(block_byte_offset);
     const uint scale_group_offset = is_high_half ? 4u : 0u;
     const uint scale_packed = iqks_load_u32(block_byte_offset + 2u);
@@ -1535,10 +1515,16 @@ void rm_prepare_a_k16x4_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     const uint ql1 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  4u), iqks_load_u16(qs_offset_bytes +  6u)));
     const uint ql2 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  8u), iqks_load_u16(qs_offset_bytes + 10u)));
     const uint ql3 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 12u), iqks_load_u16(qs_offset_bytes + 14u)));
-    const uint qh0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes      ), iqks_load_u16(qh_offset_bytes +  2u)));
-    const uint qh1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  4u), iqks_load_u16(qh_offset_bytes +  6u)));
-    const uint qh2 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  8u), iqks_load_u16(qh_offset_bytes + 10u)));
-    const uint qh3 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 12u), iqks_load_u16(qh_offset_bytes + 14u)));
+    const uint h_0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + (is_high_half ?  8u :  0u)),
+                                      iqks_load_u16(qh_offset_bytes + (is_high_half ? 10u :  2u))));
+    const uint h_1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + (is_high_half ? 12u :  4u)),
+                                      iqks_load_u16(qh_offset_bytes + (is_high_half ? 14u :  6u))));
+    const uint h_0_xor = subgroupShuffleXor(h_0, 8u);
+    const uint h_1_xor = subgroupShuffleXor(h_1, 8u);
+    const uint qh0 = is_high_half ? h_0_xor : h_0;
+    const uint qh1 = is_high_half ? h_1_xor : h_1;
+    const uint qh2 = is_high_half ? h_0 : h_0_xor;
+    const uint qh3 = is_high_half ? h_1 : h_1_xor;
     const uint16_t extra = iqks_load_u16(block_byte_offset);
     const uint scale_group_offset = is_high_half ? 4u : 0u;
     const uint scale_packed = iqks_load_u32(block_byte_offset + 2u);
@@ -1804,39 +1790,37 @@ void rm_prepare_a_k32x2_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t subid = laneid >> 2u;
     const uint16_t ib32 = subid << 1u;
+    const bool is_high_half = bool(laneid & uint16_t(8));
     const uint qs_offset = block_byte_offset + 6u + (ib32 << 3u);
-    const uint qh_offset = block_byte_offset + 70u;
+    const uint qh_offset = block_byte_offset + 70u + (is_high_half ? 8u : 0u);
 
-    const uint qs_offset0 = qs_offset;
-    const uint qs_offset1 = qs_offset + 8u;
-    const uint qh_offset0 = qh_offset;
-    const uint qh_offset1 = qh_offset + 8u;
-    const uvec2 qs0 = uvec2(iqks_load_u32(qs_offset0 + 0u),
-                            iqks_load_u32(qs_offset0 + 4u));
-    const uvec2 qs1 = uvec2(iqks_load_u32(qs_offset1 + 0u),
-                            iqks_load_u32(qs_offset1 + 4u));
-    const uvec2 qh0 = uvec2(iqks_load_u32(qh_offset0 + 0u),
-                            iqks_load_u32(qh_offset0 + 4u));
-    const uvec2 qh1 = uvec2(iqks_load_u32(qh_offset1 + 0u),
-                            iqks_load_u32(qh_offset1 + 4u));
+    const uvec2 qs0 = uvec2(iqks_load_u32(qs_offset + 0u),
+                            iqks_load_u32(qs_offset + 4u));
+    const uvec2 qs1 = uvec2(iqks_load_u32(qs_offset + 8u),
+                            iqks_load_u32(qs_offset + 12u));
+    const uvec2 qh_raw = uvec2(iqks_load_u32(qh_offset + 0u),
+                               iqks_load_u32(qh_offset + 4u));
+    const uvec2 qh_raw_xor = subgroupShuffleXor(qh_raw, 8u);
+    const uvec2 qh0 = is_high_half ? qh_raw_xor : qh_raw;
+    const uvec2 qh1 = is_high_half ? qh_raw : qh_raw_xor;
 
     const uint16_t block0 = ib32;
     const uint16_t block1 = ib32 + uint16_t(1);
-    const i32vec2 values00 = unpack_iq2_kl(qs0.x, qh0.x, block0);
-    const i32vec2 values01 = unpack_iq2_kl(qs0.y, qh0.y, block0);
-    const i32vec2 values10 = unpack_iq2_kl(qs1.x, qh1.x, block0);
-    const i32vec2 values11 = unpack_iq2_kl(qs1.y, qh1.y, block0);
-    const i32vec2 values20 = unpack_iq2_kl(qs0.x, qh0.x, block1);
-    const i32vec2 values21 = unpack_iq2_kl(qs0.y, qh0.y, block1);
-    const i32vec2 values30 = unpack_iq2_kl(qs1.x, qh1.x, block1);
-    const i32vec2 values31 = unpack_iq2_kl(qs1.y, qh1.y, block1);
+    const i32vec2 values00 = unpack_iq2_kl(qs0.x, qh0.x >> block0);
+    const i32vec2 values01 = unpack_iq2_kl(qs0.y, qh0.y >> block0);
+    const i32vec2 values10 = unpack_iq2_kl(qs1.x, qh1.x >> block0);
+    const i32vec2 values11 = unpack_iq2_kl(qs1.y, qh1.y >> block0);
+    const i32vec2 values20 = unpack_iq2_kl(qs0.x >> 4u, qh0.x >> block1);
+    const i32vec2 values21 = unpack_iq2_kl(qs0.y >> 4u, qh0.y >> block1);
+    const i32vec2 values30 = unpack_iq2_kl(qs1.x >> 4u, qh1.x >> block1);
+    const i32vec2 values31 = unpack_iq2_kl(qs1.y >> 4u, qh1.y >> block1);
 
     qs_a[0] = i32vec4(values00.x, values00.y, values01.x, values01.y);
     qs_a[1] = i32vec4(values10.x, values10.y, values11.x, values11.y);
     qs_a[2] = i32vec4(values20.x, values20.y, values21.x, values21.y);
     qs_a[3] = i32vec4(values30.x, values30.y, values31.x, values31.y);
 
-    const uint scale_offset = block_byte_offset + 2u + uint(ib32 & uint16_t(3));
+    const uint scale_offset = block_byte_offset + 2u + (ib32 & uint16_t(3));
     const uint16_t scale_l = iqks_load_u16(scale_offset);
     const uint16_t scale_h = iqks_load_u16(block_byte_offset) >> (ib32 << 1u);
     const uint16_t scale_shift = ib32 & uint16_t(4);
@@ -1854,39 +1838,44 @@ void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     const uint16_t row = laneid & uint16_t(3);
     const uint16_t subid = laneid >> 2u;
     const uint16_t ib32 = subid << 1u;
+    const bool is_odd_row = bool(row & uint16_t(1));
+    const bool is_high_half = bool(laneid & uint16_t(8));
     const uint qs_offset = block_byte_offset + 6u + (ib32 << 3u);
-    const uint qh_offset = block_byte_offset + 70u;
+    const uint qh_offset = block_byte_offset + 70u + (is_high_half ? 8u : 0u);
 
-    const uint qs_offset0 = qs_offset + ((row & uint16_t(1)) << 3u);
-    const uint qs_offset1 = qs_offset + (((row ^ uint16_t(1)) & uint16_t(1)) << 3u);
-    const uint qh_offset0 = qh_offset + ((row & uint16_t(1)) << 3u);
-    const uint qh_offset1 = qh_offset + (((row ^ uint16_t(1)) & uint16_t(1)) << 3u);
+    const uint qs_offset0 = qs_offset + (is_odd_row ? 8u : 0u);
+    const uint qs_offset1 = qs_offset + (is_odd_row ? 0u : 8u);
     const uvec2 qs0 = uvec2(iqks_load_u32(qs_offset0 + 0u),
                             iqks_load_u32(qs_offset0 + 4u));
     const uvec2 qs1 = uvec2(iqks_load_u32(qs_offset1 + 0u),
                             iqks_load_u32(qs_offset1 + 4u));
-    const uvec2 qh0 = uvec2(iqks_load_u32(qh_offset0 + 0u),
-                            iqks_load_u32(qh_offset0 + 4u));
-    const uvec2 qh1 = uvec2(iqks_load_u32(qh_offset1 + 0u),
-                            iqks_load_u32(qh_offset1 + 4u));
+    const uvec2 qh_raw = uvec2(iqks_load_u32(qh_offset + 0u),
+                               iqks_load_u32(qh_offset + 4u));
+    const uvec2 qh_raw_xor = subgroupShuffleXor(qh_raw, 8u);
+    const bool swap_qh = is_high_half != is_odd_row;
+    const uvec2 qh0 = swap_qh ? qh_raw_xor : qh_raw;
+    const uvec2 qh1 = swap_qh ? qh_raw : qh_raw_xor;
 
-    const uint16_t block0 = ib32 + ((row & uint16_t(2)) >> 1u);
-    const uint16_t block1 = ib32 + (((row ^ uint16_t(2)) & uint16_t(2)) >> 1u);
-    const i32vec2 values00 = unpack_iq2_kl(qs0.x, qh0.x, block0);
-    const i32vec2 values01 = unpack_iq2_kl(qs0.y, qh0.y, block0);
-    const i32vec2 values10 = unpack_iq2_kl(qs1.x, qh1.x, block0);
-    const i32vec2 values11 = unpack_iq2_kl(qs1.y, qh1.y, block0);
-    const i32vec2 values20 = unpack_iq2_kl(qs0.x, qh0.x, block1);
-    const i32vec2 values21 = unpack_iq2_kl(qs0.y, qh0.y, block1);
-    const i32vec2 values30 = unpack_iq2_kl(qs1.x, qh1.x, block1);
-    const i32vec2 values31 = unpack_iq2_kl(qs1.y, qh1.y, block1);
+    const bool is_high_block = bool(laneid & uint16_t(2));
+    const uint16_t block0 = ib32 + (is_high_block ? uint16_t(1) : uint16_t(0));
+    const uint16_t block1 = ib32 + (is_high_block ? uint16_t(0) : uint16_t(1));
+    const uint16_t shift0 = is_high_block ? uint16_t(4) : uint16_t(0);
+    const uint16_t shift1 = is_high_block ? uint16_t(0) : uint16_t(4);
+    const i32vec2 values00 = unpack_iq2_kl(qs0.x >> shift0, qh0.x >> block0);
+    const i32vec2 values01 = unpack_iq2_kl(qs0.y >> shift0, qh0.y >> block0);
+    const i32vec2 values10 = unpack_iq2_kl(qs1.x >> shift0, qh1.x >> block0);
+    const i32vec2 values11 = unpack_iq2_kl(qs1.y >> shift0, qh1.y >> block0);
+    const i32vec2 values20 = unpack_iq2_kl(qs0.x >> shift1, qh0.x >> block1);
+    const i32vec2 values21 = unpack_iq2_kl(qs0.y >> shift1, qh0.y >> block1);
+    const i32vec2 values30 = unpack_iq2_kl(qs1.x >> shift1, qh1.x >> block1);
+    const i32vec2 values31 = unpack_iq2_kl(qs1.y >> shift1, qh1.y >> block1);
 
     qs_a[0] = i32vec4(values00.x, values00.y, values01.x, values01.y);
     qs_a[1] = i32vec4(values10.x, values10.y, values11.x, values11.y);
     qs_a[2] = i32vec4(values20.x, values20.y, values21.x, values21.y);
     qs_a[3] = i32vec4(values30.x, values30.y, values31.x, values31.y);
 
-    const uint scale_offset = block_byte_offset + 2u + uint(ib32 & uint16_t(3));
+    const uint scale_offset = block_byte_offset + 2u + (ib32 & uint16_t(3));
     const uint16_t scale_l = iqks_load_u16(scale_offset);
     const uint16_t scale_h = iqks_load_u16(block_byte_offset) >> (ib32 << 1u);
     const uint16_t scale_shift = ib32 & uint16_t(4);
@@ -1931,10 +1920,10 @@ void rm_prepare_a_k32x2_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
                             iqks_load_u32(qh_offset1 +  8u),
                             iqks_load_u32(qh_offset1 + 12u));
 
-    const uint16_t block0 = ib32;
-    const uint16_t block1 = ib32 + uint16_t(1);
+    const uvec4 qh_shifted0 = qh0 >> ib32;
+    const uvec4 qh_shifted1 = qh1 >> ib32;
     const uint16_t scale_packed = iqks_load_u16(block_byte_offset + ib32);
-    const u8vec2 scale_bytes = unpack8(scale_packed).xy;
+    const u8vec2 scale_bytes = unpack8(scale_packed);
     const uint16_t scale_lo = uint16_t(scale_bytes.x) * uint16_t(0x0101);
     const uint16_t scale_hi = uint16_t(scale_bytes.y) * uint16_t(0x0101);
     const uint scale_repeated = pack32(u16vec2(scale_lo, scale_hi));
@@ -1946,22 +1935,22 @@ void rm_prepare_a_k32x2_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
     const bool is_high_table2 = bool((scale_table_bits >> uint16_t(1)) & uint16_t(1));
     const bool is_high_table3 = is_high_table2;
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
+    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh_shifted0.x << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.y, qh_shifted0.y << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.z, qh_shifted0.z << 4u, is_high_table0),
+                      unpack_iq5_k(qs0.w, qh_shifted0.w << 4u, is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh_shifted1.x << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.y, qh_shifted1.y << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.z, qh_shifted1.z << 4u, is_high_table1),
+                      unpack_iq5_k(qs1.w, qh_shifted1.w << 4u, is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x >> 4u, qh_shifted0.x << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.y >> 4u, qh_shifted0.y << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.z >> 4u, qh_shifted0.z << 3u, is_high_table2),
+                      unpack_iq5_k(qs0.w >> 4u, qh_shifted0.w << 3u, is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x >> 4u, qh_shifted1.x << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.y >> 4u, qh_shifted1.y << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.z >> 4u, qh_shifted1.z << 3u, is_high_table3),
+                      unpack_iq5_k(qs1.w >> 4u, qh_shifted1.w << 3u, is_high_table3));
 }
 
 void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4], out i8vec4 a_scales) {
@@ -1972,10 +1961,11 @@ void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     const uint qs_offset = block_byte_offset + 8u + (ib32 << 4u);
     const uint qh_offset = block_byte_offset + 136u;
 
-    const uint qs_offset0 = qs_offset + ((row & uint16_t(1)) << 4u);
-    const uint qs_offset1 = qs_offset + (((row ^ uint16_t(1)) & uint16_t(1)) << 4u);
-    const uint qh_offset0 = qh_offset + ((row & uint16_t(1)) << 4u);
-    const uint qh_offset1 = qh_offset + (((row ^ uint16_t(1)) & uint16_t(1)) << 4u);
+    const bool is_odd_row = bool(row & uint16_t(1));
+    const uint qs_offset0 = qs_offset + (is_odd_row ? 16u : 0u);
+    const uint qs_offset1 = qs_offset + (is_odd_row ? 0u : 16u);
+    const uint qh_offset0 = qh_offset + (is_odd_row ? 16u : 0u);
+    const uint qh_offset1 = qh_offset + (is_odd_row ? 0u : 16u);
     const uvec4 qs0 = uvec4(iqks_load_u32(qs_offset0 +  0u),
                             iqks_load_u32(qs_offset0 +  4u),
                             iqks_load_u32(qs_offset0 +  8u),
@@ -1993,10 +1983,13 @@ void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
                             iqks_load_u32(qh_offset1 +  8u),
                             iqks_load_u32(qh_offset1 + 12u));
 
+    const bool is_high_first = bool(row & uint16_t(2));
+    const uvec4 qh_shifted0 = qh0 >> ib32;
+    const uvec4 qh_shifted1 = qh1 >> ib32;
     const uint16_t block0 = ib32 + ((row & uint16_t(2)) >> 1u);
     const uint16_t block1 = ib32 + (((row ^ uint16_t(2)) & uint16_t(2)) >> 1u);
     const uint16_t scale_packed = iqks_load_u16(block_byte_offset + ib32);
-    const u8vec2 scale_bytes = unpack8(scale_packed).xy;
+    const u8vec2 scale_bytes = unpack8(scale_packed);
     const uint16_t scale_lo = uint16_t(scale_bytes.x) * uint16_t(0x0101);
     const uint16_t scale_hi = uint16_t(scale_bytes.y) * uint16_t(0x0101);
     const uint scale_repeated = pack32(u16vec2(scale_lo, scale_hi));
@@ -2008,22 +2001,22 @@ void rm_prepare_a_k32x2_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4]
     const bool is_high_table2 = bool((scale_table_bits >> (block1 - ib32)) & uint16_t(1));
     const bool is_high_table3 = is_high_table2;
 
-    qs_a[0] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block0, is_high_table0),
-                      unpack_iq5_k(qs0.y, qh0.y, block0, is_high_table0),
-                      unpack_iq5_k(qs0.z, qh0.z, block0, is_high_table0),
-                      unpack_iq5_k(qs0.w, qh0.w, block0, is_high_table0));
-    qs_a[1] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block0, is_high_table1),
-                      unpack_iq5_k(qs1.y, qh1.y, block0, is_high_table1),
-                      unpack_iq5_k(qs1.z, qh1.z, block0, is_high_table1),
-                      unpack_iq5_k(qs1.w, qh1.w, block0, is_high_table1));
-    qs_a[2] = i32vec4(unpack_iq5_k(qs0.x, qh0.x, block1, is_high_table2),
-                      unpack_iq5_k(qs0.y, qh0.y, block1, is_high_table2),
-                      unpack_iq5_k(qs0.z, qh0.z, block1, is_high_table2),
-                      unpack_iq5_k(qs0.w, qh0.w, block1, is_high_table2));
-    qs_a[3] = i32vec4(unpack_iq5_k(qs1.x, qh1.x, block1, is_high_table3),
-                      unpack_iq5_k(qs1.y, qh1.y, block1, is_high_table3),
-                      unpack_iq5_k(qs1.z, qh1.z, block1, is_high_table3),
-                      unpack_iq5_k(qs1.w, qh1.w, block1, is_high_table3));
+    qs_a[0] = i32vec4(unpack_iq5_k(is_high_first ? (qs0.x >> 4u) : qs0.x, is_high_first ? (qh_shifted0.x << 3u) : (qh_shifted0.x << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.y >> 4u) : qs0.y, is_high_first ? (qh_shifted0.y << 3u) : (qh_shifted0.y << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.z >> 4u) : qs0.z, is_high_first ? (qh_shifted0.z << 3u) : (qh_shifted0.z << 4u), is_high_table0),
+                      unpack_iq5_k(is_high_first ? (qs0.w >> 4u) : qs0.w, is_high_first ? (qh_shifted0.w << 3u) : (qh_shifted0.w << 4u), is_high_table0));
+    qs_a[1] = i32vec4(unpack_iq5_k(is_high_first ? (qs1.x >> 4u) : qs1.x, is_high_first ? (qh_shifted1.x << 3u) : (qh_shifted1.x << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.y >> 4u) : qs1.y, is_high_first ? (qh_shifted1.y << 3u) : (qh_shifted1.y << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.z >> 4u) : qs1.z, is_high_first ? (qh_shifted1.z << 3u) : (qh_shifted1.z << 4u), is_high_table1),
+                      unpack_iq5_k(is_high_first ? (qs1.w >> 4u) : qs1.w, is_high_first ? (qh_shifted1.w << 3u) : (qh_shifted1.w << 4u), is_high_table1));
+    qs_a[2] = i32vec4(unpack_iq5_k(is_high_first ? qs0.x : (qs0.x >> 4u), is_high_first ? (qh_shifted0.x << 4u) : (qh_shifted0.x << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.y : (qs0.y >> 4u), is_high_first ? (qh_shifted0.y << 4u) : (qh_shifted0.y << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.z : (qs0.z >> 4u), is_high_first ? (qh_shifted0.z << 4u) : (qh_shifted0.z << 3u), is_high_table2),
+                      unpack_iq5_k(is_high_first ? qs0.w : (qs0.w >> 4u), is_high_first ? (qh_shifted0.w << 4u) : (qh_shifted0.w << 3u), is_high_table2));
+    qs_a[3] = i32vec4(unpack_iq5_k(is_high_first ? qs1.x : (qs1.x >> 4u), is_high_first ? (qh_shifted1.x << 4u) : (qh_shifted1.x << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.y : (qs1.y >> 4u), is_high_first ? (qh_shifted1.y << 4u) : (qh_shifted1.y << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.z : (qs1.z >> 4u), is_high_first ? (qh_shifted1.z << 4u) : (qh_shifted1.z << 3u), is_high_table3),
+                      unpack_iq5_k(is_high_first ? qs1.w : (qs1.w >> 4u), is_high_first ? (qh_shifted1.w << 4u) : (qh_shifted1.w << 3u), is_high_table3));
 }
 #define SG_A_SHAPE_32x2
 #endif

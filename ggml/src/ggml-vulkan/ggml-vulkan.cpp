@@ -1491,7 +1491,7 @@ static std::optional<uint32_t> get_iqk_table_size(ggml_type type) {
         return uint32_t(64 * sizeof(uint16_t));
     case GGML_TYPE_IQ3_K:
     case GGML_TYPE_IQ3_KS:
-        return uint32_t(128 * sizeof(uint16_t));
+        return uint32_t(512 * sizeof(uint32_t));
     case GGML_TYPE_IQ4_K:
     case GGML_TYPE_IQ4_KS:
     case GGML_TYPE_IQ4_KSS:

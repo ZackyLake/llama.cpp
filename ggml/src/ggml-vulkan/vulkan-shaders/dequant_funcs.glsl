@@ -890,7 +890,6 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
     const uint pos64 = element % 64;
     const uint pos32 = pos64 % 32;
     const bool high_half = bool(pos64 & 32u);
-    const bool odd = bool(pos32 & 1u);
     const uint16_t packed = iqk_row_load_u16(block_offset + 6 + 16 * ib64 + pos32 / 2);
     const uint16_t high = iqk_row_load_u16(block_offset + 70 + pos32 / 2);
     const uint shift = high_half ? 4u : 0u;
@@ -900,12 +899,10 @@ vec4 dequantize_iqk_row4(uint row_offset, uint block_offset, uint element) {
     const uint8_t scale_low = (iqk_row_load_u8(block_offset + 2 + ib32_scale % 4) >> (4 * (ib32_scale / 4))) & uint8_t(0x0F);
     const uint8_t scale_high = uint8_t((iqk_row_load_u16(block_offset) >> (2 * ib32_scale)) & uint16_t(3));
     const float d = iqk_row_scale(row_offset) * float(int(scale_low | (scale_high << 4)) - 32);
-    const uint lane0 = odd ? 1u : 0u;
-    const uint lane1 = odd ? 0u : 1u;
-    return d * vec4(float(kvalues_iq2_kl[2 * index0 + lane0]),
-                    float(kvalues_iq2_kl[2 * index0 + lane1]),
-                    float(kvalues_iq2_kl[2 * index1 + lane0]),
-                    float(kvalues_iq2_kl[2 * index1 + lane1]));
+    return d * vec4(float(kvalues_iq2_kl[2 * index0]),
+                    float(kvalues_iq2_kl[2 * index0 + 1]),
+                    float(kvalues_iq2_kl[2 * index1]),
+                    float(kvalues_iq2_kl[2 * index1 + 1]));
 #elif defined(DATA_A_IQ3_KS)
     const bool high_half = bool(element & 128u);
     const uint group = (element % 128) / 32;

@@ -7,7 +7,7 @@
 #extension GL_KHR_shader_subgroup_quad : require
 
 #define IQK_MMQ_LUT
-//#define IQK_MMQ_LUT_LARGE
+#define IQK_MMQ_LUT_LARGE
 #define MMQ
 #define B_TYPE block_q8_1_x4
 #define B_TYPEV4 block_q8_1_x4_packed128
@@ -50,8 +50,13 @@ void SG_ITER(inout FLOAT_TYPE temp[NUM_COLS], const uint first_row, const uint f
     const float a_blk_scale = float(data_a[a_ib_lane].d);
     prepare_a_k16x4_iter_shifted(a_ib_lane, qs_a, a_scales);
 #endif
-    i8vec4 a_scales_shift = bool(laneid & uint16_t(1)) ? a_scales.yxwz : a_scales;
-    a_scales_shift = bool(laneid & uint16_t(2)) ? a_scales_shift.zwxy : a_scales_shift;
+    const uint32_t as4 = pack32(a_scales);
+    const uint32_t as4_swap8 = ((as4 << 8) & 0xff00ff00u) | ((as4 >> 8) & 0x00ff00ffu);
+    const u16vec2 as2_pair = unpack16(bool(laneid & uint16_t(1)) ? as4_swap8 : as4);
+    const i8vec4 a_scales_shift = unpack8(int32_t(pack32(
+        bool(laneid & uint16_t(2)) ? as2_pair.yx : as2_pair)));
+    //i8vec4 a_scales_shift = bool(laneid & uint16_t(1)) ? a_scales.yxwz : a_scales;
+    //a_scales_shift = bool(laneid & uint16_t(2)) ? a_scales_shift.zwxy : a_scales_shift;
     const uint b_ib_base = first_col / (QUANT_K_Q8_1 * 4u) + b_offset / 4u;
     const uint b_blocks_per_col = p.batch_stride_b / (QUANT_K_Q8_1 * 4u);
     const uint16_t subid = laneid >> uint16_t(2);
@@ -144,8 +149,13 @@ void SG_ITER(inout FLOAT_TYPE temp[NUM_COLS], const uint first_row, const uint f
 #ifdef SG_A_SCALE_SHIFTED
     const i8vec4 a_scales_shift = a_scales;
 #else
-    i8vec4 a_scales_shift = bool(laneid & uint16_t(1)) ? a_scales.yxwz : a_scales;
-    a_scales_shift = bool(laneid & uint16_t(2)) ? a_scales_shift.zwxy : a_scales_shift;
+    const uint32_t as4 = pack32(a_scales);
+    const uint32_t as4_swap8 = ((as4 << 8) & 0xff00ff00u) | ((as4 >> 8) & 0x00ff00ffu);
+    const u16vec2 as2_pair = unpack16(bool(laneid & uint16_t(1)) ? as4_swap8 : as4);
+    const i8vec4 a_scales_shift = unpack8(int32_t(pack32(
+        bool(laneid & uint16_t(2)) ? as2_pair.yx : as2_pair)));
+    //i8vec4 a_scales_shift = bool(laneid & uint16_t(1)) ? a_scales.yxwz : a_scales;
+    //a_scales_shift = bool(laneid & uint16_t(2)) ? a_scales_shift.zwxy : a_scales_shift;
 #endif
     const uint b_ib_base = first_col / (QUANT_K_Q8_1 * 4u) + b_offset / 4u;
     const uint b_blocks_per_col = p.batch_stride_b / (QUANT_K_Q8_1 * 4u);
@@ -157,6 +167,7 @@ void SG_ITER(inout FLOAT_TYPE temp[NUM_COLS], const uint first_row, const uint f
         const uint b_block_outer = b_ib_lane + j * b_blocks_per_col;
         const i32vec4 qs_b = data_b_v4[b_block_outer].qs[b_qs_idx];
         const float b_scale = float(data_b[b_block_outer].ds[b_qs_idx >> 1u].x);
+        const float b_scale_v = subgroupShuffleXor(b_scale, 2u);
 
         float tmp = 0;
         {
@@ -169,17 +180,15 @@ void SG_ITER(inout FLOAT_TYPE temp[NUM_COLS], const uint first_row, const uint f
         }
         {
             const i32vec4 qs_b_h = subgroupShuffleXor(qs_b, 1u);
-            const float b_scale_h = subgroupShuffleXor(b_scale, 1u);
             const int32_t q_sum = dotPacked4x8EXT(qs_a[1].x, qs_b_h.x)
                                 + dotPacked4x8EXT(qs_a[1].y, qs_b_h.y)
                                 + dotPacked4x8EXT(qs_a[1].z, qs_b_h.z)
                                 + dotPacked4x8EXT(qs_a[1].w, qs_b_h.w);
             const int32_t scaled_q_sum = a_scales_shift[1] * q_sum;
-            tmp += FLOAT_TYPE(b_scale_h * float(scaled_q_sum));
+            tmp += FLOAT_TYPE(b_scale * float(scaled_q_sum));
         }
         {
             const i32vec4 qs_b_v = subgroupShuffleXor(qs_b, 2u);
-            const float b_scale_v = subgroupShuffleXor(b_scale, 2u);
             const int32_t q_sum = dotPacked4x8EXT(qs_a[2].x, qs_b_v.x)
                                 + dotPacked4x8EXT(qs_a[2].y, qs_b_v.y)
                                 + dotPacked4x8EXT(qs_a[2].z, qs_b_v.z)
@@ -189,13 +198,12 @@ void SG_ITER(inout FLOAT_TYPE temp[NUM_COLS], const uint first_row, const uint f
         }
         {
             const i32vec4 qs_b_d = subgroupShuffleXor(qs_b, 3u);
-            const float b_scale_d = subgroupShuffleXor(b_scale, 3u);
             const int32_t q_sum = dotPacked4x8EXT(qs_a[3].x, qs_b_d.x)
                                 + dotPacked4x8EXT(qs_a[3].y, qs_b_d.y)
                                 + dotPacked4x8EXT(qs_a[3].z, qs_b_d.z)
                                 + dotPacked4x8EXT(qs_a[3].w, qs_b_d.w);
             const int32_t scaled_q_sum = a_scales_shift[3] * q_sum;
-            tmp += FLOAT_TYPE(b_scale_d * float(scaled_q_sum));
+            tmp += FLOAT_TYPE(b_scale_v * float(scaled_q_sum));
         }
 
         temp[j] += FLOAT_TYPE(tmp * a_blk_scale);
@@ -316,11 +324,7 @@ void main() {
 #elif defined(DATA_A_IQ2_KL)
     init_iq2kl_table();
 #elif defined(DATA_A_IQ3_K) || defined(DATA_A_IQ3_KS)
-# if defined(IQK_MMQ_LUT_LARGE)
-    init_iq3k_table4();
-# else
     init_iq3k_table();
-# endif
 #elif defined(DATA_A_IQ4_K) || defined(DATA_A_IQ4_KSS) || defined(DATA_A_IQ4_KS)
     init_iq4k_table();
 #elif defined(DATA_A_IQ5_K) || defined(DATA_A_IQ5_KS)
