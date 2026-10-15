@@ -440,6 +440,7 @@ extern "C" {
         GGML_TYPE_IQ4_K   = 139, // 4.5 bpw
         GGML_TYPE_IQ5_K   = 140, // 5.5 bpw
         GGML_TYPE_IQ6_K   = 141, // 6.625 bpw
+        GGML_TYPE_PTQ1_0  = 143, // 1.75 bpw
         GGML_TYPE_IQ4_KS  = 144,
         GGML_TYPE_IQ2_KS  = 145,
         GGML_TYPE_IQ4_KSS = 146,
@@ -510,6 +511,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
         GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
+        GGML_FTYPE_MOSTLY_PTQ1_0  = 129, // except 1d tensors
 
         
         GGML_FTYPE_MOSTLY_IQ2_K   = 130, // except 1d tensors
