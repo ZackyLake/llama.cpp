@@ -41,7 +41,7 @@ layout (binding = 2) writeonly buffer D {D_TYPE data_d[];};
 
 #ifdef MUL_MAT_ID
 layout (binding = 3) readonly buffer IDS {int data_ids[];};
-layout (binding = 4) readonly buffer Counts {int data_expert_count[];};
+layout (binding = 4) readonly buffer RowMap {uint data_row_map[];};
 #endif
 
 layout (push_constant) uniform parameter
@@ -63,7 +63,7 @@ layout (push_constant) uniform parameter
     uint nbi1;
     uint ne11;
     uint n_experts;
-    uint hoist_row_ids;
+    uint row_ids_offset;
 #else
     uint base_work_group_z;
     uint num_batches;
@@ -216,7 +216,7 @@ void load_b(uint16_t sgid, uint16_t sgsize, uint32_t pos_b) {
                     buf_ib += uint(column_group_count) * uint(sgsize)) {
         uint b_offset = pos_b + uint(k_step) * BK;
 #ifdef MUL_MAT_ID
-        const bool n_in_bounds = gl_WorkGroupID.y * BN + buf_ib < _ne1;
+        const bool n_in_bounds = buf_ib < _ne1;
         if (n_in_bounds) {
             const u16vec2 row_idx = row_ids[buf_ib];
             b_offset += row_idx.y * p.batch_stride_b + (row_idx.x % p.ne11) * p.stride_b;
@@ -231,13 +231,17 @@ void load_b(uint16_t sgid, uint16_t sgsize, uint32_t pos_b) {
 
 
 void main() {
-    const uint ic = gl_WorkGroupID.y;
-
 #ifdef MUL_MAT_ID
-    const uint expert_idx = gl_WorkGroupID.z;
-    if (ic * BN >= data_expert_count[expert_idx]) {
+    const uint tile_idx = gl_WorkGroupID.y + gl_WorkGroupID.z * gl_NumWorkGroups.y;
+    if (tile_idx >= data_row_map[0]) {
         return;
     }
+    const uint expert_idx = data_row_map[1 + 2 * tile_idx];
+    const uint row_begin = tile_idx * BN;
+    _ne1 = data_row_map[2 + 2 * tile_idx];
+    const uint ic = 0;
+#else
+    const uint ic = gl_WorkGroupID.y;
 #endif
 
 #if defined(DATA_A_IQ2_K) || defined(DATA_A_IQ2_KS)
@@ -286,18 +290,7 @@ void main() {
     const uint16_t warp_c = subgroup_id / uint16_t(BM / WM);
 
 #ifdef MUL_MAT_ID
-    if (p.hoist_row_ids != 0) {
-        load_row_ids_hoisted(expert_idx, ic);
-    } else {
-        if (bitCount(p.nei0) == 1) {
-            load_row_ids(expert_idx, true, ic);
-        } else {
-            load_row_ids(expert_idx, false, ic);
-        }
-    }
-
-    // Workgroup has no work
-    if (ic * BN >= _ne1) return;
+    load_row_ids(row_begin);
 #endif
 
 #ifdef MUL_MAT_ID
