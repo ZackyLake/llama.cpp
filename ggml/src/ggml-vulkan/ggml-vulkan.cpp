@@ -1874,8 +1874,12 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         if (value != nullptr && std::string("dmm") == value) {
             return 2;
         }
+        if (value != nullptr && std::string("newfp") == value) {
+            return 3;
+        }
         return 1;
     }();
+    const bool iqk_fp_cm = iqkcm == 2 || iqkcm == 3;
 
     // some shaders have a minimum subgroup size
     const uint32_t subgroup_size_8 = std::max(device->subgroup_size, 8u);
@@ -1928,6 +1932,12 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     const std::vector<uint32_t> s_iqk_cm1_warptile = { 128, 32, 32, 32, 8, 16, 1, 8, 16, 32, 16 };
     const std::vector<uint32_t> m_iqk_cm1_warptile = { 256, 64, 32, 32, 8, 16, 1, 8, 16, 32, 16 };
     const std::vector<uint32_t> l_iqk_cm1_warptile = { 512, 64, 64, 32, 8, 16, 1, 8, 16, 32, 16 };
+    const std::vector<uint32_t> s_iqk_cm1_fp_warptile = { 128, 64, 64, 32, 16, 32, 2, 8, 16, 16, 16 };
+    const std::vector<uint32_t> m_iqk_cm1_fp_warptile = { 256, 128, 64, 32, 16, 32, 2, 8, 16, 16, 16 };
+    const std::vector<uint32_t> l_iqk_cm1_fp_warptile = { 512, 128, 128, 32, 16, 32, 2, 8, 16, 16, 16 };
+    const bool use_iqk_cm1_fp = iqkcm == 3 && !device->coopmat2 && device->fp16 && device->coopmat_support &&
+                                device->coopmat_acc_f16_support && device->coopmat_m == 8 &&
+                                device->coopmat_n == 16 && device->coopmat_k == 16 && ggml_vk_iqk_mmq_support(device);
     const bool use_iqk_cm1 = ggml_vk_iqk_mmq_cm1_support(device) && iqkcm != 0;
     const auto & s_iqk_mmq_warptile = use_iqk_cm1 ? s_iqk_cm1_warptile : s_iqk_warptile;
     const auto & m_iqk_mmq_warptile = use_iqk_cm1 ? m_iqk_cm1_warptile : m_iqk_warptile;
@@ -2430,6 +2440,11 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     X(GGML_TYPE_IQ2_KT,  iq2_kt)  \
     X(GGML_TYPE_IQ3_KT,  iq3_kt)  \
     X(GGML_TYPE_IQ4_KT,  iq4_kt)  
+#define FOR_EACH_IQK2_TYPE(X)     \
+    X(GGML_TYPE_IQ2_K,   iq2_k)   \
+    X(GGML_TYPE_IQ3_K,   iq3_k)   \
+    X(GGML_TYPE_IQ2_KS,  iq2_ks)  \
+    X(GGML_TYPE_IQ3_KS,  iq3_ks)
 #define FOR_EACH_IQK_SG_TYPE(X)   \
     X(GGML_TYPE_IQ2_K,   iq2_k)   \
     X(GGML_TYPE_IQ3_K,   iq3_k)   \
@@ -2655,6 +2670,34 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id);
             if (!tc.empty()) create_mm_pipelines(key, tc, name, len, data, pc_size, pc, qs, false, true, 0, true, cm1_pin);
         };
+        const std::vector<vk_tile_config> tc_iqk_cm1_fp = {
+            {s_iqk_cm1_fp_warptile, {64, 64, 1}, 32},
+            {m_iqk_cm1_fp_warptile, {128, 64, 1}, 32},
+            {l_iqk_cm1_fp_warptile, {128, 128, 1}, 32},
+        };
+        auto cm1_create_iqk_fp = [&](vk_matmul_pipeline_key key, const std::string& name,
+                                     size_t len, const void* data, uint32_t pc_size, uint32_t pc) {
+            uint32_t lut_size = 0;
+            if (const auto table_size = get_iqk_table_size(key.type_a)) {
+                lut_size = *table_size;
+            } else if (const auto values_size = get_iqk_lut_size(key.type_a)) {
+                lut_size = *values_size * sizeof(int8_t);
+            }
+            std::vector<vk_tile_config> tc;
+            for (const auto& config : tc_iqk_cm1_fp) {
+                const uint32_t bm = config.warptile[1];
+                const uint32_t bn = config.warptile[2];
+                const uint32_t warps = config.warptile[0] / config.warptile[WARP_SIZE_IDX];
+                const uint32_t load_bufs = (bm + bn) * 64u * sizeof(ggml_fp16_t);
+                const uint32_t row_ids = key.mul_mat_id ? bn * 2u * sizeof(uint16_t) : 0u;
+                const uint32_t ballots = key.mul_mat_id ? warps * 4u * sizeof(uint32_t) : 0u;
+                if (load_bufs + row_ids + ballots + lut_size <= device->properties.limits.maxComputeSharedMemorySize) {
+                    tc.push_back(config);
+                }
+            }
+            spec_fn_t identity = [](const std::vector<uint32_t>& wt, bool) { return wt; };
+            if (!tc.empty()) create_mm_pipelines(key, tc, name, len, data, pc_size, pc, identity, false, true, 16, false);
+        };
         // int8 MMQ helper: per-type cm1 shader, warptile passed as-is (carries DEVICE_ARCH in
         // spec constant WARP_SIZE_IDX+1), subgroup size pinned to the warptile WARP element, no aligned variant.
         auto cm1_create_mmq = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config>& tc_base,
@@ -2733,8 +2776,20 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         {
             FOR_EACH_LUT_FP4_TYPE(X_CM1)
         }
-        if (iqkcm == 2) {
-            FOR_EACH_IQK_TYPE(X_CM1)
+        if (iqk_fp_cm) {
+            if (use_iqk_cm1_fp) {
+#define X_CM1_IQK_FP(TYPE, tstr) \
+                cm1_create_iqk_fp({TYPE, GGML_TYPE_F32, false, true}, "matmul_cm1_iqk_" #tstr "_f32_f16acc", matmul_cm1_iqk_##tstr##_f32_f16acc_cm1_len, matmul_cm1_iqk_##tstr##_f32_f16acc_cm1_data, sizeof(vk_mat_mat_push_constants), 3); \
+                cm1_create_iqk_fp({TYPE, GGML_TYPE_F16, false, true}, "matmul_cm1_iqk_" #tstr "_f16_f16acc", matmul_cm1_iqk_##tstr##_f16_f16acc_cm1_len, matmul_cm1_iqk_##tstr##_f16_f16acc_cm1_data, sizeof(vk_mat_mat_push_constants), 3); \
+                if (device->coopmat_acc_f32_support) { \
+                    cm1_create({TYPE, GGML_TYPE_F32, false, false}, tc_mmq, "matmul_" #tstr "_f32", matmul_##tstr##_f32_cm1_len, matmul_##tstr##_f32_cm1_data, sizeof(vk_mat_mat_push_constants), 3); \
+                    cm1_create({TYPE, GGML_TYPE_F16, false, false}, tc_mmq, "matmul_" #tstr "_f16", matmul_##tstr##_f16_cm1_len, matmul_##tstr##_f16_cm1_data, sizeof(vk_mat_mat_push_constants), 3); \
+                }
+                FOR_EACH_IQK2_TYPE(X_CM1_IQK_FP)
+#undef X_CM1_IQK_FP
+            } else {
+                FOR_EACH_IQK_TYPE(X_CM1)
+            }
         }
 #undef X_CM1
 
@@ -2809,8 +2864,20 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         {
             FOR_EACH_LUT_FP4_TYPE(X_CM1_ID)
         }
-        if (iqkcm == 2) {
-            FOR_EACH_IQK_TYPE(X_CM1_ID)
+        if (iqk_fp_cm) {
+            if (use_iqk_cm1_fp) {
+#define X_CM1_IQK_FP_ID(TYPE, tstr) \
+                cm1_create_iqk_fp({TYPE, GGML_TYPE_F32, true, true}, "matmul_id_subgroup_cm1_iqk_" #tstr "_f32_f16acc", matmul_id_subgroup_cm1_iqk_##tstr##_f32_f16acc_cm1_len, matmul_id_subgroup_cm1_iqk_##tstr##_f32_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count); \
+                cm1_create_iqk_fp({TYPE, GGML_TYPE_F16, true, true}, "matmul_id_subgroup_cm1_iqk_" #tstr "_f16_f16acc", matmul_id_subgroup_cm1_iqk_##tstr##_f16_f16acc_cm1_len, matmul_id_subgroup_cm1_iqk_##tstr##_f16_f16acc_cm1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count); \
+                if (device->coopmat_acc_f32_support) { \
+                    cm1_create({TYPE, GGML_TYPE_F32, true, false}, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f32", matmul_id_subgroup_##tstr##_f32_cm1_len, matmul_id_subgroup_##tstr##_f32_cm1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count); \
+                    cm1_create({TYPE, GGML_TYPE_F16, true, false}, tc_mmq_id, "matmul_id_subgroup_" #tstr "_f16", matmul_id_subgroup_##tstr##_f16_cm1_len, matmul_id_subgroup_##tstr##_f16_cm1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count); \
+                }
+                FOR_EACH_IQK2_TYPE(X_CM1_IQK_FP_ID)
+#undef X_CM1_IQK_FP_ID
+            } else {
+                FOR_EACH_IQK_TYPE(X_CM1_ID)
+            }
         }
 #undef X_CM1_ID
 
@@ -2831,7 +2898,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         }
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
-    if (iqkcm != 2 && ggml_vk_iqk_mmq_support(device)) {
+    if (!iqk_fp_cm && ggml_vk_iqk_mmq_support(device)) {
         auto iqk_create_mmq = [&](vk_matmul_pipeline_key key, const std::string & name,
                                   size_t len, const void * data, uint32_t pc_size, uint32_t pc) {
             auto tc = filter_tc(get_iqk_mmq_tc(key.type_a, key.mul_mat_id), key.type_a, key.mul_mat_id, true);
@@ -2843,14 +2910,14 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
 #define X_CM1_IQK_MMQ(TYPE, tstr) \
     iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, false, false}, use_iqk_cm1 ? "matmul_" #tstr "_q8_1_cm1" : "matmul_" #tstr "_q8_1", use_iqk_cm1 ? matmul_##tstr##_q8_1_cm1_len : matmul_##tstr##_q8_1_len, use_iqk_cm1 ? matmul_##tstr##_q8_1_cm1_data : matmul_##tstr##_q8_1_data, sizeof(vk_mat_mat_push_constants), 3);
-        if (iqkcm != 2) {
+        if (!iqk_fp_cm) {
             FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ)
         }
 #undef X_CM1_IQK_MMQ
 
 #define X_CM1_IQK_MMQ_ID(TYPE, tstr) \
     iqk_create_mmq({TYPE, GGML_TYPE_Q8_1, true, false}, use_iqk_cm1 ? "matmul_id_subgroup_" #tstr "_q8_1_cm1" : "matmul_id_" #tstr "_q8_1", use_iqk_cm1 ? matmul_id_subgroup_##tstr##_q8_1_cm1_len : matmul_id_##tstr##_q8_1_len, use_iqk_cm1 ? matmul_id_subgroup_##tstr##_q8_1_cm1_data : matmul_id_##tstr##_q8_1_data, sizeof(vk_mat_mat_id_push_constants), mul_mat_id_param_count);
-        if (iqkcm != 2) {
+        if (!iqk_fp_cm) {
             FOR_EACH_IQK_TYPE(X_CM1_IQK_MMQ_ID)
         }
 #undef X_CM1_IQK_MMQ_ID
@@ -2881,7 +2948,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         auto sg_create_mmq = [&](vk_matmul_pipeline_key key, const std::vector<vk_tile_config>& tc_base,
                                  const std::string& name, size_t len, const void* data, uint32_t pc_size, uint32_t pc,
                                  uint32_t rsgs = 0) {
-            if (iqkcm == 2 && ggml_vk_is_iqk_type(key.type_a)) {
+            if (iqk_fp_cm && ggml_vk_is_iqk_type(key.type_a)) {
                 return;
             }
             auto tc = filter_tc(tc_base, key.type_a, key.mul_mat_id, true);

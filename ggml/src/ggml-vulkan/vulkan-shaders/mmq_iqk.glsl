@@ -194,6 +194,62 @@ void prepare_a_k16x4_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     }
 }
 
+void prepare_a_k16x4_pair(uint ib_k, bool is_high_half, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const uint16_t qs_idx = (is_high_half ? uint16_t(8) : uint16_t(0)) +
+                            (is_high_16 ? uint16_t(4) : uint16_t(0));
+    const uvec4 qs = uvec4(data_a_packed32[ib_k].qs[qs_idx     ],
+                           data_a_packed32[ib_k].qs[qs_idx + 1u],
+                           data_a_packed32[ib_k].qs[qs_idx + 2u],
+                           data_a_packed32[ib_k].qs[qs_idx + 3u]);
+    const uint32_t scale_packed = data_a_packed32[ib_k].scales[is_high_half ? 1u : 0u];
+    const uint32_t scale_shifted = scale_packed >> (is_high_16 ? 4 : 0);
+    const uint32_t scale_sub8 = ((scale_shifted | 0xF0F0F0F0u) - 0x78787878u) ^ 0x80808080u;
+    a_scales = unpack8(int32_t(scale_sub8)); // unpack8(int32_t(scale_shifted & 0x0F0F0F0Fu)) - i8vec4(-8)
+
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
+        const uint16_t shift = i << 1u;
+        const uint16_t extra_shift_idx = i * uint16_t(2) + (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
+        const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq2_k((qs.x >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.y >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.z >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.w >> shift) & 0x03030303u, is_hi_table));
+    }
+}
+
+void prepare_a_k16x2_pair(uint ib_k, uint16_t sub_idx, out i32vec4 qs_a[2], out i8vec2 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const bool is_high_half = bool(sub_idx & uint16_t(2));
+    const uint16_t pair_idx = sub_idx & uint16_t(1);
+    const uint16_t qs_idx = (is_high_half ? uint16_t(8) : uint16_t(0)) +
+                            (is_high_16 ? uint16_t(4) : uint16_t(0));
+    const uvec4 qs = uvec4(data_a_packed32[ib_k].qs[qs_idx     ],
+                           data_a_packed32[ib_k].qs[qs_idx + 1u],
+                           data_a_packed32[ib_k].qs[qs_idx + 2u],
+                           data_a_packed32[ib_k].qs[qs_idx + 3u]);
+    const uint16_t scale_packed = data_a_packed16[ib_k].scales[sub_idx];
+    const uint16_t scale_shifted = scale_packed >> (is_high_16 ? 4 : 0);
+    const uint16_t scale_sub8 = ((scale_shifted | uint16_t(0xF0F0)) - uint16_t(0x7878)) ^ uint16_t(0x8080);
+    a_scales = unpack8(int16_t(scale_sub8)); // unpack8(scale_shifted & uint16_t(0x0F0F)) - i8vec2(-8)
+
+    const uint16_t sub_offset = pair_idx * uint16_t(2);
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(2); ++i) {
+        const uint16_t sub_i = i + sub_offset;
+        const uint16_t shift = sub_i << 1u;
+        const uint16_t extra_shift_idx = sub_i * uint16_t(2) + (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
+        const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq2_k((qs.x >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.y >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.z >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.w >> shift) & 0x03030303u, is_hi_table));
+    }
+}
+
 void prepare_a_k16x4_iter_shifted(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t subid = laneid >> uint16_t(2);
@@ -258,6 +314,81 @@ void prepare_a_k16x4_iter(uint ib_k, out i32vec4 qs_a[4], out i8vec4 a_scales) {
         const uint16_t shift_h = i + (is_high_half ? uint16_t(4) : uint16_t(0));
         const uint16_t shift_l = i << 1u;
         const uint16_t extra_shift_idx = i * uint16_t(2) + scale_shift;
+        const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql1 >> shift_l, qh1 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql2 >> shift_l, qh2 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql3 >> shift_l, qh3 >> shift_h, is_hi_table));
+    }
+}
+
+void prepare_a_k16x4_pair(uint ib_k, bool is_high_half, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const uint16_t qs_idx = (is_high_half ? uint16_t(16) : uint16_t(0)) +
+                            (is_high_16 ? uint16_t(8) : uint16_t(0));
+    const uint16_t qh_idx = is_high_16 ? uint16_t(8) : uint16_t(0);
+    const uint ql0 = READ16x2(data_a_packed16[ib_k].qs, qs_idx);
+    const uint ql1 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 2u);
+    const uint ql2 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 4u);
+    const uint ql3 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 6u);
+    const uint qh0 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 0u);
+    const uint qh1 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 2u);
+    const uint qh2 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 4u);
+    const uint qh3 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 6u);
+    const uint16_t scale_shift = (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
+    const uint scale_idx = is_high_half ? 2u : 0u;
+    const uint scale_packed = READ16x2(data_a_packed16[ib_k].scales_l, scale_idx);
+    const uint scale_nibbles = (scale_packed >> (is_high_16 ? 4u : 0u)) & 0x0F0F0F0Fu;
+    const uint scale_shifted = (scale_nibbles << 1u) | 0x01010101u;
+    const uint16_t scale_h = data_a_packed16[ib_k].scales_h >> scale_shift;
+    const uint scale_sign = ((scale_h & uint16_t(0x55)) * 0x41041u) & 0x01010101u;
+    a_scales = unpack8(int32_t((scale_sign * 254u) ^ scale_shifted));
+
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
+        const uint16_t shift_h = i + (is_high_half ? uint16_t(4) : uint16_t(0));
+        const uint16_t shift_l = i << 1u;
+        const uint16_t extra_shift_idx = i * uint16_t(2) + scale_shift;
+        const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql1 >> shift_l, qh1 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql2 >> shift_l, qh2 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql3 >> shift_l, qh3 >> shift_h, is_hi_table));
+    }
+}
+
+void prepare_a_k16x2_pair(uint ib_k, uint16_t sub_idx, out i32vec4 qs_a[2], out i8vec2 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const bool is_high_half = bool(sub_idx & uint16_t(2));
+    const uint16_t pair_idx = sub_idx & uint16_t(1);
+    const uint16_t qs_idx = (is_high_half ? uint16_t(16) : uint16_t(0)) +
+                            (is_high_16 ? uint16_t(8) : uint16_t(0));
+    const uint16_t qh_idx = is_high_16 ? uint16_t(8) : uint16_t(0);
+    const uint ql0 = READ16x2(data_a_packed16[ib_k].qs, qs_idx);
+    const uint ql1 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 2u);
+    const uint ql2 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 4u);
+    const uint ql3 = READ16x2(data_a_packed16[ib_k].qs, qs_idx + 6u);
+    const uint qh0 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 0u);
+    const uint qh1 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 2u);
+    const uint qh2 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 4u);
+    const uint qh3 = READ16x2(data_a_packed16[ib_k].qh, qh_idx + 6u);
+    const uint16_t scale_shift = (is_high_half ? uint16_t(8) : uint16_t(0)) + uint16_t(is_high_16);
+    const uint16_t scale_packed = data_a_packed16[ib_k].scales_l[sub_idx];
+    const uint16_t scale_nibbles = (scale_packed >> (is_high_16 ? 4u : 0u)) & uint16_t(0x0F0F);
+    const uint16_t scale_shifted = (scale_nibbles << 1u) | uint16_t(0x0101);
+    const uint16_t scale_h = data_a_packed16[ib_k].scales_h >> (scale_shift + pair_idx * uint16_t(4));
+    const uint16_t scale_sign = ((scale_h & uint16_t(0x05)) * uint16_t(0x1041)) & uint16_t(0x0101);
+    a_scales = unpack8(int16_t((scale_sign * uint16_t(254)) ^ scale_shifted));
+
+    const uint16_t sub_offset = pair_idx * uint16_t(2);
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(2); ++i) {
+        const uint16_t sub_i = i + sub_offset;
+        const uint16_t shift_h = sub_i + (is_high_half ? uint16_t(4) : uint16_t(0));
+        const uint16_t shift_l = sub_i << 1u;
+        const uint16_t extra_shift_idx = sub_i * uint16_t(2) + scale_shift;
         const bool is_hi_table = bool((data_a[ib_k].extra >> extra_shift_idx) & uint16_t(1));
 
         qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),
@@ -1421,6 +1552,72 @@ void rm_prepare_a_k16x4_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
     }
 }
 
+void rm_prepare_a_k16x4_pair(uint block_byte_offset, bool is_high_half, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const uint16_t qs_offset = (is_high_half ? uint16_t(8) : uint16_t(0)) +
+                               (is_high_16 ? uint16_t(4) : uint16_t(0));
+    const uint16_t extra = iqks_load_u16(block_byte_offset);
+    const uint qs_offset_bytes = block_byte_offset + 6u + 4u * qs_offset;
+    const uvec4 qs = uvec4(iqks_load_u32(qs_offset_bytes),
+                           iqks_load_u32(qs_offset_bytes + 4u),
+                           iqks_load_u32(qs_offset_bytes + 8u),
+                           iqks_load_u32(qs_offset_bytes + 12u));
+    const uint16_t scale_packed = iqks_load_u16(block_byte_offset + 2u + (is_high_half ? 2u : 0u));
+    const uint scale_lo4 = u4x4_to_u8x4(scale_packed);
+    const uint e = extra >> (is_high_half ? 12u : 8u);
+    const uint neg_scale_hi4bit = (~e) & 0x0fu;
+    const uint scale_hi4 = ((neg_scale_hi4bit * 0x00204081u) & 0x01010101u) * 0xf0u;
+    a_scales = unpack8(int32_t(scale_lo4 | scale_hi4));
+
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
+        const uint16_t shift = i << 1;
+        const uint16_t extra_shift_idx = i + (is_high_half ? uint16_t(4) : uint16_t(0));
+        const bool is_hi_table = bool((extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq2_k((qs.x >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.y >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.z >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.w >> shift) & 0x03030303u, is_hi_table));
+    }
+}
+
+void rm_prepare_a_k16x2_pair(uint block_byte_offset, uint16_t sub_idx, out i32vec4 qs_a[2], out i8vec2 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const bool is_high_half = bool(sub_idx & uint16_t(2));
+    const uint16_t pair_idx = sub_idx & uint16_t(1);
+    const uint16_t qs_offset = (is_high_half ? uint16_t(8) : uint16_t(0)) +
+                               (is_high_16 ? uint16_t(4) : uint16_t(0));
+    const uint16_t extra = iqks_load_u16(block_byte_offset);
+    const uint qs_offset_bytes = block_byte_offset + 6u + 4u * qs_offset;
+    const uvec4 qs = uvec4(iqks_load_u32(qs_offset_bytes),
+                           iqks_load_u32(qs_offset_bytes + 4u),
+                           iqks_load_u32(qs_offset_bytes + 8u),
+                           iqks_load_u32(qs_offset_bytes + 12u));
+    const uint16_t scale_packed = iqks_load_u16(block_byte_offset + 2u + (is_high_half ? 2u : 0u));
+    const uint16_t scale_shifted = scale_packed >> (pair_idx << 3u);
+    const uint16_t scale_lo2 = (scale_shifted & uint16_t(0x0f)) |
+                               ((scale_shifted & uint16_t(0xf0)) << 4u);
+    const uint16_t e = extra >> (is_high_half ? uint16_t(12) : uint16_t(8));
+    const uint16_t neg_scale_hi2bit = (~(e >> (pair_idx << 1u))) & uint16_t(3);
+    const uint16_t scale_hi2 = ((neg_scale_hi2bit * uint16_t(0x81)) & uint16_t(0x0101)) * uint16_t(0xf0);
+    a_scales = unpack8(int16_t(scale_lo2 | scale_hi2));
+
+    const uint16_t sub_offset = pair_idx * uint16_t(2);
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(2); ++i) {
+        const uint16_t sub_i = i + sub_offset;
+        const uint16_t shift = sub_i << 1;
+        const uint16_t extra_shift_idx = sub_i + (is_high_half ? uint16_t(4) : uint16_t(0));
+        const bool is_hi_table = bool((extra >> extra_shift_idx) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq2_k((qs.x >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.y >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.z >> shift) & 0x03030303u, is_hi_table),
+                          unpack_iq2_k((qs.w >> shift) & 0x03030303u, is_hi_table));
+    }
+}
+
 void rm_prepare_a_k16x4_iter_shifted(uint block_byte_offset, out i32vec4 qs_a[4], out i8vec4 a_scales) {
     const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
     const uint16_t subid = laneid >> uint16_t(2);
@@ -1492,6 +1689,84 @@ void rm_prepare_a_k16x4_iter(uint block_byte_offset, out i32vec4 qs_a[4], out i8
     [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
         const uint16_t shift_h = i + uint16_t(scale_group_offset);
         const uint16_t shift_l = i << 1;
+        const bool is_hi_table = bool((extra >> (shift_h + uint16_t(8))) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql1 >> shift_l, qh1 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql2 >> shift_l, qh2 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql3 >> shift_l, qh3 >> shift_h, is_hi_table));
+    }
+}
+
+void rm_prepare_a_k16x4_pair(uint block_byte_offset, bool is_high_half, out i32vec4 qs_a[4], out i8vec4 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const uint16_t qs_offset = (is_high_half ? uint16_t(32) : uint16_t(0)) +
+                               (is_high_16 ? uint16_t(16) : uint16_t(0));
+    const uint16_t qh_offset = is_high_16 ? uint16_t(16) : uint16_t(0);
+    const uint qs_offset_bytes = block_byte_offset +  6u + qs_offset;
+    const uint qh_offset_bytes = block_byte_offset + 70u + qh_offset;
+    const uint ql0 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes      ), iqks_load_u16(qs_offset_bytes +  2u)));
+    const uint ql1 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  4u), iqks_load_u16(qs_offset_bytes +  6u)));
+    const uint ql2 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes +  8u), iqks_load_u16(qs_offset_bytes + 10u)));
+    const uint ql3 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 12u), iqks_load_u16(qs_offset_bytes + 14u)));
+    const uint qh0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  0u), iqks_load_u16(qh_offset_bytes +  2u)));
+    const uint qh1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  4u), iqks_load_u16(qh_offset_bytes +  6u)));
+    const uint qh2 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes +  8u), iqks_load_u16(qh_offset_bytes + 10u)));
+    const uint qh3 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 12u), iqks_load_u16(qh_offset_bytes + 14u)));
+    const uint16_t extra = iqks_load_u16(block_byte_offset);
+    const uint scale_group_offset = is_high_half ? 4u : 0u;
+    const uint scale_packed = iqks_load_u32(block_byte_offset + 2u);
+    const uint scale_lo4 = (scale_packed >> (is_high_half ? 4u : 0u)) & 0x0f0f0f0fu;
+    const uint16_t e = extra >> (is_high_half ? 4u : 0u);
+    const uint16_t neg_scale_hi4bit = (~e) & uint16_t(0x0f);
+    const uint scale_hi4 = ((neg_scale_hi4bit * 0x00204081u) & 0x01010101u) * 0xf0u;
+    a_scales = unpack8(int32_t(scale_lo4 | scale_hi4));
+
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(4); ++i) {
+        const uint16_t shift_h = i + uint16_t(scale_group_offset);
+        const uint16_t shift_l = i << 1;
+        const bool is_hi_table = bool((extra >> (shift_h + uint16_t(8))) & uint16_t(1));
+
+        qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql1 >> shift_l, qh1 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql2 >> shift_l, qh2 >> shift_h, is_hi_table),
+                          unpack_iq3_k(ql3 >> shift_l, qh3 >> shift_h, is_hi_table));
+    }
+}
+
+void rm_prepare_a_k16x2_pair(uint block_byte_offset, uint16_t sub_idx, out i32vec4 qs_a[2], out i8vec2 a_scales) {
+    const uint16_t laneid = uint16_t(gl_SubgroupInvocationID);
+    const bool is_high_16 = bool(laneid & uint16_t(1));
+    const bool is_high_half = bool(sub_idx & uint16_t(2));
+    const uint16_t pair_idx = sub_idx & uint16_t(1);
+    const uint16_t qs_offset = (is_high_half ? uint16_t(32) : uint16_t(0)) +
+                               (is_high_16 ? uint16_t(16) : uint16_t(0));
+    const uint16_t qh_offset = is_high_16 ? uint16_t(16) : uint16_t(0);
+    const uint qs_offset_bytes = block_byte_offset + 6u + qs_offset;
+    const uint qh_offset_bytes = block_byte_offset + 70u + qh_offset;
+    const uint ql0 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes), iqks_load_u16(qs_offset_bytes + 2u)));
+    const uint ql1 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 4u), iqks_load_u16(qs_offset_bytes + 6u)));
+    const uint ql2 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 8u), iqks_load_u16(qs_offset_bytes + 10u)));
+    const uint ql3 = pack32(u16vec2(iqks_load_u16(qs_offset_bytes + 12u), iqks_load_u16(qs_offset_bytes + 14u)));
+    const uint qh0 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 0u), iqks_load_u16(qh_offset_bytes + 2u)));
+    const uint qh1 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 4u), iqks_load_u16(qh_offset_bytes + 6u)));
+    const uint qh2 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 8u), iqks_load_u16(qh_offset_bytes + 10u)));
+    const uint qh3 = pack32(u16vec2(iqks_load_u16(qh_offset_bytes + 12u), iqks_load_u16(qh_offset_bytes + 14u)));
+    const uint16_t extra = iqks_load_u16(block_byte_offset);
+    const uint16_t scale_group_offset = is_high_half ? uint16_t(4) : uint16_t(0);
+    const uint16_t scale_packed = iqks_load_u16(block_byte_offset + 2u + (pair_idx << 1u));
+    const uint16_t scale_lo2 = (scale_packed >> scale_group_offset) & uint16_t(0x0f0f);
+    const uint16_t e = extra >> scale_group_offset;
+    const uint16_t neg_scale_hi2bit = (~(e >> (pair_idx << 1u))) & uint16_t(3);
+    const uint16_t scale_hi2 = ((neg_scale_hi2bit * uint16_t(0x81)) & uint16_t(0x0101)) * uint16_t(0xf0);
+    a_scales = unpack8(int16_t(scale_lo2 | scale_hi2));
+
+    const uint16_t sub_offset = pair_idx * uint16_t(2);
+    [[unroll]] for (uint16_t i = uint16_t(0); i < uint16_t(2); ++i) {
+        const uint16_t sub_i = i + sub_offset;
+        const uint16_t shift_h = sub_i + scale_group_offset;
+        const uint16_t shift_l = sub_i << 1u;
         const bool is_hi_table = bool((extra >> (shift_h + uint16_t(8))) & uint16_t(1));
 
         qs_a[i] = i32vec4(unpack_iq3_k(ql0 >> shift_l, qh0 >> shift_h, is_hi_table),

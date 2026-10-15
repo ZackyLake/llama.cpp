@@ -96,6 +96,13 @@ const std::vector<std::string> iqk_type_names = {
     "iq4_kt",
 };
 
+const std::vector<std::string> iqk2_type_names = {
+    "iq2_k",
+    "iq3_k",
+    "iq2_ks",
+    "iq3_ks",
+};
+
 enum MatMulIdType {
     NONE,
     DEFAULT,
@@ -715,6 +722,24 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
                           merge_maps(merge_maps(base_dict, float_type_dict),
                                      merge_maps(common_defines, {{"B_TYPE", aligned_b_type_f32}, {"B_TYPE_SCALAR", "float"}, {"B_TYPEV4", "vec4"}})),
                           fp16, coopmat, coopmat2, f16acc);
+        }
+
+        if (coopmat && f16acc && !dot2) {
+            for (const auto& tname : iqk2_type_names) {
+                const std::string data_a_key = "DATA_A_" + to_uppercase(tname);
+                const auto cm1_defines = merge_maps(base_dict, {
+                    {data_a_key, "1"},
+                    {"LOAD_VEC_B", load_vec},
+                    {"D_TYPE", "float"},
+                });
+
+                string_to_spv(shader_name + "_cm1_iqk_" + tname + "_f16", "mul_mm_cm1_iqk2.comp",
+                              merge_maps(cm1_defines, {{"B_TYPE", aligned_b_type_f16}}),
+                              fp16, coopmat, coopmat2, f16acc);
+                string_to_spv(shader_name + "_cm1_iqk_" + tname + "_f32", "mul_mm_cm1_iqk2.comp",
+                              merge_maps(cm1_defines, {{"B_TYPE", aligned_b_type_f32}}),
+                              fp16, coopmat, coopmat2, f16acc);
+            }
         }
     }
 
