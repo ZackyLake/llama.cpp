@@ -1,6 +1,17 @@
 find_package(OpenVINO REQUIRED COMPONENTS Runtime Threading)
 find_package(OpenCL REQUIRED)
 
+find_path(OPENCL_HPP_INCLUDE_DIR
+    NAMES CL/cl2.hpp
+    HINTS
+        "${OpenVINO_DIR}/../thirdparty/ocl/clhpp_headers/include"
+        "${OpenVINO_DIR}/../../thirdparty/ocl/clhpp_headers/include"
+)
+
+if (NOT OPENCL_HPP_INCLUDE_DIR)
+    message(FATAL_ERROR "OpenCL C++ headers (CL/cl2.hpp) not found")
+endif()
+
 message(STATUS "Found OpenVINO: ${OpenVINO_DIR} (found version \"${OpenVINO_VERSION}\")")
 
 file(GLOB_RECURSE GGML_HEADERS_OPENVINO "*.h" "*.hpp")
@@ -12,6 +23,7 @@ ggml_add_backend_library(ggml-openvino
 )
 
 target_link_libraries(ggml-openvino PRIVATE openvino::runtime openvino::threading OpenCL::OpenCL)
+target_include_directories(ggml-openvino PRIVATE ${OPENCL_HPP_INCLUDE_DIR})
 
 # the OpenVINO RTTI macros take one argument and leave __VA_ARGS__ empty, which -Wpedantic reports
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
