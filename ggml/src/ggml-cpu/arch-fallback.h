@@ -4,6 +4,8 @@
 // Rename `_generic` functions if no native implementation is available.
 // This effectively selects the generic implementation.
 
+#define ggml_vec_dot_ptq1_0_q8_0_generic ggml_vec_dot_ptq1_0_q8_0
+
 #if defined(GGML_CPU_GENERIC)
 // quants.c
 #define quantize_row_q8_0_generic quantize_row_q8_0
