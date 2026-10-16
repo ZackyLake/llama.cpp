@@ -991,11 +991,11 @@ inline void prepare_q4_0_quants_avx2(const uint8_t * qs, __m256i * v, const __m2
 }
 
 inline __m256i accum_q4_0_quants(const __m256i * v, const int8_t * qs) {
+#ifdef HAVE_VNNI256
     auto y4l = _mm_loadu_si128((const __m128i*)qs+0);
     auto y4h = _mm_loadu_si128((const __m128i*)qs+1);
     auto yl  = MM256_SET1_M128I(y4l);
     auto yh  = MM256_SET1_M128I(y4h);
-#ifdef HAVE_VNNI256
     auto sumi = _mm256_setzero_si256();
     sumi = ggml_mm256_dpbusd_epi32(sumi, v[0], _mm256_shuffle_epi32(yl, 0x00));
     sumi = ggml_mm256_dpbusd_epi32(sumi, v[1], _mm256_shuffle_epi32(yl, 0x55));
@@ -1006,14 +1006,14 @@ inline __m256i accum_q4_0_quants(const __m256i * v, const int8_t * qs) {
     sumi = ggml_mm256_dpbusd_epi32(sumi, v[6], _mm256_shuffle_epi32(yh, 0xaa));
     sumi = ggml_mm256_dpbusd_epi32(sumi, v[7], _mm256_shuffle_epi32(yh, 0xff));
 #else
-    auto sumi1 = _mm256_add_epi16(_mm256_maddubs_epi16(v[0], _mm256_shuffle_epi32(yl, 0x00)),
-                                  _mm256_maddubs_epi16(v[1], _mm256_shuffle_epi32(yl, 0x55)));
-    auto sumi2 = _mm256_add_epi16(_mm256_maddubs_epi16(v[2], _mm256_shuffle_epi32(yl, 0xaa)),
-                                  _mm256_maddubs_epi16(v[3], _mm256_shuffle_epi32(yl, 0xff)));
-    auto sumi3 = _mm256_add_epi16(_mm256_maddubs_epi16(v[4], _mm256_shuffle_epi32(yh, 0x00)),
-                                  _mm256_maddubs_epi16(v[5], _mm256_shuffle_epi32(yh, 0x55)));
-    auto sumi4 = _mm256_add_epi16(_mm256_maddubs_epi16(v[6], _mm256_shuffle_epi32(yh, 0xaa)),
-                                  _mm256_maddubs_epi16(v[7], _mm256_shuffle_epi32(yh, 0xff)));
+    auto sumi1 = _mm256_add_epi16(_mm256_maddubs_epi16(v[0], _mm256_set1_epi32(*((const int32_t *)(qs +  0)))),
+                                  _mm256_maddubs_epi16(v[1], _mm256_set1_epi32(*((const int32_t *)(qs +  4)))));
+    auto sumi2 = _mm256_add_epi16(_mm256_maddubs_epi16(v[2], _mm256_set1_epi32(*((const int32_t *)(qs +  8)))),
+                                  _mm256_maddubs_epi16(v[3], _mm256_set1_epi32(*((const int32_t *)(qs + 12)))));
+    auto sumi3 = _mm256_add_epi16(_mm256_maddubs_epi16(v[4], _mm256_set1_epi32(*((const int32_t *)(qs + 16)))),
+                                  _mm256_maddubs_epi16(v[5], _mm256_set1_epi32(*((const int32_t *)(qs + 20)))));
+    auto sumi4 = _mm256_add_epi16(_mm256_maddubs_epi16(v[6], _mm256_set1_epi32(*((const int32_t *)(qs + 24)))),
+                                  _mm256_maddubs_epi16(v[7], _mm256_set1_epi32(*((const int32_t *)(qs + 28)))));
     auto sumi = _mm256_madd_epi16(_mm256_set1_epi16(1), _mm256_add_epi16(_mm256_add_epi16(sumi1, sumi2), _mm256_add_epi16(sumi3, sumi4)));
 #endif
     return sumi;
@@ -1137,22 +1137,33 @@ static void mul_mat_q4_0_r8_q8_2(int n, const void * vx, size_t bx, const DataIn
         return scales;
     };
     auto dot = [&qx] (const int8_t * qy) {
-        auto y4l = _mm_loadu_si128((const __m128i*)qy+0);
-        auto y4h = _mm_loadu_si128((const __m128i*)qy+1);
-        auto y8l = MM256_SET1_M128I(y4l);
-        auto y8h = MM256_SET1_M128I(y4h);
-        auto yl = _mm512_inserti32x8(_mm512_castsi256_si512(y8l), y8l, 1);
-        auto yh = _mm512_inserti32x8(_mm512_castsi256_si512(y8h), y8h, 1);
-        auto sumi = _mm512_setzero_si512();
-        sumi = _mm512_dpbusd_epi32(sumi, qx[0], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0x00)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[1], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0x55)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[2], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0xaa)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[3], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0xff)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[4], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0x00)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[5], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0x55)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[6], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0xaa)));
-        sumi = _mm512_dpbusd_epi32(sumi, qx[7], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0xff)));
-        return sumi;
+        auto sumi1 = _mm512_setzero_si512();
+        auto sumi2 = _mm512_setzero_si512();
+        sumi1 = _mm512_dpbusd_epi32(sumi1, qx[0], _mm512_set1_epi32(*(const int32_t *)(qy +  0)));
+        sumi2 = _mm512_dpbusd_epi32(sumi2, qx[1], _mm512_set1_epi32(*(const int32_t *)(qy +  4)));
+        sumi1 = _mm512_dpbusd_epi32(sumi1, qx[2], _mm512_set1_epi32(*(const int32_t *)(qy +  8)));
+        sumi2 = _mm512_dpbusd_epi32(sumi2, qx[3], _mm512_set1_epi32(*(const int32_t *)(qy + 12)));
+        sumi1 = _mm512_dpbusd_epi32(sumi1, qx[4], _mm512_set1_epi32(*(const int32_t *)(qy + 16)));
+        sumi2 = _mm512_dpbusd_epi32(sumi2, qx[5], _mm512_set1_epi32(*(const int32_t *)(qy + 20)));
+        sumi1 = _mm512_dpbusd_epi32(sumi1, qx[6], _mm512_set1_epi32(*(const int32_t *)(qy + 24)));
+        sumi2 = _mm512_dpbusd_epi32(sumi2, qx[7], _mm512_set1_epi32(*(const int32_t *)(qy + 28)));
+        return _mm512_add_epi32(sumi1, sumi2);
+        //auto y4l = _mm_loadu_si128((const __m128i*)qy+0);
+        //auto y4h = _mm_loadu_si128((const __m128i*)qy+1);
+        //auto y8l = MM256_SET1_M128I(y4l);
+        //auto y8h = MM256_SET1_M128I(y4h);
+        //auto yl = _mm512_inserti32x8(_mm512_castsi256_si512(y8l), y8l, 1);
+        //auto yh = _mm512_inserti32x8(_mm512_castsi256_si512(y8h), y8h, 1);
+        //auto sumi = _mm512_setzero_si512();
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[0], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0x00)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[1], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0x55)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[2], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0xaa)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[3], _mm512_shuffle_epi32(yl, _MM_PERM_ENUM(0xff)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[4], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0x00)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[5], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0x55)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[6], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0xaa)));
+        //sumi = _mm512_dpbusd_epi32(sumi, qx[7], _mm512_shuffle_epi32(yh, _MM_PERM_ENUM(0xff)));
+        //return sumi;
     };
     float d8[8*nrc_y];
     for (int ix = 0; ix < nrc_x; ix += 16) {
@@ -2234,22 +2245,22 @@ template <int nrc> struct Q80 {
     }
 
     template <typename Dequantizer>
-    inline void process_scales(int i, Dequantizer& deq, float16x4_t * sc16, float32x4_t * /*acc*/) const {
+    inline void process_scales(int i, Dequantizer& deq, float32x4_t * sc16, float32x4_t * /*acc*/) const {
         auto qx_scales = deq.new_block(i);
         for (int iy = 0; iy < nrc; ++iy) {
             auto q8_scales = load_scales(iy, i);
-            sc16[iy] = vmul_f16(qx_scales, q8_scales);
+            sc16[iy] = vmulq_f32(vcvt_f32_f16(qx_scales), vcvt_f32_f16(q8_scales));
         }
     }
 
     template <typename Dequantizer>
-    inline void process_scales(int i, Dequantizer& deq1, Dequantizer& deq2, float16x4_t * sc16, float32x4_t * /*acc*/) const {
+    inline void process_scales(int i, Dequantizer& deq1, Dequantizer& deq2, float32x4_t * sc16, float32x4_t * /*acc*/) const {
         auto qx_scales_1 = deq1.new_block(i);
         auto qx_scales_2 = deq2.new_block(i);
         for (int iy = 0; iy < nrc; ++iy) {
             auto q8_scales = load_scales(iy, i);
-            sc16[iy      ] = vmul_f16(qx_scales_1, q8_scales);
-            sc16[iy+nrc_y] = vmul_f16(qx_scales_2, q8_scales);
+            sc16[iy      ] = vmulq_f32(vcvt_f32_f16(qx_scales_1), vcvt_f32_f16(q8_scales));
+            sc16[iy+nrc_y] = vmulq_f32(vcvt_f32_f16(qx_scales_2), vcvt_f32_f16(q8_scales));
         }
     }
 
@@ -2286,30 +2297,30 @@ template <int nrc> struct Q81 {
     }
 
     template <typename Dequantizer>
-    inline void process_scales(int i, Dequantizer& deq, float16x4_t * sc16, float32x4_t * acc) const {
+    inline void process_scales(int i, Dequantizer& deq, float32x4_t * sc16, float32x4_t * acc) const {
         auto qx_scales = deq.new_block(i);
         for (int iy = 0; iy < nrc; ++iy) {
             auto q8_scales = load_scales(iy, i);
-            auto m = vmul_f16(vget_high_f16(qx_scales), vget_high_f16(q8_scales));
-            acc[iy] = vaddq_f32(acc[iy], vcvt_f32_f16(m));
-            sc16[iy] = vmul_f16(vget_low_f16(qx_scales), vget_low_f16(q8_scales));
+            auto m = vmulq_f32(vcvt_f32_f16(vget_high_f16(qx_scales)), vcvt_f32_f16(vget_high_f16(q8_scales)));
+            acc[iy] = vaddq_f32(acc[iy], m);
+            sc16[iy] = vmulq_f32(vcvt_f32_f16(vget_low_f16(qx_scales)), vcvt_f32_f16(vget_low_f16(q8_scales)));
         }
     }
 
     template <typename Dequantizer>
-    inline void process_scales(int i, Dequantizer& deq1, Dequantizer& deq2, float16x4_t * sc16, float32x4_t * acc) const {
+    inline void process_scales(int i, Dequantizer& deq1, Dequantizer& deq2, float32x4_t * sc16, float32x4_t * acc) const {
         auto qx_scales_1 = deq1.new_block(i);
         auto qx_scales_2 = deq2.new_block(i);
         for (int iy = 0; iy < nrc; ++iy) {
             auto q8_scales = load_scales(iy, i);
             auto q8_scales_l = vget_low_f16(q8_scales);
             auto q8_scales_h = vget_high_f16(q8_scales);
-            auto m1 = vmul_f16(vget_high_f16(qx_scales_1), q8_scales_h);
-            auto m2 = vmul_f16(vget_high_f16(qx_scales_2), q8_scales_h);
-            acc[iy       ] = vaddq_f32(acc[iy      ], vcvt_f32_f16(m1));
-            acc[iy+nrc_y ] = vaddq_f32(acc[iy+nrc_y], vcvt_f32_f16(m2));
-            sc16[iy      ] = vmul_f16(vget_low_f16(qx_scales_1), q8_scales_l);
-            sc16[iy+nrc_y] = vmul_f16(vget_low_f16(qx_scales_2), q8_scales_l);
+            auto m1 = vmulq_f32(vcvt_f32_f16(vget_high_f16(qx_scales_1)), vcvt_f32_f16(q8_scales_h));
+            auto m2 = vmulq_f32(vcvt_f32_f16(vget_high_f16(qx_scales_2)), vcvt_f32_f16(q8_scales_h));
+            acc[iy       ] = vaddq_f32(acc[iy      ], m1);
+            acc[iy+nrc_y ] = vaddq_f32(acc[iy+nrc_y], m2);
+            sc16[iy      ] = vmulq_f32(vcvt_f32_f16(vget_low_f16(qx_scales_1)), vcvt_f32_f16(q8_scales_l));
+            sc16[iy+nrc_y] = vmulq_f32(vcvt_f32_f16(vget_low_f16(qx_scales_2)), vcvt_f32_f16(q8_scales_l));
         }
     }
 
@@ -2613,20 +2624,20 @@ struct DequantizerQ51 final : public BaseLegacyDequantizer<block_q5_1> {
 };
 
 template <typename Dequantizer, typename Q8>
-inline void sum_4(int i, Dequantizer& deq, const Q8& q8, const float16x4_t * sc16, float32x4_t * acc) {
+inline void sum_4(int i, Dequantizer& deq, const Q8& q8, const float32x4_t * sc16, float32x4_t * acc) {
     for (int iy = 0; iy < Q8::nrc_y; ++iy) {
         auto pall = sum_4_blocks(deq.bits.b, q8.quant_data(iy, i));
-        auto scale = vcvt_f32_f16(sc16[iy]);
+        auto scale = sc16[iy];
         acc[iy] = vmlaq_f32(acc[iy], scale, vcvtq_f32_s32(pall));
     }
 }
 
 template <typename Dequantizer, typename Q8>
-inline void sum_4(int i, Dequantizer& deq1, Dequantizer& deq2, const Q8& q8, const float16x4_t * sc16, float32x4_t * acc) {
+inline void sum_4(int i, Dequantizer& deq1, Dequantizer& deq2, const Q8& q8, const float32x4_t * sc16, float32x4_t * acc) {
     for (int iy = 0; iy < Q8::nrc_y; ++iy) {
         auto pall = sum_4_blocks(deq1.bits.b, deq2.bits.b, q8.quant_data(iy, i));
-        auto scale1 = vcvt_f32_f16(sc16[iy]);
-        auto scale2 = vcvt_f32_f16(sc16[iy+Q8::nrc_y]);
+        auto scale1 = sc16[iy];
+        auto scale2 = sc16[iy+Q8::nrc_y];
         acc[iy] = vmlaq_f32(acc[iy], scale1, vcvtq_f32_s32(pall.val[0]));
         acc[iy+Q8::nrc_y] = vmlaq_f32(acc[iy+Q8::nrc_y], scale2, vcvtq_f32_s32(pall.val[1]));
     }
@@ -2636,7 +2647,7 @@ template <typename Dequantizer, typename Q8>
 inline void mul_mat_qX_Y_q8_Y(int n, Dequantizer& deq, Q8& q8, const DataInfo& info, int nrc_x) {
     const int nb = n / QK4_1;
 
-    float16x4_t sc16[Q8::nrc_y];
+    float32x4_t sc16[Q8::nrc_y];
 
     for (int ix = 0; ix < nrc_x; ++ix) {
 
@@ -2663,7 +2674,7 @@ template <typename Dequantizer, typename Q8>
 inline void mul_mat_qX_Y_q8_Y_IK(int n, Dequantizer& deq1, Dequantizer& deq2, Q8& q8, const DataInfo& info, int nrc_x) {
     const int nb = n / QK4_1;
 
-    float16x4_t sc16[2*Q8::nrc_y];
+    float32x4_t sc16[2*Q8::nrc_y];
     float32x4_t acc[2*Q8::nrc_y];
 
     for (int ix = 0; ix < nrc_x; ix += 2) {
@@ -2692,7 +2703,7 @@ template <typename Dequantizer, typename Q8>
 inline void mul_mat_qX_Y_q8_Y_1(int n, Dequantizer& deq1, Dequantizer& deq2, Q8& q8, const DataInfo& info, int nrc_x) {
     const int nb = n / QK4_1;
 
-    float16x4_t sc16[2];
+    float32x4_t sc16[2];
 
     for (int ix = 0; ix < nrc_x; ++ix) {
 
@@ -3319,9 +3330,11 @@ bool iqk_set_kernels_legacy_quants(int ne00, int typeA, int typeB, std::array<mu
         case GGML_TYPE_MXFP4:
             IQK_SET_MUL_MAT_FUNCTIONS_T(mul_mat_qX_0_q8_0, DequantizerMXFP4, kernels);
             break;
+#if 0
         case GGML_TYPE_Q4_0_R8:
             IQK_SET_MUL_MAT_FUNCTIONS_T(mul_mat_qx_r8_q8_0, Q4_0_R8_Dequantizer, kernels);
             break;
+#endif
         case GGML_TYPE_Q5_0_R4:
             IQK_SET_MUL_MAT_FUNCTIONS_T(mul_mat_qx_r4_q8_0, Q5_0_R4_Dequantizer, kernels);
             break;
