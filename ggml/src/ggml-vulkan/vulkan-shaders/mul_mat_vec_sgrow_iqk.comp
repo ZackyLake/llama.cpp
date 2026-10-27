@@ -226,6 +226,9 @@ void write_sgrow_result(FLOAT_TYPE temp[NUM_COLS], const uint32_t d_offset, cons
             const uint expert_i0 = gl_GlobalInvocationID.y;
             result *= FLOAT_TYPE(data_fuse1[expert_i0]);
         }
+        if (expert_skip) {
+            result = FLOAT_TYPE(0);
+        }
 #else
         if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
             result += FLOAT_TYPE(data_fuse0[j*p.batch_stride_d + d_offset + first_row + row]);
