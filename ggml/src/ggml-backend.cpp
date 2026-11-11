@@ -2433,7 +2433,7 @@ static bool ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
         for (int i = 0; i < sched->n_prefetched; i++) {
             if (sched->prefetched[i] == input) {
                 ggml_backend_event_synchronize(sched->prefetch_events[sched->prefetch_backend_id]);
-                return;
+                return false;
             }
         }
     }

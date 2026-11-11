@@ -13427,9 +13427,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                             if (!with_gate && glu_op != GGML_GLU_OP_SWIGLU) {
                                 continue;
                             }
-                            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+                            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                                 use_id, 16, 8, b, with_bias, with_gate, false));
-                            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+                            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                                 use_id, 16, 8, b, with_bias, with_gate, false, {1, 1}));
                         }
                     }
@@ -13457,9 +13457,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                             if (!with_gate && glu_op != GGML_GLU_OP_SWIGLU) {
                                 continue;
                             }
-                            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+                            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                                 use_id, 16, 8, b, with_bias, with_gate, false));
-                            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+                            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                                 use_id, 16, 8, b, with_bias, with_gate, false, {1, 1}));
                         }
                     }
@@ -13470,13 +13470,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     for (ggml_type type : iqk_types) {
         for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI}) {
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, true));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, true));
         }
     }
@@ -13484,25 +13484,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // m is the src1 (cur) row count, unconstrained; n = 32 is the src0 (gate/up) row count,
         // a multiple of nrows_interleaved so the interleaved super-blocks divide evenly
         for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI}) {
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, true));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, true));
         }
     }
     for (ggml_type type : iqk_legacy_types) {
         for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU, GGML_GLU_OP_SWIGLU_OAI}) {
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, false));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 false, 1, 1, false, false, true, false, {1, 1}, false, true));
-            test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, 32, 256,
+            test_cases.emplace_back(new test_mul_mat_fusion(type, glu_op, 1, 32, 256,
                 true, 16, 8, false, false, true, false, {1, 1}, false, true));
         }
     }
@@ -14072,7 +14072,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_a : target_types) {
                 for (ggml_type type_b : {GGML_TYPE_F32}) {
                     test_cases.emplace_back(new test_mul_mat(type_a, type_b, 5120, bs, 17408, {1,  1}, {1, 1}));
-                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                    test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                         bs, 17408, 5120, false, 1, 1, false, false, true, false, {1, 1}, false, false));
                 }
             }
@@ -14083,7 +14083,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_a : target_types) {
                 for (ggml_type type_b : {GGML_TYPE_F32}) {
                     test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 512, bs, 2048, 1));
-                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                    test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                         bs, 512, 2048, true, 256, 8, true, false, true, false, {1, 1}, false, true));
                 }
             }
@@ -14094,7 +14094,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_a : target_types) {
                 for (ggml_type type_b : {GGML_TYPE_F32}) {
                     test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 1024, bs, 3072, 1));
-                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                    test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                         bs, 1024, 3072, true, 256, 8, true, false, true, false, {1, 1}, false, true));
                 }
             }
@@ -14105,7 +14105,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_a : target_types) {
                 for (ggml_type type_b : {GGML_TYPE_F32}) {
                     test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 512, 10, false, 1024, bs, 4096, 1));
-                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                    test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                         bs, 1024, 4096, true, 512, 10, true, false, true, false, {1, 1}, false, true));
                 }
             }
@@ -14116,7 +14116,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             for (ggml_type type_a : target_types) {
                 for (ggml_type type_b : {GGML_TYPE_F32}) {
                     test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 256, 8, false, 1536, bs, 3072, 1));
-                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                    test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                         bs, 1536, 3072, true, 256, 8, true, false, true, false, {1, 1}, false, false));
                 }
             }
@@ -14126,7 +14126,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         for (int bs : {1, 2, 512}) {
             for (ggml_type type_a : target_types) {
                 test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, GGML_TYPE_F32, 256, 6, false, 2048, bs, 4096, 1));
-                // test_cases.emplace_back(new test_mul_mat_vec_fusion(type_a, GGML_GLU_OP_SWIGLU,
+                // test_cases.emplace_back(new test_mul_mat_fusion(type_a, GGML_GLU_OP_SWIGLU,
                 //     bs, 2048, 4096, true, 256, 6, true, false, true, false, {1, 1}, false, false));
             }
         }

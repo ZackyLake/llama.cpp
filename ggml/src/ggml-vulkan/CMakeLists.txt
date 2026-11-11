@@ -201,8 +201,9 @@ if (Vulkan_FOUND)
         # would be installed into the DESTDIR prefix, so it is unset
         # to ensure that does not happen.
 
+        # Set the prefix per config: the shared external cache keeps only the last configured prefix
         INSTALL_COMMAND ${CMAKE_COMMAND} -E env --unset=DESTDIR
-                        ${CMAKE_COMMAND} --install . --config $<CONFIG>
+                        ${CMAKE_COMMAND} --install . --config $<CONFIG> --prefix ${CMAKE_BINARY_DIR}/$<CONFIG>
     )
 
     set (_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
