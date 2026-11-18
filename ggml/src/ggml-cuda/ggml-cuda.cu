@@ -1888,10 +1888,10 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
             // for types without row meta nrows*ne[0] is the flat element count,
             // and for row-aware types it is the required layout.
             convert_func(src0->data, src0_alloc.get(), ggml_nrows(src0), src0->ne[0], main_stream);
-            const size_t src0_bs = ggml_blck_size(src0->type);
-            s01 *= src0_bs;
-            s02 *= src0_bs;
-            s03 *= src0_bs;
+            const size_t src0_rs = ggml_row_size(src0->type, ne00);
+            s01 = nb01 / src0_rs * ne00;
+            s02 = nb02 / src0_rs * ne00;
+            s03 = nb03 / src0_rs * ne00;
         } else {
             const auto convert_func = traits::convert_nc(src0->type);
             GGML_ASSERT(convert_func != nullptr);

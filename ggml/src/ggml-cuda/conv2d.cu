@@ -418,7 +418,7 @@ void ggml_cuda_op_conv2d(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         const half *               K_H = (const half *) K_D;
         if (kernel->type == GGML_TYPE_F32) {
             K_H = k_half.alloc(ggml_nelements(kernel));
-            ggml_get_to_fp16_cuda(GGML_TYPE_F32)(K_D, k_half.get(), ggml_nelements(kernel), st);
+            ggml_get_to_fp16_cuda(GGML_TYPE_F32)(K_D, k_half.get(), ggml_nrows(kernel), kernel->ne[0], st);
         }
         const conv_params padded_params = { pw, ph, OW, OH, KW, KH, ST_X, ST_Y, 0, 0, DL_X, DL_Y, IC, OC, B, total };
         if (use_blas) {
