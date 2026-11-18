@@ -19,6 +19,7 @@
 #include <sstream>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <cstring>
 #include <type_traits>
 #include <atomic>
@@ -1638,70 +1639,86 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("invalid type for \"enable_thinking\" (expected boolean, got string)");
     }
 
-    int reasoning_budget = json_value(body, "reasoning_budget_tokens",
-                            json_value(body, "thinking_budget_tokens", -1));
-    if (reasoning_budget == -1) {
-        reasoning_budget = opt.reasoning_budget;
-    }
-    const auto handle_effort = [&](const auto& effort) -> bool {
-        if (effort == "none") {
-            inputs.chat_template_kwargs.erase("reasoning_effort");
-            reasoning_budget = 0;
-            inputs.enable_thinking = false;
-            return true;
-        }
-        float percent = 0.f;
-        if (effort == "auto" || effort == "default") percent = 0.f;
-        else if (effort == "xhigh") percent = 0.95f;
-        else if (effort == "high") percent = 0.80f;
-        else if (effort == "medium") percent = 0.50f;
-        else if (effort == "low") percent = 0.20f;
-        else if (effort == "minimal") percent = 0.10f;
-        else { LOG_WRN("ignore unknown reasoning.effort [%s]", effort.c_str()); }
-        if (percent > 0) {
-            const auto rejected = caps.at("reasoning_effort_rejected").get<std::vector<std::string>>();
-            if (std::find(rejected.begin(), rejected.end(), effort) != rejected.end()) {
-                const auto levels = caps.at("reasoning_effort_levels").get<std::vector<std::string>>();
-                throw std::invalid_argument("reasoning_effort \"" + effort + "\" is not supported by the chat template, supported levels: " + string_join(levels, ", "));
-            }
-            auto max_output_tokens = body.value("max_tokens", 65536); // TODO use n_ctx ??
-            inputs.chat_template_kwargs["reasoning_effort"] = "\"" + effort + "\"";
-            reasoning_budget = static_cast<int>(max_output_tokens * percent);
-            inputs.enable_thinking = true;
-            return true;
-        }
-        return false;
-    };
-    // OpenRouter compatible API
-    if (reasoning_budget == -1 && body.contains("reasoning")) {
-        const auto& reasoning = body["reasoning"];
+    // effort goes to the template if supported, otherwise it becomes a budget
+    const bool caps_support_effort = caps.at("supports_reasoning_effort").get<bool>();
+    const auto caps_levels   = caps.at("reasoning_effort_levels").get<std::vector<std::string>>();
+    const auto caps_rejected = caps.at("reasoning_effort_rejected").get<std::vector<std::string>>();
 
+    // collect the request values, the later enable_thinking position wins, -1 means unset
+    std::optional<bool>        req_enabled;
+    int                        req_budget     = -1; // reasoning_budget_tokens, thinking_budget_tokens, thinking_budget
+    int                        req_max_tokens = -1; // reasoning.max_tokens, only used to convert effort
+    std::optional<std::string> req_effort;
+
+    if (chat_template_kwargs_object.contains("enable_thinking") && chat_template_kwargs_object.at("enable_thinking").is_boolean()) {
+        req_enabled = chat_template_kwargs_object.at("enable_thinking").get<bool>();
+    }
+    if (body.contains("reasoning")) {
+        const auto & reasoning = body.at("reasoning");
         if (reasoning.is_boolean()) {
-            bool enabled = reasoning.get<bool>();
-            inputs.enable_thinking = enabled;
+            req_enabled = reasoning.get<bool>();
         } else if (reasoning.is_object()) {
-            handle_effort(reasoning.value("effort", "auto"));
-            auto reasoning_max_tokens = reasoning.value("max_tokens", -1);
-            if (reasoning_max_tokens >= 0) {
-                reasoning_budget = reasoning_max_tokens;
+            if (reasoning.contains("enabled") && reasoning.at("enabled").is_boolean()) {
+                req_enabled = reasoning.at("enabled").get<bool>();
             }
-            bool enabled = reasoning.value("enabled", true);
-            inputs.enable_thinking &= enabled;
+            req_max_tokens = json_value(reasoning, "max_tokens", -1);
+            if (reasoning.contains("effort") && reasoning.at("effort").is_string()) {
+                req_effort = reasoning.at("effort").get<std::string>();
+            }
         }
     }
-    if (reasoning_budget == -1 && body.contains("enable_thinking")) {
-        const auto& reasoning = body["enable_thinking"];
-        if (reasoning.is_boolean()) {
-            bool enabled = reasoning.get<bool>();
-            inputs.enable_thinking = enabled;
+    if (body.contains("enable_thinking") && body.at("enable_thinking").is_boolean()) {
+        req_enabled = body.at("enable_thinking").get<bool>();
+    }
+
+    // the budget fields are one value, the first one set wins
+    req_budget = json_value(body, "reasoning_budget_tokens",
+                    json_value(body, "thinking_budget_tokens",
+                        json_value(body, "thinking_budget", -1)));
+    if (body.contains("reasoning_effort") && body.at("reasoning_effort").is_string()) {
+        req_effort = body.at("reasoning_effort").get<std::string>();
+    }
+
+    if (req_budget == 0 || (req_effort && *req_effort == "none")) {
+        req_enabled = false;
+    }
+    if (req_effort && *req_effort == "none") {
+        inputs.chat_template_kwargs.erase("reasoning_effort");
+    }
+
+    int budget = req_budget;
+    const bool thinking_off = req_enabled.has_value() && !*req_enabled;
+    if (!thinking_off && req_effort && *req_effort != "auto" && *req_effort != "default") {
+        const std::string & effort = *req_effort;
+        if (caps_support_effort) {
+            if (std::find(caps_rejected.begin(), caps_rejected.end(), effort) != caps_rejected.end()) {
+                throw std::invalid_argument("reasoning_effort \"" + effort + "\" is not supported by the chat template, supported levels: " + string_join(caps_levels, ", "));
+            }
+            inputs.chat_template_kwargs["reasoning_effort"] = "\"" + effort + "\"";
+        } else if (budget < 0) {
+            float percent = 0.f;
+            if (effort == "xhigh") percent = 0.95f;
+            else if (effort == "high") percent = 0.80f;
+            else if (effort == "medium") percent = 0.50f;
+            else if (effort == "low") percent = 0.20f;
+            else if (effort == "minimal") percent = 0.10f;
+            else { LOG_WRN("ignore unknown reasoning.effort [%s]", effort.c_str()); }
+            if (percent > 0) {
+                const int max_output_tokens = req_max_tokens >= 0 ? req_max_tokens : body.value("max_tokens", 65536); // TODO use n_ctx ??
+                budget = static_cast<int>(max_output_tokens * percent);
+            }
         }
     }
-    if (reasoning_budget == -1 && inputs.enable_thinking && body.contains("thinking_budget")) {
-        reasoning_budget = json_value(body, "thinking_budget", -1);
+
+    // no explicit enable_thinking, but the request sets a budget or an effort
+    const bool has_effort = req_effort.has_value() && *req_effort != "auto" && *req_effort != "default";
+    if (!req_enabled && (budget >= 0 || has_effort)) {
+        req_enabled = true;
     }
-    if (reasoning_budget == -1 && inputs.enable_thinking && body.contains("reasoning_effort")) {
-        handle_effort(body.value("reasoning_effort", "auto"));
+    if (req_enabled) {
+        inputs.enable_thinking = *req_enabled;
     }
+    const int reasoning_budget = budget >= 0 ? budget : opt.reasoning_budget;
     {
         json dumpinfo = body;
         dumpinfo.erase("messages");
