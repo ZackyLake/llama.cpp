@@ -7547,6 +7547,21 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.IQ1_M_R4: (32,    7),
 }
 
+GGML_QUANT_ROW_META_SIZES: dict[GGMLQuantizationType, int] = {
+    GGMLQuantizationType.IQ4_KSS: 4,
+    GGMLQuantizationType.IQ2_KS:  2,
+    GGMLQuantizationType.IQ3_KS:  2,
+    GGMLQuantizationType.IQ4_KS:  4,
+    GGMLQuantizationType.IQ5_KS:  4,
+    GGMLQuantizationType.IQ2_KL:  2,
+    GGMLQuantizationType.IQ1_KT:  4,
+    GGMLQuantizationType.IQ2_KT:  4,
+    GGMLQuantizationType.IQ3_KT:  4,
+    GGMLQuantizationType.IQ4_KT:  4,
+    GGMLQuantizationType.IQ1_S_R4: 2,
+    GGMLQuantizationType.IQ1_M_R4: 2,
+}
+
 
 # Aliases for backward compatibility.
 

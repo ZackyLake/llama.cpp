@@ -1,11 +1,11 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Sequence
-from math import log2, ceil
+from math import log2, ceil, prod
 
 from numpy.typing import DTypeLike
 
-from .constants import GGML_QUANT_SIZES, GGMLQuantizationType, QK_K
+from .constants import GGML_QUANT_ROW_META_SIZES, GGML_QUANT_SIZES, GGMLQuantizationType, QK_K
 from .lazy import LazyNumpyTensor
 
 import numpy as np
@@ -15,14 +15,33 @@ def quant_shape_to_byte_shape(shape: Sequence[int], quant_type: GGMLQuantization
     block_size, type_size = GGML_QUANT_SIZES[quant_type]
     if shape[-1] % block_size != 0:
         raise ValueError(f"Quantized tensor row size ({shape[-1]}) is not a multiple of {quant_type.name} block size ({block_size})")
-    return (*shape[:-1], shape[-1] // block_size * type_size)
+    row_elements = int(shape[-1])
+    row_meta_size = GGML_QUANT_ROW_META_SIZES.get(quant_type, 0) if row_elements else 0
+    return (*shape[:-1], row_meta_size + row_elements // block_size * type_size)
 
 
 def quant_shape_from_byte_shape(shape: Sequence[int], quant_type: GGMLQuantizationType) -> tuple[int, ...]:
     block_size, type_size = GGML_QUANT_SIZES[quant_type]
-    if shape[-1] % type_size != 0:
-        raise ValueError(f"Quantized tensor bytes per row ({shape[-1]}) is not a multiple of {quant_type.name} type size ({type_size})")
-    return (*shape[:-1], shape[-1] // type_size * block_size)
+    row_meta_size = GGML_QUANT_ROW_META_SIZES.get(quant_type, 0) if shape[-1] else 0
+    row_payload_size = int(shape[-1]) - row_meta_size
+    if row_payload_size < 0 or row_payload_size % type_size != 0:
+        raise ValueError(f"Invalid quantized tensor row size ({shape[-1]}) for {quant_type.name}")
+    return (*shape[:-1], row_payload_size // type_size * block_size)
+
+
+def quant_nbytes(shape: Sequence[int], quant_type: GGMLQuantizationType) -> int:
+    if not shape:
+        raise ValueError("Tensor shape must have at least one dimension")
+    if any(int(dim) <= 0 for dim in shape):
+        return 0
+
+    block_size, type_size = GGML_QUANT_SIZES[quant_type]
+    row_elements = int(shape[-1])
+    if row_elements % block_size != 0:
+        raise ValueError(f"Quantized tensor row size ({row_elements}) is not a multiple of {quant_type.name} block size ({block_size})")
+
+    row_bytes = GGML_QUANT_ROW_META_SIZES.get(quant_type, 0) + row_elements // block_size * type_size
+    return prod(int(dim) for dim in shape[:-1]) * row_bytes
 
 
 # This is faster than np.vectorize and np.apply_along_axis because it works on more than one row at a time
